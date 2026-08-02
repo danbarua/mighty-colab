@@ -1,6 +1,7 @@
-# Colab CLI
+# Mighty-Colab: A Mightier Interface for Colab
 
-A command-line interface for Google Colab. Provision high-performance CPU, GPU, and TPU runtimes, execute local code, manage remote files, and orchestrate automated cloud pipelines — directly from your terminal.
+A command-line interface for Google Colab with quality-of-life improvements for humans and AI agents.
+Provision high-performance CPU, GPU, and TPU runtimes, execute local code, manage remote files, and orchestrate automated cloud pipelines — directly from your terminal, or via embedded MCP server.
 
 Designed to support seamless developer productivity, headless automation, and AI agent integrations.
 
@@ -10,7 +11,10 @@ Designed to support seamless developer productivity, headless automation, and AI
 > **Platform support:** the Colab CLI currently supports **Linux and macOS** only. Windows is not supported at this time.
 
 > [!TIP]
-> Looking for in-notebook, interactive agent-assisted coding instead of a terminal workflow? See the [Colab MCP Server](https://github.com/googlecolab/colab-mcp).
+> Looking for in-notebook, interactive agent-assisted coding instead of a terminal workflow? See the [Official Colab MCP Server](https://github.com/googlecolab/colab-mcp).
+
+> [!TIP]
+> TODO: This project intends to embed and extend a [Community Fork](https://github.com/SebastianGilPinzon/colab-mcp) of the Colab MCP Server.
 
 ---
 
@@ -31,10 +35,9 @@ Install the package using `uv` (recommended) or standard `pip`:
 
 ```bash
 # Using uv (recommended)
-uv tool install google-colab-cli
-
+uv tool install mighty-colab
 # Using pip
-pip install google-colab-cli
+pip install mighty-colab
 ```
 
 ---
