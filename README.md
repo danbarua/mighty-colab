@@ -46,9 +46,9 @@ Install the package using `uv` (recommended) or standard `pip`:
 
 ```bash
 # Using uv (recommended)
-uv tool install mighty-colab
+uv tool install mighty-colab --index https://us-central1-python.pkg.dev/mighty-colab/python-repo/simple/
 # Using pip
-pip install mighty-colab
+pip install mighty-colab --extra-index-url https://us-central1-python.pkg.dev/mighty-colab/python-repo/simple/
 ```
 
 ---
@@ -72,6 +72,33 @@ mighty-colab stop
 > When only one session is active, you can omit the `-s, --session` option;
 > the CLI automatically knows it.
 
+---
+
+## MCP Server Configuration
+
+`mighty-colab` embeds an MCP (Model Context Protocol) server, exposing its commands as
+tools for AI agents like Claude. Since the package is hosted on a private index (see
+[Installation](#installation)), point your MCP client's `uvx` invocation at that same
+index rather than installing the tool separately:
+
+```json
+{
+  "mcpServers": {
+    "mighty-colab": {
+      "command": "uvx",
+      "args": [
+        "--index",
+        "https://us-central1-python.pkg.dev/mighty-colab/python-repo/simple/",
+        "mighty-colab",
+        "mcp"
+      ]
+    }
+  }
+}
+```
+
+See [MCP Server Design](docs/07_mcp_server.md) for which commands are exposed as tools
+and how global flags (`--auth`, `--config`) can be added to `args`.
 
 ---
 
