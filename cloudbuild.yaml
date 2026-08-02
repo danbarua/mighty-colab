@@ -15,14 +15,16 @@ steps:
       - -c
       - |
         set -e
-        # 1. Fetch all tags and unshallow the repo
-        git fetch --tags --force --unshallow 2>/dev/null || git fetch --tags --force
+        # 1. Specifically fetch the tag that triggered the build from the remote
+        git fetch --depth=1 origin +refs/tags/${TAG_NAME}:refs/tags/${TAG_NAME}
         
-        # 2. EXPLICITLY checkout the tag that triggered this build
-        git checkout $TAG_NAME
+        # 2. Force the checkout to that tag
+        git checkout -f ${TAG_NAME}
         
         echo "TAG_NAME=${TAG_NAME}"
+        echo "Current commit: $(git rev-parse HEAD)"
         echo "git describe: $(git describe --tags --always)"
+
 
 
   # 2. Build sdist + wheel into dist/ using uv.
