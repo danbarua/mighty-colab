@@ -15,9 +15,15 @@ steps:
       - -c
       - |
         set -e
+        # 1. Fetch all tags and unshallow the repo
         git fetch --tags --force --unshallow 2>/dev/null || git fetch --tags --force
+        
+        # 2. EXPLICITLY checkout the tag that triggered this build
+        git checkout $TAG_NAME
+        
         echo "TAG_NAME=${TAG_NAME}"
         echo "git describe: $(git describe --tags --always)"
+
 
   # 2. Build sdist + wheel into dist/ using uv.
   - id: build
