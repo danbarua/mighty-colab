@@ -91,7 +91,7 @@ CONFIG_PATH = os.environ["MCP_CONFIG_PATH"]
 SESSION_NAME = os.environ["MCP_SESSION_NAME"]
 SCRIPT_PATH = os.environ["MCP_SCRIPT_PATH"]
 
-EXCLUDED_COMMANDS = {"ssh", "repl", "console", "edit", "drivemount", "mcp", "help"}
+EXCLUDED_COMMANDS = {"ssh", "repl", "console", "edit", "drivemount", "mcp", "help", "pay"}
 EXPECTED_COMMANDS = {"new", "status", "stop", "sessions", "adopt", "exec"}
 
 

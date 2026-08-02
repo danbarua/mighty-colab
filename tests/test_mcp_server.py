@@ -58,7 +58,7 @@ def test_excludes_interactive_and_internal_commands(click_group, tools_and_comma
     names = {t.name for t in tools}
 
     assert names.isdisjoint(EXCLUDED_COMMANDS)
-    for interactive in ("ssh", "repl", "console", "edit", "drivemount", "mcp", "help"):
+    for interactive in ("ssh", "repl", "console", "edit", "drivemount", "mcp", "help", "pay"):
         assert interactive not in names
 
 

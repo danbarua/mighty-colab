@@ -50,7 +50,8 @@ EXCLUDED_COMMANDS = {
     "edit",  # blocks on launching the local $EDITOR
     "drivemount",  # can block on /dev/tty for a Drive re-auth ceremony
     "mcp",  # the MCP server command itself
-    "help",  # redundant with MCP's own tool discovery
+    "help",  # redundant with MCP's own tool discovery,
+    "pay" # user-facing accounts + billing
 }
 
 
