@@ -10,7 +10,7 @@ Operate Google Colab environments via the `colab` CLI: provision GPU/TPU session
 ## Installation
 
 If the user does not already have the `colab` tool installed, it can be acquired
-by running `uv tool install google-colab-cli` or `pip install google-colab-cli`.
+by running `uv tool install mighty-colab` or `pip install mighty-colab`.
 
 ## When to activate
 - Creating or managing TPU/GPU sessions.

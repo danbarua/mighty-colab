@@ -37,7 +37,7 @@ from colab_cli.common import state
 from colab_cli.state import Settings
 
 # PyPI distribution name (different from the importable package name `colab`).
-PYPI_PACKAGE_NAME = "google-colab-cli"
+PYPI_PACKAGE_NAME = "mighty-colab"
 
 
 # ---------- Version detection -------------------------------------------
@@ -51,7 +51,7 @@ def is_self_install_supported() -> bool:
 def get_app_version() -> str:
     """Return the installed package version, falling back to the git short hash."""
     try:
-        return installed_version("google-colab-cli")
+        return installed_version("mighty-colab")
     except (PackageNotFoundError, InvalidVersion):
         pass
 

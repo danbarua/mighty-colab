@@ -4,11 +4,11 @@ log:
 2026-06-01: Enabled `colab update --install` self-update on macOS in addition to Linux. Refactored platform check logic to keep the implementation DRY and updated both tests and documentation. Also, on these platforms, an additional message is shown recommending `colab update --install` to upgrade in place, positioned above the standard `pip`/`uv` installation command.
 2026-05-29: Added default OAuth2 client config (`oauth_config.json`) as a bundled package resource and restored fallback loading logic in `get_credentials()`. The CLI now falls back to using these default credentials when no explicit local config is found. Added `integration/repro_bundled_oauth` integration test.
 2026-05-27: Refactored `colab README` and `colab AGENT` to bundle `README.md` and `AGENTS.md` via Hatchling's `force-include` and read them using `importlib.resources` instead of `importlib.metadata`. `colab AGENT` now correctly prints `AGENTS.md`.
-2026-05-27: Extended `colab update --install` to detect if the CLI was installed via `uv tool install` (by checking if `sys.executable` contains `/uv/`) and if so, use `uv tool install -U google-colab-cli` to upgrade.
-2026-05-27: Updated auto-update upgrade hint to recommend `pip install --upgrade google-colab-cli` instead of `colab`, aligning with the PyPI package name.
+2026-05-27: Extended `colab update --install` to detect if the CLI was installed via `uv tool install` (by checking if `sys.executable` contains `/uv/`) and if so, use `uv tool install -U mighty-colab` to upgrade.
+2026-05-27: Updated auto-update upgrade hint to recommend `pip install --upgrade mighty-colab` instead of `colab`, aligning with the PyPI package name.
 2026-05-27: `colab url` now emits BOTH the `?dbu=<urlencoded path>` query parameter (existing) AND a new `#datalabBackendUrl=<full URL>` hash fragment (new). Format: `https://<host>/notebooks/empty.ipynb?dbu=%2Ftun%2Fm%2F<endpoint>#datalabBackendUrl=<host>/tun/m/<endpoint>`. Why both: some Colab frontend code paths consult the hash fragment first and ignore `dbu` entirely, so the previously-emitted query-only form failed silently for those users (the frontend fell through to allocating a fresh VM via `/tun/m/assign`). The fragment value is a FULL URL with scheme + host (NOT just the path) and is emitted RAW (no URL encoding) because browsers don't decode the fragment before passing `location.hash` to page JS — Colab's parser calls `new URL(rawString)` directly. The fragment host always matches `--host` so Colab's same-origin enforcement on embedded backend URLs doesn't block the connection, and sandbox/dev users (`--host https://colab.sandbox.google.com`) get a sandbox fragment automatically. Three new test cases in `tests/test_url.py` cover the raw-encoding requirement (`%3A`/`%2F` must NOT appear in the fragment), the both-signals-present invariant, and `--open` propagating the fragment to `webbrowser.open()`. Integration-verified live against synthetic session state with three host shapes (default, sandbox, trailing-slash); all produced correctly-shaped URLs with no `//` artifacts.
 2026-05-07: Added a developer-only `colab whoami` subcommand (hidden from `colab --help`). Mints an access token via the same `auth.get_credentials(...)` path the rest of the CLI uses (honoring the global `--auth=...` flag), refreshes the credentials, then queries `https://oauth2.googleapis.com/tokeninfo` to print the email, scopes, audience, and expiry of whatever the CLI is about to send. Built specifically to short-circuit the "why is my call to colab.pa.googleapis.com 403-ing" debugging loop — the answer is almost always "missing scope" or "wrong identity", both of which `whoami` makes immediately visible. Hidden via `app.command(hidden=True)`; reachable via `colab whoami` or `colab whoami --help`. Suppressed from the daily-update banner check (added to `_AUTO_UPDATE_SUPPRESSED` in `cli.py`) so the banner doesn't obscure the auth output.
-2026-05-11: Removed the local-file update source (`update_file_path` setting and `_fetch_local` helper); `colab update` now consults PyPI only. Switched the default `update_url` to the canonical PyPI JSON API (`https://pypi.org/pypi/google-colab-cli/json`), which already exposes the `info.version` schema the auto-update subsystem expects. Re-added `colab update --install` as a public self-install path that runs `pip install -U google-colab-cli` against the current `sys.executable`; Linux-only (other platforms exit non-zero with an explanatory message), and a silent no-op when the cached `latest_version` is already at or below the current install.
+2026-05-11: Removed the local-file update source (`update_file_path` setting and `_fetch_local` helper); `colab update` now consults PyPI only. Switched the default `update_url` to the canonical PyPI JSON API (`https://pypi.org/pypi/mighty-colab/json`), which already exposes the `info.version` schema the auto-update subsystem expects. Re-added `colab update --install` as a public self-install path that runs `pip install -U mighty-colab` against the current `sys.executable`; Linux-only (other platforms exit non-zero with an explanatory message), and a silent no-op when the cached `latest_version` is already at or below the current install.
 2026-05-12: Added an optional `timeout=` parameter to `ColabRuntime.execute_code` that flows through to both the `execute()` and `execute_interactive()` branches. `colab auth` and `colab drivemount` now pass `timeout=600` (10 min) via a shared `INTERACTIVE_AUTOMATION_TIMEOUT_SEC` constant in `commands/automation.py`. Background: `jupyter_kernel_client` defaults to a 10s wall-clock timeout that is consumed even when the kernel is idle waiting on `input_request`. With the drivefs hook intercepting that request and prompting the user to OAuth in their browser, any user that takes >10s to click through (essentially everyone) hit `TimeoutError` and saw "drivemount failed" even though the mount had actually succeeded server-side. The fix is scoped narrowly to the two human-in-the-loop subcommands; non-interactive paths (`colab exec`, `colab run`, `colab install`, `colab repl --pipe`, `colab console --pipe`) keep the upstream default since they receive continuous iopub traffic that resets the practical inactivity ceiling.
 ---
 
@@ -183,7 +183,7 @@ remediation guidance) rather than silently after ~1 minute via the daemon.
 -   **Manual-check**: `colab update` forces a check and prints the status.
 -   **Implementation**:
     -   Fetches a PyPI-style JSON document from a configurable `update_url`
-        (default: `https://pypi.org/pypi/google-colab-cli/json`) and reads
+        (default: `https://pypi.org/pypi/mighty-colab/json`) and reads
         `info.version`.
     -   Compares the fetched version with the current CLI version using
         PEP 440 / semantic versioning, falling back to string equality when a
@@ -200,7 +200,7 @@ remediation guidance) rather than silently after ~1 minute via the daemon.
             across failed checks so transient network issues do not erase
             the cache.
 -   **Notification**: If a new version is found, a non-intrusive message is
-    printed to the console with a `Run 'pip install --upgrade google-colab-cli' to
+    printed to the console with a `Run 'pip install --upgrade mighty-colab' to
     update.` hint. On Linux and macOS platforms where `--install` self-update is supported,
     an additional hint `You can run 'colab update --install' to upgrade in place.`
     is displayed above the pip/uv install command. The cached banner shown between
@@ -209,8 +209,8 @@ remediation guidance) rather than silently after ~1 minute via the daemon.
     `False`) makes `colab update` upgrade the CLI in place (**Linux and macOS**).
     It detects how the CLI was installed:
     - If `sys.executable` contains `/uv/tools` (indicating it was installed via
-      `uv tool install`), it runs `uv tool install -U google-colab-cli`.
-    - Otherwise, runs `pip install -U google-colab-cli` using `sys.executable`
+      `uv tool install`), it runs `uv tool install -U mighty-colab`.
+    - Otherwise, runs `pip install -U mighty-colab` using `sys.executable`
       to ensure the upgrade lands in the same interpreter.
     On other platforms, the command exits non-zero with an explanatory
     message. When the cached `latest_version` is already at or below the

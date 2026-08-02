@@ -368,7 +368,7 @@ wheels = [
 ]
 
 [[package]]
-name = "google-colab-cli"
+name = "mighty-colab"
 source = { editable = "." }
 dependencies = [
     { name = "click" },

@@ -130,13 +130,13 @@ def test_pypi_upgrade_uses_pip_hint(mocker, app_version, fake_settings, mock_pyp
     assert result.exit_code == 0
     assert "available: 1.1.0 (current: 1.0.0)" in result.output
     assert "You can run 'colab update --install' to upgrade in place." in result.output
-    assert "Run 'pip install --upgrade google-colab-cli' to update." in result.output
+    assert "Run 'pip install --upgrade mighty-colab' to update." in result.output
 
     idx_install = result.output.find(
         "You can run 'colab update --install' to upgrade in place."
     )
     idx_pip = result.output.find(
-        "Run 'pip install --upgrade google-colab-cli' to update."
+        "Run 'pip install --upgrade mighty-colab' to update."
     )
     assert idx_install < idx_pip
 
@@ -146,7 +146,7 @@ def test_pypi_upgrade_uses_uv_hint(mocker, app_version, fake_settings, mock_pypi
     mock_pypi({"info": {"version": "1.1.0"}})
     fake_settings()
     mocker.patch(
-        "sys.executable", "/home/user/.local/share/uv/tools/google-colab-cli/bin/python"
+        "sys.executable", "/home/user/.local/share/uv/tools/mighty-colab/bin/python"
     )
     mocker.patch("colab_cli.auto_update.platform.system", return_value="Linux")
 
@@ -154,12 +154,12 @@ def test_pypi_upgrade_uses_uv_hint(mocker, app_version, fake_settings, mock_pypi
     assert result.exit_code == 0
     assert "available: 1.1.0 (current: 1.0.0)" in result.output
     assert "You can run 'colab update --install' to upgrade in place." in result.output
-    assert "Run 'uv tool install -U google-colab-cli' to update." in result.output
+    assert "Run 'uv tool install -U mighty-colab' to update." in result.output
 
     idx_install = result.output.find(
         "You can run 'colab update --install' to upgrade in place."
     )
-    idx_uv = result.output.find("Run 'uv tool install -U google-colab-cli' to update.")
+    idx_uv = result.output.find("Run 'uv tool install -U mighty-colab' to update.")
     assert idx_install < idx_uv
 
 
@@ -176,13 +176,13 @@ def test_pypi_upgrade_uses_pip_hint_macos(
     assert result.exit_code == 0
     assert "available: 1.1.0 (current: 1.0.0)" in result.output
     assert "You can run 'colab update --install' to upgrade in place." in result.output
-    assert "Run 'pip install --upgrade google-colab-cli' to update." in result.output
+    assert "Run 'pip install --upgrade mighty-colab' to update." in result.output
 
     idx_install = result.output.find(
         "You can run 'colab update --install' to upgrade in place."
     )
     idx_pip = result.output.find(
-        "Run 'pip install --upgrade google-colab-cli' to update."
+        "Run 'pip install --upgrade mighty-colab' to update."
     )
     assert idx_install < idx_pip
 
@@ -202,7 +202,7 @@ def test_pypi_upgrade_uses_pip_hint_windows(
     assert (
         "You can run 'colab update --install' to upgrade in place." not in result.output
     )
-    assert "Run 'pip install --upgrade google-colab-cli' to update." in result.output
+    assert "Run 'pip install --upgrade mighty-colab' to update." in result.output
 
 
 def test_explicit_update_omits_disable_hint(app_version, fake_settings, mock_pypi):
@@ -467,7 +467,7 @@ def test_install_flag_default_does_not_install(
 def test_install_flag_runs_pip_install_upgrade(
     mocker, app_version, fake_settings, mock_pypi
 ):
-    """`colab update --install` shells out to `pip install -U google-colab-cli`
+    """`colab update --install` shells out to `pip install -U mighty-colab`
     when PyPI reports a newer version."""
     app_version("1.0.0")
     mock_pypi({"info": {"version": "1.1.0"}})
@@ -485,20 +485,20 @@ def test_install_flag_runs_pip_install_upgrade(
     args, _ = run.call_args
     # Use sys.executable to avoid PATH ambiguity / virtualenv mixups.
     cmd = args[0]
-    assert cmd == ["/usr/bin/python", "-m", "pip", "install", "-U", "google-colab-cli"]
+    assert cmd == ["/usr/bin/python", "-m", "pip", "install", "-U", "mighty-colab"]
 
 
 def test_install_flag_runs_uv_tool_install(
     mocker, app_version, fake_settings, mock_pypi
 ):
-    """`colab update --install` shells out to `uv tool install -U google-colab-cli`
+    """`colab update --install` shells out to `uv tool install -U mighty-colab`
     when sys.executable contains '/uv/'."""
     app_version("1.0.0")
     mock_pypi({"info": {"version": "1.1.0"}})
     fake_settings()
     mocker.patch("colab_cli.auto_update.platform.system", return_value="Linux")
     mocker.patch(
-        "sys.executable", "/home/user/.local/share/uv/tools/google-colab-cli/bin/python"
+        "sys.executable", "/home/user/.local/share/uv/tools/mighty-colab/bin/python"
     )
     run = mocker.patch(
         "colab_cli.auto_update.subprocess.run",
@@ -510,7 +510,7 @@ def test_install_flag_runs_uv_tool_install(
     assert run.call_count == 1
     args, _ = run.call_args
     cmd = args[0]
-    assert cmd == ["uv", "tool", "install", "-U", "google-colab-cli"]
+    assert cmd == ["uv", "tool", "install", "-U", "mighty-colab"]
 
 
 def test_install_flag_errors_on_unsupported_platform(
@@ -547,7 +547,7 @@ def test_install_flag_runs_on_macos(mocker, app_version, fake_settings, mock_pyp
     assert run.call_count == 1
     args, _ = run.call_args
     cmd = args[0]
-    assert cmd == ["/usr/bin/python", "-m", "pip", "install", "-U", "google-colab-cli"]
+    assert cmd == ["/usr/bin/python", "-m", "pip", "install", "-U", "mighty-colab"]
 
 
 def test_install_flag_no_op_when_already_up_to_date(

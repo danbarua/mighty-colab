@@ -37,7 +37,7 @@ class SessionState(BaseModel):
 
 
 class Settings(BaseModel):
-    update_url: str = "https://pypi.org/pypi/google-colab-cli/json"
+    update_url: str = "https://pypi.org/pypi/mighty-colab/json"
     last_check: Optional[datetime] = None
     enable_update_check: bool = True
     # Highest version seen on the update source; cached for the banner.

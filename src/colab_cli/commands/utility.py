@@ -349,7 +349,7 @@ def update_command(
         typer.Option(
             "--install",
             help=(
-                "After checking, run 'pip install -U google-colab-cli' to "
+                "After checking, run 'pip install -U mighty-colab' to "
                 "upgrade the CLI in place. No-op if already up to date. "
                 "Linux only."
             ),

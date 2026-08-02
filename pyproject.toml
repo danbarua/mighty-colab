@@ -1,7 +1,7 @@
 [project]
-name = "google-colab-cli"
+name = "mighty-colab"
 dynamic = ["version"]
-description = "CLI for interacting with Colab."
+description = "A mighty CLI for interacting with Colab."
 readme = "README.md"
 requires-python = ">=3.12"
 license = "Apache-2.0"
@@ -12,6 +12,7 @@ keywords = [
     "jupyter",
     "notebook",
     "cli",
+    "mighty"
 ]
 classifiers = [
     "Intended Audience :: Developers",
@@ -45,9 +46,9 @@ dependencies = [
 colab = "colab_cli.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/googlecolab/google-colab-cli"
-Repository = "https://github.com/googlecolab/google-colab-cli"
-Issues = "https://github.com/googlecolab/google-colab-cli/issues"
+Homepage = "https://github.com/danbarua/mighty-colab"
+Repository = "https://github.com/danbarua/mighty-colab"
+Issues = "https://github.com/danbarua/mighty-colab/issues"
 
 [build-system]
 requires = ["hatchling", "hatch-vcs"]

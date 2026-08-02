@@ -47,4 +47,4 @@ below corresponds to a tag of the same name.
   `colaboratory`-scope / `pa.googleapis.com` pre-flight remediation messaging,
   superseded by the TFE keep-alive ping. (#61)
 
-[0.6.0]: https://github.com/googlecolab/google-colab-cli/compare/v0.5.11...v0.6.0
+[0.6.0]: https://github.com/danbarua/mighty-colab/compare/v0.5.11...v0.6.0
