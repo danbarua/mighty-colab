@@ -49,6 +49,12 @@ by running `uv tool install mighty-colab` or `pip install mighty-colab`.
 - **Gotcha**: an unrecognized `--gpu` value silently falls back to **A100** (which then usually fails the next step). A `400` on `colab new` with an accelerator means no quota/entitlement for it on this account — fall back to `--gpu T4` or omit the flag for CPU.
 - Accelerator availability is tier-gated; most accounts can only get CPU. Don't assume a GPU/TPU will allocate.
 
+### Adopt orphaned sessions
+- If `colab sessions` shows an assignment marked `[?]` (billed server-side but with no local record — e.g. started from the Colab web UI, or a process that exited before persisting state), claim it with `colab adopt <ENDPOINT>` (same endpoint string `colab sessions`/`colab status` print).
+- `colab adopt --orphanage` claims every `[?]` assignment in one pass instead of one at a time.
+- `-n/--name <name>` sets a friendly local name (defaults to the endpoint string itself).
+- Idempotent: re-adopting an endpoint already tracked locally — including a session created normally via `colab new` — is a no-op, not a reset.
+
 ### Execute
 - **Preferred**: `colab exec -s <name> -f <script.py>` runs a local script on the remote VM (read locally, sent to the kernel — no manual upload needed).
 - **Piped code**: `echo "print(1)" | mighty-colab exec -s <name>` or `cat script.py | mighty-colab exec -s <name>`.
@@ -71,12 +77,15 @@ by running `uv tool install mighty-colab` or `pip install mighty-colab`.
 
 ### Inspect & report
 - `colab help` (or `colab help <cmd>`) lists/explains commands; the listing is alphabetical.
-- `colab sessions` lists server-side assignments and auto-prunes stale local entries. Orphans with no local record show as `[?]`.
+- `colab sessions` lists server-side assignments and auto-prunes stale local entries. Orphans with no local record show as `[?]` — claim one with `colab adopt <ENDPOINT>`, or all of them with `colab adopt --orphanage`.
 - `colab status [-s <name>]` shows hardware, IDLE/BUSY, and last execution.
 - `colab log -s <name> [-n 20] [-t TYPE]` shows recent structured events; invaluable when a task fails (keep-alive errors carry the raw `response_body`).
 - `colab log -s <name> -o summary.ipynb` exports the session as a notebook (also `.md`, `.txt`, `.jsonl` by suffix).
 - `colab url -s <name>` prints a browser URL that attaches the Colab web UI to your existing CLI session instead of allocating a new VM (add `--open` to launch it).
 - `colab skill` / `colab readme` print this skill and the README (handy for self-discovery).
+
+## MCP Server
+`mighty-colab mcp` starts a stdio MCP (Model Context Protocol) server exposing this CLI's commands as tools for a *different* MCP-aware client (e.g. Claude Desktop) to call. It's an alternate entry point into the same commands documented here — not something to invoke from within this skill. If you already have shell access to `colab`, don't run `mighty-colab mcp` yourself: it blocks on stdio waiting for a client and will hang your session.
 
 ## Safety
 - **Always `colab stop -s <name>` when done** — idle VMs burn compute units. `colab run` (without `--keep`) self-cleans even if the script errors.

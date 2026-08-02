@@ -8,6 +8,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 The package version is derived from the git tag via `hatch-vcs`; each release
 below corresponds to a tag of the same name.
 
+## [Unreleased]
+
+### Added
+
+- **adopt:** `colab adopt ENDPOINT` brings a Colab runtime that was started
+  outside the CLI (e.g. from the Colab web UI, or a process that exited
+  before persisting local state) under local session tracking, so
+  `status`/`stop`/`exec`/etc. can manage it going forward. `colab adopt
+  --orphanage` adopts every such orphaned assignment in one pass. Idempotent
+  — re-adopting an endpoint already tracked locally is a no-op — and never
+  overwrites a session created normally via `colab new`.
+- **mcp:** `colab mcp` starts a stdio MCP (Model Context Protocol) server
+  exposing the CLI's own commands as tools, scanned directly from the Click
+  command registry so the exposed toolset stays in sync automatically as
+  commands are added. Interactive commands (`ssh`, `repl`, `console`, `edit`,
+  `drivemount`) and internal/hidden commands are excluded. See
+  [`docs/07_mcp_server.md`](docs/07_mcp_server.md).
+
+### Changed
+
+- Renamed the project, PyPI package, and installed executable from
+  `google-colab-cli` to **`mighty-colab`**. Install with `pip install
+  mighty-colab` or `uv tool install mighty-colab`.
+
+### Removed
+
+- The experimental `colab-mcp` git submodule, superseded by the hand-rolled
+  MCP server above.
+
+[Unreleased]: https://github.com/danbarua/mighty-colab/compare/v0.6.0...HEAD
+
 ## [0.6.0] - 2026-06-16
 
 ### Changed
