@@ -1,0 +1,3 @@
+[submodule "colab-mcp"]
+	path = colab-mcp
+	url = https://github.com/SebastianGilPinzon/colab-mcp
