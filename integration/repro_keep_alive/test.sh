@@ -53,7 +53,7 @@ elif command -v gcloud > /dev/null && gcloud auth application-default print-acce
 else
     echo "Error: No usable auth provider found."
     echo "Options:"
-    echo "  - OAuth2: run 'uv run colab --auth=oauth2 sessions' to bootstrap"
+    echo "  - OAuth2: run 'uv run mighty-colab --auth=oauth2 sessions' to bootstrap"
     echo "  - ADC:    gcloud auth application-default login \\"
     echo "                --scopes=openid,\\"
     echo "                        https://www.googleapis.com/auth/cloud-platform,\\"
@@ -65,12 +65,12 @@ fi
 SESSION_NAME="test-live-keep-alive"
 
 cleanup_session() {
-    uv run colab $AUTH_FLAGS --config "$SESSION_FILE" stop -s "$SESSION_NAME" 2>/dev/null || true
+    uv run mighty-colab $AUTH_FLAGS --config "$SESSION_FILE" stop -s "$SESSION_NAME" 2>/dev/null || true
 }
 trap "cleanup_session; rm -rf $TMP_DIR" EXIT
 
 echo "[*] Creating new session (REAL API CALL) using $AUTH_FLAGS..."
-uv run colab $AUTH_FLAGS --config "$SESSION_FILE" new -s "$SESSION_NAME"
+uv run mighty-colab $AUTH_FLAGS --config "$SESSION_FILE" new -s "$SESSION_NAME"
 
 # Verify session exists in state
 if [ ! -f "$SESSION_FILE" ]; then
@@ -97,10 +97,10 @@ else
    exit 1
 fi
 
-# Verify the process command line is actually colab keep-alive
+# Verify the process command line is actually mighty-colab keep-alive
 ps -fp $PID | grep "keep-alive"
 
-LOG_OUTPUT=$(uv run colab $AUTH_FLAGS --config "$SESSION_FILE" log -s "$SESSION_NAME")
+LOG_OUTPUT=$(uv run mighty-colab $AUTH_FLAGS --config "$SESSION_FILE" log -s "$SESSION_NAME")
 echo "$LOG_OUTPUT"
 if ! echo "$LOG_OUTPUT" | grep -q "KEEP: started"; then
     echo "[FAILURE] keep_alive_started event missing from history."
@@ -116,7 +116,7 @@ if echo "$LOG_OUTPUT" | grep -q "KEEP: error"; then
 fi
 
 echo "[*] Stopping session (REAL API CALL)..."
-uv run colab $AUTH_FLAGS --config "$SESSION_FILE" stop -s "$SESSION_NAME"
+uv run mighty-colab $AUTH_FLAGS --config "$SESSION_FILE" stop -s "$SESSION_NAME"
 sleep 1
 
 if [ "$EXPECT_DAEMON" -eq 1 ]; then

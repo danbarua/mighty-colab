@@ -23,7 +23,7 @@ SESSION_NAME="repro-persist-$(date +%s)"
 # Cleanup on exit
 cleanup() {
     echo "[*] Cleaning up..."
-    colab stop -s "$SESSION_NAME" || true
+    mighty-colab stop -s "$SESSION_NAME" || true
 }
 trap cleanup EXIT
 
@@ -31,11 +31,11 @@ echo "[*] Starting session..."
 colab new -s "$SESSION_NAME"
 
 echo "[*] Phase 1: Defining variable 'eric'..."
-echo 'eric = "present"' | colab exec -s "$SESSION_NAME"
+echo 'eric = "present"' | mighty-colab exec -s "$SESSION_NAME"
 
 echo "[*] Phase 2: Attempting to access 'eric'..."
 # If this fails, it will return exit code 0 but print a Traceback to stderr
-OUTPUT=$(echo 'print(f"Value of eric: {eric}")' | colab exec -s "$SESSION_NAME" 2>&1)
+OUTPUT=$(echo 'print(f"Value of eric: {eric}")' | mighty-colab exec -s "$SESSION_NAME" 2>&1)
 
 echo "[*] Result:"
 echo "$OUTPUT"

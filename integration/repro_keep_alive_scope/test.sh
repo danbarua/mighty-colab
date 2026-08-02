@@ -80,7 +80,7 @@ elif command -v gcloud > /dev/null && gcloud auth application-default print-acce
 else
     echo "Skipping: this test requires --auth=oauth2 or properly-scoped ADC"
     echo "          Bootstrap options:"
-    echo "          - OAuth2: 'uv run colab --auth=oauth2 sessions' (browser consent)"
+    echo "          - OAuth2: 'uv run mighty-colab --auth=oauth2 sessions' (browser consent)"
     echo "          - ADC:    gcloud auth application-default login \\"
     echo "                        --scopes=openid,\\"
     echo "                                https://www.googleapis.com/auth/cloud-platform,\\"
@@ -91,7 +91,7 @@ fi
 
 cleanup() {
     echo "[*] Cleaning up..."
-    uv run colab $AUTH_FLAGS --config "$SESSION_FILE" stop -s "$SESSION_NAME" 2>/dev/null || true
+    uv run mighty-colab $AUTH_FLAGS --config "$SESSION_FILE" stop -s "$SESSION_NAME" 2>/dev/null || true
     rm -rf "$TMP_DIR"
     # Best-effort: scrub the history file so the test is idempotent.
     rm -f "$HOME/.config/colab-cli/history/${SESSION_NAME}.jsonl"
@@ -103,7 +103,7 @@ echo "[*] Creating session '$SESSION_NAME' (REAL API CALL) using $AUTH_FLAGS..."
 # OAuth scope is missing, this command itself will fail fast with an
 # actionable remediation message — so step (1) of the regression already
 # fires here.
-if ! uv run colab $AUTH_FLAGS --config "$SESSION_FILE" new -s "$SESSION_NAME"; then
+if ! uv run mighty-colab $AUTH_FLAGS --config "$SESSION_FILE" new -s "$SESSION_NAME"; then
     echo "[FAILURE] 'colab new' failed. If this is a SCOPE_NOT_PERMITTED error,"
     echo "          the colaboratory scope is missing from your auth provider."
     echo "          For ADC: gcloud auth application-default login \\"
@@ -133,7 +133,7 @@ sleep 90
 if ! ps -p $PID > /dev/null; then
     echo "[FAILURE] Keep-alive daemon (pid=$PID) died during soak."
     echo "          History dump:"
-    uv run colab $AUTH_FLAGS --config "$SESSION_FILE" log -s "$SESSION_NAME" || true
+    uv run mighty-colab $AUTH_FLAGS --config "$SESSION_FILE" log -s "$SESSION_NAME" || true
     exit 1
 fi
 echo "[*] Daemon still alive after 90s."
@@ -141,8 +141,8 @@ echo "[*] Daemon still alive after 90s."
 # The structured history must NOT contain any keep_alive_error events. Any
 # error here means a server-side rejection (auth, headers, payload) — the
 # exact class of bug this test guards against.
-LOG_OUTPUT=$(uv run colab $AUTH_FLAGS --config "$SESSION_FILE" log -s "$SESSION_NAME")
-echo "----- colab log output -----"
+LOG_OUTPUT=$(uv run mighty-colab $AUTH_FLAGS --config "$SESSION_FILE" log -s "$SESSION_NAME")
+echo "-----mighty-colablog output -----"
 echo "$LOG_OUTPUT"
 echo "----------------------------"
 

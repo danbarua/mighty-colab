@@ -51,7 +51,7 @@ Run a CPU-based VM runtime, execute some code, and clean up:
 colab new
 
 # 2. Execute code from stdin
-echo "print('Hello from Google Colab!')" | colab exec
+echo "print('Hello from Google Colab!')" | mighty-colab exec
 
 # 3. Stop and release the VM resource
 colab stop
@@ -145,7 +145,7 @@ colab stop -s analysis
 
 ## Usage Notes
 
-* **TTY Requirements:** The interactive commands `repl` and `console` require a local TTY. When running inside automated scripts or pipelines, make sure to pipe stdin (e.g., `echo "print(1)" | colab repl`) to trigger non-interactive execution modes.
+* **TTY Requirements:** The interactive commands `repl` and `console` require a local TTY. When running inside automated scripts or pipelines, make sure to pipe stdin (e.g., `echo "print(1)" | mighty-colab repl`) to trigger non-interactive execution modes.
 * **Transparent Code Execution:** When calling `colab exec -f file.py`, the CLI reads the file locally and transmits its content to the remote kernel. You do not need to manually upload files before execution.
 * **Storage & State Paths:** Session tokens and metadata are stored at `~/.config/colab-cli/sessions.json`. Global CLI settings are located at `~/.config/colab-cli/settings.json`. These can be customized or isolated via the global `--config` flag.
 
@@ -163,7 +163,7 @@ colab run --gpu T4 train.py
 To execute a local file directly on a remote accelerator, place the `colab run` interpreter in the shebang line:
 
 ```python
-#!/usr/bin/env -S colab run --gpu L4 --keep
+#!/usr/bin/env -S mighty-colab run --gpu L4 --keep
 import torch
 
 print("L4 GPU Available:", torch.cuda.is_available())

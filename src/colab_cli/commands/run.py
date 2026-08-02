@@ -23,7 +23,7 @@ is passed).
 
 Designed to support shebangs:
 
-    #!/usr/bin/env -S colab run --gpu T4
+    #!/usr/bin/env -S mighty-colab run --gpu T4
     import torch
     print(torch.cuda.get_device_name(0))
 
@@ -117,7 +117,7 @@ def _extract_env_args_from_script_args(
     """Pull colab's --env options out of variadic script args.
 
     `colab run` intentionally forwards unknown options after the script path to
-    the user's script. Since `--env` is now a colab option, support both
+    the user's script. Since `--env` is now a mighty-colab option, support both
     `colab run --env KEY=VALUE script.py` (Typer parses this) and
     `colab run script.py --env KEY=VALUE` (this helper parses it).
     """
@@ -288,7 +288,7 @@ def run_command(
 
     Designed to be used as a shebang interpreter, e.g.
 
-        #!/usr/bin/env -S colab run --gpu T4
+        #!/usr/bin/env -S mighty-colab run --gpu T4
 
     so a single executable .py file can rent a GPU, run, and clean up after
     itself.

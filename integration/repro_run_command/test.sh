@@ -55,7 +55,7 @@ KEEP_SESSION_NAME="repro-run-keep-$(date +%s)"
 
 cleanup() {
     echo "[*] Cleaning up..."
-    uv run colab $AUTH_FLAGS --config "$SESSION_FILE" stop -s "$KEEP_SESSION_NAME" 2>/dev/null || true
+    uv run mighty-colab $AUTH_FLAGS --config "$SESSION_FILE" stop -s "$KEEP_SESSION_NAME" 2>/dev/null || true
     rm -rf "$TMP_DIR"
 }
 trap cleanup EXIT
@@ -68,13 +68,13 @@ PYEOF
 SCRIPT_BASENAME=$(basename "$SCRIPT_PATH")
 
 # ---------- Phase 1: basic run + auto-cleanup --------------------------------
-echo "[*] Phase 1: colab run <script.py> hello world"
-OUTPUT=$(uv run colab $AUTH_FLAGS --config "$SESSION_FILE" run "$SCRIPT_PATH" hello world 2>&1)
+echo "[*] Phase 1: mighty-colab run <script.py> hello world"
+OUTPUT=$(uv run mighty-colab $AUTH_FLAGS --config "$SESSION_FILE" run "$SCRIPT_PATH" hello world 2>&1)
 RC=$?
 echo "$OUTPUT"
 
 if [ $RC -ne 0 ]; then
-    echo "[FAILURE] colab run exited $RC"
+    echo "[FAILURE] mighty-colab run exited $RC"
     exit 1
 fi
 if ! echo "$OUTPUT" | grep -q "argv=\['$SCRIPT_BASENAME', 'hello', 'world'\]"; then
@@ -88,7 +88,7 @@ if ! echo "$OUTPUT" | grep -q "is_main=True"; then
 fi
 
 # Verify cleanup actually happened — no orphan assignments remain.
-SESSIONS_OUT=$(uv run colab $AUTH_FLAGS --config "$SESSION_FILE" sessions 2>&1)
+SESSIONS_OUT=$(uv run mighty-colab $AUTH_FLAGS --config "$SESSION_FILE" sessions 2>&1)
 echo "$SESSIONS_OUT"
 if ! echo "$SESSIONS_OUT" | grep -q "No active sessions found on server."; then
     echo "[FAILURE] After auto-cleanup, server still reports active sessions."
@@ -99,13 +99,13 @@ echo "[SUCCESS] Phase 1 passed: argv passthrough, __main__, and auto-cleanup."
 
 # ---------- Phase 2: --keep leaves the session alive -------------------------
 echo ""
-echo "[*] Phase 2: colab run --keep -s $KEEP_SESSION_NAME <script.py>"
-OUTPUT=$(uv run colab $AUTH_FLAGS --config "$SESSION_FILE" run --keep -s "$KEEP_SESSION_NAME" "$SCRIPT_PATH" keep_arg 2>&1)
+echo "[*] Phase 2: mighty-colab run --keep -s $KEEP_SESSION_NAME <script.py>"
+OUTPUT=$(uv run mighty-colab $AUTH_FLAGS --config "$SESSION_FILE" run --keep -s "$KEEP_SESSION_NAME" "$SCRIPT_PATH" keep_arg 2>&1)
 RC=$?
 echo "$OUTPUT"
 
 if [ $RC -ne 0 ]; then
-    echo "[FAILURE] colab run --keep exited $RC"
+    echo "[FAILURE] mighty-colab run --keep exited $RC"
     exit 1
 fi
 if ! echo "$OUTPUT" | grep -q "argv=\['$SCRIPT_BASENAME', 'keep_arg'\]"; then
@@ -113,15 +113,15 @@ if ! echo "$OUTPUT" | grep -q "argv=\['$SCRIPT_BASENAME', 'keep_arg'\]"; then
     exit 1
 fi
 
-SESSIONS_OUT=$(uv run colab $AUTH_FLAGS --config "$SESSION_FILE" sessions 2>&1)
+SESSIONS_OUT=$(uv run mighty-colab $AUTH_FLAGS --config "$SESSION_FILE" sessions 2>&1)
 echo "$SESSIONS_OUT"
 if ! echo "$SESSIONS_OUT" | grep -q "\[$KEEP_SESSION_NAME\]"; then
     echo "[FAILURE] --keep session $KEEP_SESSION_NAME not found in colab sessions."
     exit 1
 fi
 
-uv run colab $AUTH_FLAGS --config "$SESSION_FILE" stop -s "$KEEP_SESSION_NAME"
-SESSIONS_OUT=$(uv run colab $AUTH_FLAGS --config "$SESSION_FILE" sessions 2>&1)
+uv run mighty-colab $AUTH_FLAGS --config "$SESSION_FILE" stop -s "$KEEP_SESSION_NAME"
+SESSIONS_OUT=$(uv run mighty-colab $AUTH_FLAGS --config "$SESSION_FILE" sessions 2>&1)
 if ! echo "$SESSIONS_OUT" | grep -q "No active sessions found on server."; then
     echo "[FAILURE] After manual stop of $KEEP_SESSION_NAME, sessions remain."
     exit 1

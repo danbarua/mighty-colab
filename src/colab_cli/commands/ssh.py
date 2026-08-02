@@ -609,7 +609,7 @@ def ssh(
             help=(
                 "Act as an OpenSSH ProxyCommand-compatible WebSocket-stdio "
                 "bridge (reads stdin, writes stdout). Use in ~/.ssh/config "
-                "as `ProxyCommand colab ssh --proxy-mode -s SESS`. All flags "
+                "as `ProxyCommand mighty-colab ssh --proxy-mode -s SESS`. All flags "
                 "below also apply here."
             ),
         ),

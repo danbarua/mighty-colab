@@ -14,7 +14,7 @@
 # limitations under the License.
 #
 # Integration Test: Piped console exits cleanly on EOF
-# Verifies that `echo cmd | colab console -s s` runs the command on the remote
+# Verifies that `echo cmd | mighty-colab console -s s` runs the command on the remote
 # /colab/tty endpoint and then exits within a few seconds.
 #
 # Regression: prior to 2026-05-07 this hung indefinitely because the EOF
@@ -46,12 +46,12 @@ else
 fi
 
 cleanup_session() {
-    uv run colab $AUTH_FLAGS --config "$SESSION_FILE" stop -s "$SESSION_NAME" 2>/dev/null || true
+    uv run mighty-colab $AUTH_FLAGS --config "$SESSION_FILE" stop -s "$SESSION_NAME" 2>/dev/null || true
 }
 trap "cleanup_session; rm -rf $TMP_DIR" EXIT
 
 echo "[*] Creating session for piped-console test using $AUTH_FLAGS..."
-uv run colab $AUTH_FLAGS --config "$SESSION_FILE" new -s "$SESSION_NAME"
+uv run mighty-colab $AUTH_FLAGS --config "$SESSION_FILE" new -s "$SESSION_NAME"
 
 # Marker string we'll grep for in the captured output. Made unique enough that
 # accidental matches in tmux status lines or shell prompts are impossible.
@@ -59,11 +59,11 @@ MARKER="PIPED-CONSOLE-OK-$(date +%s)-$$"
 
 OUTPUT_FILE="$TMP_DIR/console-output.txt"
 
-echo "[*] Running: echo 'echo $MARKER' | colab console (must exit within 30s)..."
+echo "[*] Running: echo 'echo $MARKER' | mighty-colab console (must exit within 30s)..."
 START=$(date +%s)
 # 30s upper bound guards against the prior hang regression. The fix typically
 # completes in ~1-2s; anything beyond that means the EOF/close path broke.
-if ! timeout 30 bash -c "echo 'echo $MARKER' | uv run colab $AUTH_FLAGS --config '$SESSION_FILE' console -s '$SESSION_NAME'" > "$OUTPUT_FILE" 2>&1; then
+if ! timeout 30 bash -c "echo 'echo $MARKER' | uv run mighty-colab $AUTH_FLAGS --config '$SESSION_FILE' console -s '$SESSION_NAME'" > "$OUTPUT_FILE" 2>&1; then
     EXIT=$?
     if [ $EXIT -eq 124 ]; then
         echo "[FAILURE] Piped console hung past the 30s timeout (regression — was the EOF handler reverted?)."

@@ -23,16 +23,16 @@
 #   OpenSSH ProxyCommand and run a real remote command over the WebSocket
 #   bridge. This exercises the SAME connect -> pubkey-header -> handshake ->
 #   bridge path as the interactive shell, minus the TTY:
-#     colab new -> substrate check (sshd up) -> `ssh root@... "whoami"` over the
+#     mighty-colab new -> substrate check (sshd up) -> `ssh root@... "whoami"` over the
 #     bridge -> assert it ran as root on the runtime -> RSA-key rejection ->
-#     colab stop -> assert no orphan VM.
+#     mighty-colab stop -> assert no orphan VM.
 
 # Do not `set -e`: we capture failures explicitly so cleanup always runs.
 set -u
 
 # ---------- Part A: offline smoke (always runs, no VM) -----------------------
-echo "== A1: colab ssh --help advertises the documented flags =="
-HELP="$(uv run colab ssh --help 2>&1)"
+echo "== A1: mighty-colab ssh --help advertises the documented flags =="
+HELP="$(uv run mighty-colab ssh --help 2>&1)"
 echo "$HELP"
 
 fail=0
@@ -46,7 +46,7 @@ done
 
 echo "== A2: an unknown session exits 2 with an actionable message (offline) =="
 OFFLINE_CFG="$(mktemp -d)/sessions.json"
-A2_OUT="$(uv run colab --config "$OFFLINE_CFG" ssh -s ghost-no-such-session 2>&1)"
+A2_OUT="$(uv run mighty-colab --config "$OFFLINE_CFG" ssh -s ghost-no-such-session 2>&1)"
 A2_RC=$?
 echo "$A2_OUT"
 if [ "$A2_RC" -ne 2 ]; then
@@ -98,7 +98,7 @@ SESSION_NAME="repro-ssh-$(date +%s)"
 
 cleanup() {
   echo "[*] Cleaning up..."
-  uv run colab $AUTH_FLAGS --config "$SESSION_FILE" stop -s "$SESSION_NAME" \
+  uv run mighty-colab $AUTH_FLAGS --config "$SESSION_FILE" stop -s "$SESSION_NAME" \
     2>/dev/null || true
   rm -rf "$TMP_DIR"
 }
@@ -108,14 +108,14 @@ trap cleanup EXIT
 ssh-keygen -t ed25519 -N "" -f "$KEY" >/dev/null
 
 echo "[*] Creating runtime '$SESSION_NAME' (REAL API CALL)..."
-if ! uv run colab $AUTH_FLAGS --config "$SESSION_FILE" new -s "$SESSION_NAME"; then
-  echo "[FAILURE] colab new failed."
+if ! uv run mighty-colab $AUTH_FLAGS --config "$SESSION_FILE" new -s "$SESSION_NAME"; then
+  echo "[FAILURE] mighty-colab new failed."
   exit 1
 fi
 
 echo "[*] Substrate check: is sshd listening on the runtime?"
 SUB=$(
-  cat <<'PY' | uv run colab $AUTH_FLAGS --config "$SESSION_FILE" exec -s "$SESSION_NAME" 2>&1
+  cat <<'PY' | uv run mighty-colab $AUTH_FLAGS --config "$SESSION_FILE" exec -s "$SESSION_NAME" 2>&1
 import subprocess
 cmd = "pgrep -x sshd >/dev/null && echo SSHD_UP || echo SSHD_DOWN"
 print(subprocess.run(["bash", "-lc", cmd], capture_output=True, text=True).stdout.strip())
@@ -132,7 +132,7 @@ fi
 
 echo "[*] End-to-end: run a remote command over --proxy-mode (non-interactive)."
 MARKER="ssh-ok-$$-$RANDOM"
-PROXY="uv run colab $AUTH_FLAGS --config $SESSION_FILE ssh --proxy-mode -s $SESSION_NAME -i $KEY"
+PROXY="uv run mighty-colab $AUTH_FLAGS --config $SESSION_FILE ssh --proxy-mode -s $SESSION_NAME -i $KEY"
 E2E_OUT=$(
   timeout 120 ssh -F /dev/null \
     -o "ProxyCommand=$PROXY" \
@@ -164,7 +164,7 @@ echo "[SUCCESS] Handshake + pubkey-auth + bridge + remote exec all work."
 echo "[*] Negative: an RSA key is rejected by the server (non-interactive)."
 ssh-keygen -t rsa -b 2048 -N "" -f "$RSA_KEY" >/dev/null
 RSA_OUT=$(
-  uv run colab $AUTH_FLAGS --config "$SESSION_FILE" ssh --proxy-mode \
+  uv run mighty-colab $AUTH_FLAGS --config "$SESSION_FILE" ssh --proxy-mode \
     -s "$SESSION_NAME" -i "$RSA_KEY" </dev/null 2>&1
 )
 echo "$RSA_OUT"
@@ -176,8 +176,8 @@ fi
 echo "[SUCCESS] RSA key correctly rejected with an actionable message."
 
 echo "[*] Stopping session (REAL API CALL)..."
-uv run colab $AUTH_FLAGS --config "$SESSION_FILE" stop -s "$SESSION_NAME"
-SESSIONS_OUT=$(uv run colab $AUTH_FLAGS --config "$SESSION_FILE" sessions 2>&1)
+uv run mighty-colab $AUTH_FLAGS --config "$SESSION_FILE" stop -s "$SESSION_NAME"
+SESSIONS_OUT=$(uv run mighty-colab $AUTH_FLAGS --config "$SESSION_FILE" sessions 2>&1)
 echo "$SESSIONS_OUT"
 if ! echo "$SESSIONS_OUT" | grep -q "No active sessions found on server."; then
   echo "[FAILURE] After stop, the server still reports active sessions"

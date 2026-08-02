@@ -19,7 +19,7 @@ Eleven scenarios that exercise common workflows, plus a final "bridging back to 
 Provision a session, run a JAX workload over a small dataset, then tear the session down. Demonstrates the headline pattern of `colab new` → `colab exec` → `colab stop`. (A full-fidelity run of this scenario would also call `colab auth` and `colab drivemount` so the JAX code could read from BigQuery and write to Drive — both interactive, see the skip note below — and would request a TPU instead of CPU.)
 
 ```bash
-uv run colab --auth=adc new -s research
+uv run mighty-colab --auth=adc new -s research
 ```
 
 ```output
@@ -30,7 +30,7 @@ uv run colab --auth=adc new -s research
 *Skipped:* `colab auth -s research` and `colab drivemount -s research`. Both require interactive TTY consent — `auth` prompts the user to visit an OAuth URL and paste back a verification code; `drivemount` prompts for an Enter keypress after the user grants consent in their browser. Verified separately in `integration/`.
 
 ```bash
-uv run colab --auth=adc install -s research jax 2>&1 | tail -20
+uv run mighty-colab --auth=adc install -s research jax 2>&1 | tail -20
 ```
 
 ```output
@@ -39,7 +39,7 @@ Installation Complete (via uv)!
 ```
 
 ```bash
-cat <<'EOF' | uv run colab --auth=adc exec -s research
+cat <<'EOF' | uv run mighty-colab --auth=adc exec -s research
 import jax, jax.numpy as jnp
 import numpy as np
 
@@ -61,7 +61,7 @@ Processed 100 rows.
 ```
 
 ```bash
-uv run colab --auth=adc stop -s research
+uv run mighty-colab --auth=adc stop -s research
 ```
 
 ```output
@@ -74,7 +74,7 @@ uv run colab --auth=adc stop -s research
 A typical model-training cycle: provision → install dependencies → run a training script → check status → download the resulting checkpoint. The script here is a 1-layer linear regression on synthetic data so it finishes in a few seconds on CPU; substitute your real training code and `--gpu A100` for a production run.
 
 ```bash
-uv run colab --auth=adc new -s trainer
+uv run mighty-colab --auth=adc new -s trainer
 ```
 
 ```output
@@ -83,7 +83,7 @@ uv run colab --auth=adc new -s trainer
 ```
 
 ```bash
-uv run colab --auth=adc install -s trainer torch 2>&1 | tail -5
+uv run mighty-colab --auth=adc install -s trainer torch 2>&1 | tail -5
 ```
 
 ```output
@@ -92,7 +92,7 @@ Installation Complete (via uv)!
 ```
 
 ```bash
-uv run colab --auth=adc exec -s trainer -f /tmp/train.py
+uv run mighty-colab --auth=adc exec -s trainer -f /tmp/train.py
 ```
 
 ```output
@@ -110,7 +110,7 @@ Training complete.
 ```
 
 ```bash
-uv run colab --auth=adc download -s trainer /content/model.bin /tmp/model.bin && ls -la /tmp/model.bin
+uv run mighty-colab --auth=adc download -s trainer /content/model.bin /tmp/model.bin && ls -la /tmp/model.bin
 ```
 
 ```output
@@ -119,7 +119,7 @@ uv run colab --auth=adc download -s trainer /content/model.bin /tmp/model.bin &&
 ```
 
 ```bash
-uv run colab --auth=adc status -s trainer
+uv run mighty-colab --auth=adc status -s trainer
 ```
 
 ```output
@@ -128,7 +128,7 @@ uv run colab --auth=adc status -s trainer
 ```
 
 ```bash
-uv run colab --auth=adc stop -s trainer
+uv run mighty-colab --auth=adc stop -s trainer
 ```
 
 ```output
@@ -141,7 +141,7 @@ uv run colab --auth=adc stop -s trainer
 Both `colab console` and `colab repl` accept piped stdin and exit on EOF, so they compose well with shell pipelines and other CLI tools. This demo investigates remote disk usage with a one-shot shell command, lists `/content`, creates and removes a scratch file, and then queries free space from a one-shot REPL.
 
 ```bash
-uv run colab --auth=adc new -s debug
+uv run mighty-colab --auth=adc new -s debug
 ```
 
 ```output
@@ -152,7 +152,7 @@ uv run colab --auth=adc new -s debug
 *Note:* `colab console` connects to a tmux-wrapped pty on the VM, so even when stdin is piped the raw stdout contains terminal-control bytes (cursor moves, status-line repaints, ANSI color). For programmatic consumption, pipe the output through `grep -a` (force binary-safe) and a regex matching the line(s) you care about, as shown below.
 
 ```bash
-echo 'df -h /content' | uv run colab --auth=adc console -s debug 2>&1 | grep -aE 'overlay|/dev/'
+echo 'df -h /content' | uv run mighty-colab --auth=adc console -s debug 2>&1 | grep -aE 'overlay|/dev/'
 ```
 
 ```output
@@ -160,7 +160,7 @@ overlay         108G   21G   87G  20% /
 ```
 
 ```bash
-uv run colab --auth=adc ls -s debug /content
+uv run mighty-colab --auth=adc ls -s debug /content
 ```
 
 ```output
@@ -170,7 +170,7 @@ sample_data/
 
 ```bash
 echo 'with open("/content/scratch.log", "w") as f: f.write("x" * 1024 * 100)
-print("created scratch.log (100 KB)")' | uv run colab --auth=adc exec -s debug
+print("created scratch.log (100 KB)")' | uv run mighty-colab --auth=adc exec -s debug
 ```
 
 ```output
@@ -178,7 +178,7 @@ created scratch.log (100 KB)
 ```
 
 ```bash
-uv run colab --auth=adc rm -s debug /content/scratch.log
+uv run mighty-colab --auth=adc rm -s debug /content/scratch.log
 ```
 
 ```output
@@ -186,7 +186,7 @@ uv run colab --auth=adc rm -s debug /content/scratch.log
 ```
 
 ```bash
-echo 'import shutil; print(shutil.disk_usage("/").free // 2**30, "GB free")' | uv run colab --auth=adc repl -s debug
+echo 'import shutil; print(shutil.disk_usage("/").free // 2**30, "GB free")' | uv run mighty-colab --auth=adc repl -s debug
 ```
 
 ```output
@@ -194,7 +194,7 @@ echo 'import shutil; print(shutil.disk_usage("/").free // 2**30, "GB free")' | u
 ```
 
 ```bash
-uv run colab --auth=adc stop -s debug
+uv run mighty-colab --auth=adc stop -s debug
 ```
 
 ```output
@@ -207,7 +207,7 @@ uv run colab --auth=adc stop -s debug
 Demonstrates plot redirection (`--output-image`) and notebook execution (`colab exec -f file.ipynb` writes outputs back into `<name>_output.ipynb`).
 
 ```bash
-uv run colab --auth=adc new -s reporter
+uv run mighty-colab --auth=adc new -s reporter
 ```
 
 ```output
@@ -216,7 +216,7 @@ uv run colab --auth=adc new -s reporter
 ```
 
 ```bash
-cat <<'EOF' | uv run colab --auth=adc exec -s reporter --output-image /tmp/sine.png
+cat <<'EOF' | uv run mighty-colab --auth=adc exec -s reporter --output-image /tmp/sine.png
 import matplotlib.pyplot as plt, numpy as np
 x = np.linspace(0, 10, 100)
 plt.plot(x, np.sin(x)); plt.title('Sine'); plt.show()
@@ -237,7 +237,7 @@ EOF
 ![Sine wave plot generated on the Colab VM and saved to /tmp/sine.png](3042ab12-2026-05-07.png)
 
 ```bash
-uv run colab --auth=adc exec -s reporter -f /tmp/analysis.ipynb && ls /tmp/analysis_output.ipynb
+uv run mighty-colab --auth=adc exec -s reporter -f /tmp/analysis.ipynb && ls /tmp/analysis_output.ipynb
 ```
 
 ```output
@@ -253,7 +253,7 @@ sum: 108
 ```
 
 ```bash
-uv run colab --auth=adc log -s reporter -o /tmp/reporter.md && wc -l /tmp/reporter.md
+uv run mighty-colab --auth=adc log -s reporter -o /tmp/reporter.md && wc -l /tmp/reporter.md
 ```
 
 ```output
@@ -262,7 +262,7 @@ uv run colab --auth=adc log -s reporter -o /tmp/reporter.md && wc -l /tmp/report
 ```
 
 ```bash
-uv run colab --auth=adc stop -s reporter
+uv run mighty-colab --auth=adc stop -s reporter
 ```
 
 ```output
@@ -275,7 +275,7 @@ uv run colab --auth=adc stop -s reporter
 Pull a batch of objects down from a Google Cloud Storage bucket, transform them on the VM, and pull the results back. A full-fidelity workflow is `colab new --gpu L4` -> `colab auth` (so VM-side `gcloud` works) -> `gcloud storage cp gs://bucket/raw/*.jpg /content/images/` (via piped `colab console`) -> install pillow/torchvision -> process -> download. We skip the auth step here (interactive; the user has to click through OAuth) and substitute synthetic image generation in place of the GCS pull, which keeps the input -> install -> batch-process -> download shape intact.
 
 ```bash
-uv run colab --auth=adc new -s data-proc
+uv run mighty-colab --auth=adc new -s data-proc
 ```
 
 ```output
@@ -284,7 +284,7 @@ uv run colab --auth=adc new -s data-proc
 ```
 
 ```bash
-uv run colab --auth=adc install -s data-proc pillow 2>&1 | tail -3
+uv run mighty-colab --auth=adc install -s data-proc pillow 2>&1 | tail -3
 ```
 
 ```output
@@ -293,7 +293,7 @@ Installation Complete (via uv)!
 ```
 
 ```bash
-cat <<'EOF' | uv run colab --auth=adc exec -s data-proc
+cat <<'EOF' | uv run mighty-colab --auth=adc exec -s data-proc
 # (would normally pull from GCS via 'gcloud storage cp gs://my-bucket/raw_data/*.jpg')
 import os, zipfile
 from PIL import Image, ImageFilter
@@ -321,7 +321,7 @@ Processed 10 images, archived to batch.zip
 ```
 
 ```bash
-uv run colab --auth=adc download -s data-proc /content/processed/batch.zip /tmp/batch.zip && ls -la /tmp/batch.zip
+uv run mighty-colab --auth=adc download -s data-proc /content/processed/batch.zip /tmp/batch.zip && ls -la /tmp/batch.zip
 ```
 
 ```output
@@ -330,7 +330,7 @@ uv run colab --auth=adc download -s data-proc /content/processed/batch.zip /tmp/
 ```
 
 ```bash
-uv run colab --auth=adc stop -s data-proc
+uv run mighty-colab --auth=adc stop -s data-proc
 ```
 
 ```output
@@ -343,7 +343,7 @@ uv run colab --auth=adc stop -s data-proc
 Inspect a long-running session, then export its history as a notebook for archival. (`colab pay`, which opens `https://colab.research.google.com/signup` in the system browser to manage compute units, would normally fit here too — we don't invoke it because it would pop a browser window in the recording environment.)
 
 ```bash
-uv run colab --auth=adc new -s long-running
+uv run mighty-colab --auth=adc new -s long-running
 ```
 
 ```output
@@ -352,7 +352,7 @@ uv run colab --auth=adc new -s long-running
 ```
 
 ```bash
-uv run colab --auth=adc status -s long-running
+uv run mighty-colab --auth=adc status -s long-running
 ```
 
 ```output
@@ -360,7 +360,7 @@ uv run colab --auth=adc status -s long-running
 ```
 
 ```bash
-echo 'print("hello from session")' | uv run colab --auth=adc exec -s long-running
+echo 'print("hello from session")' | uv run mighty-colab --auth=adc exec -s long-running
 ```
 
 ```output
@@ -368,7 +368,7 @@ hello from session
 ```
 
 ```bash
-uv run colab --auth=adc log -s long-running -o /tmp/checkpoint.ipynb && ls -la /tmp/checkpoint.ipynb
+uv run mighty-colab --auth=adc log -s long-running -o /tmp/checkpoint.ipynb && ls -la /tmp/checkpoint.ipynb
 ```
 
 ```output
@@ -377,7 +377,7 @@ uv run colab --auth=adc log -s long-running -o /tmp/checkpoint.ipynb && ls -la /
 ```
 
 ```bash
-uv run colab --auth=adc stop -s long-running
+uv run mighty-colab --auth=adc stop -s long-running
 ```
 
 ```output
@@ -390,7 +390,7 @@ uv run colab --auth=adc stop -s long-running
 Quick exploration via piped repl, file inspection via piped exec, then capture the whole session as a notebook artifact via `colab log -o <name>.ipynb`. The notebook is replayable in the Colab UI.
 
 ```bash
-uv run colab --auth=adc new -s pivot
+uv run mighty-colab --auth=adc new -s pivot
 ```
 
 ```output
@@ -399,7 +399,7 @@ uv run colab --auth=adc new -s pivot
 ```
 
 ```bash
-uv run colab --auth=adc install -s pivot scipy 2>&1 | tail -3
+uv run mighty-colab --auth=adc install -s pivot scipy 2>&1 | tail -3
 ```
 
 ```output
@@ -408,7 +408,7 @@ Installation Complete (via uv)!
 ```
 
 ```bash
-echo 'from scipy.stats import zscore; print(zscore([1.2, 1.5, 1.1, 10.4, 1.3]))' | uv run colab --auth=adc repl -s pivot
+echo 'from scipy.stats import zscore; print(zscore([1.2, 1.5, 1.1, 10.4, 1.3]))' | uv run mighty-colab --auth=adc repl -s pivot
 ```
 
 ```output
@@ -416,7 +416,7 @@ echo 'from scipy.stats import zscore; print(zscore([1.2, 1.5, 1.1, 10.4, 1.3]))'
 ```
 
 ```bash
-uv run colab --auth=adc upload -s pivot /tmp/raw_data.csv /content/raw_data.csv
+uv run mighty-colab --auth=adc upload -s pivot /tmp/raw_data.csv /content/raw_data.csv
 ```
 
 ```output
@@ -424,7 +424,7 @@ uv run colab --auth=adc upload -s pivot /tmp/raw_data.csv /content/raw_data.csv
 ```
 
 ```bash
-echo 'print(open("/content/raw_data.csv").read())' | uv run colab --auth=adc exec -s pivot
+echo 'print(open("/content/raw_data.csv").read())' | uv run mighty-colab --auth=adc exec -s pivot
 ```
 
 ```output
@@ -438,7 +438,7 @@ id,name,score
 ```
 
 ```bash
-uv run colab --auth=adc log -s pivot -o /tmp/pivot_discovery.ipynb && ls -la /tmp/pivot_discovery.ipynb
+uv run mighty-colab --auth=adc log -s pivot -o /tmp/pivot_discovery.ipynb && ls -la /tmp/pivot_discovery.ipynb
 ```
 
 ```output
@@ -447,7 +447,7 @@ uv run colab --auth=adc log -s pivot -o /tmp/pivot_discovery.ipynb && ls -la /tm
 ```
 
 ```bash
-uv run colab --auth=adc stop -s pivot
+uv run mighty-colab --auth=adc stop -s pivot
 ```
 
 ```output
@@ -460,7 +460,7 @@ uv run colab --auth=adc stop -s pivot
 Run a local script against the remote VM and pull a result back. The full-fidelity version of this demo also calls `colab drivemount` to make Google Drive available at `/content/drive` on the VM (so the script can read shared data); `drivemount` is interactive and skipped here. The kept portion — `colab exec -f local_script.py` running a script that lives on your laptop against a kernel that lives in Colab — is the workflow worth highlighting.
 
 ```bash
-uv run colab --auth=adc new -s hybrid
+uv run mighty-colab --auth=adc new -s hybrid
 ```
 
 ```output
@@ -469,7 +469,7 @@ uv run colab --auth=adc new -s hybrid
 ```
 
 ```bash
-uv run colab --auth=adc exec -s hybrid -f /tmp/local_analysis.py
+uv run mighty-colab --auth=adc exec -s hybrid -f /tmp/local_analysis.py
 ```
 
 ```output
@@ -480,7 +480,7 @@ This script lives on my laptop but ran on the Colab VM.
 ```
 
 ```bash
-uv run colab --auth=adc stop -s hybrid
+uv run mighty-colab --auth=adc stop -s hybrid
 ```
 
 ```output
@@ -493,7 +493,7 @@ uv run colab --auth=adc stop -s hybrid
 Run multiple sessions concurrently, list them, inspect one, stop one. The two sessions here are both CPU; in practice you'd more likely have a mix of accelerator types (e.g. one TPU for training, one GPU for evaluation).
 
 ```bash
-uv run colab --auth=adc new -s tpu-cluster && uv run colab --auth=adc new -s gpu-eval
+uv run mighty-colab --auth=adc new -s tpu-cluster && uv run mighty-colab --auth=adc new -s gpu-eval
 ```
 
 ```output
@@ -504,7 +504,7 @@ uv run colab --auth=adc new -s tpu-cluster && uv run colab --auth=adc new -s gpu
 ```
 
 ```bash
-uv run colab --auth=adc sessions
+uv run mighty-colab --auth=adc sessions
 ```
 
 ```output
@@ -513,7 +513,7 @@ uv run colab --auth=adc sessions
 ```
 
 ```bash
-uv run colab --auth=adc status -s gpu-eval
+uv run mighty-colab --auth=adc status -s gpu-eval
 ```
 
 ```output
@@ -521,7 +521,7 @@ uv run colab --auth=adc status -s gpu-eval
 ```
 
 ```bash
-uv run colab --auth=adc stop -s gpu-eval && uv run colab --auth=adc stop -s tpu-cluster
+uv run mighty-colab --auth=adc stop -s gpu-eval && uv run mighty-colab --auth=adc stop -s tpu-cluster
 ```
 
 ```output
@@ -536,11 +536,11 @@ uv run colab --auth=adc stop -s gpu-eval && uv run colab --auth=adc stop -s tpu-
 Chain several commands with `&&` so any failure aborts. The script here is a tiny stand-in (writes a JSON result to `/content`) so the chain runs in a few seconds on CPU; the typical real version would be `--gpu A100` plus a heavier dependency like `flash-attn`.
 
 ```bash
-uv run colab --auth=adc new -s pipeline \
-  && uv run colab --auth=adc install -s pipeline requests 2>&1 | tail -2 \
-  && uv run colab --auth=adc exec -s pipeline -f /tmp/local_pipeline.py \
-  && uv run colab --auth=adc download -s pipeline /content/results.json /tmp/results.json \
-  && uv run colab --auth=adc stop -s pipeline
+uv run mighty-colab --auth=adc new -s pipeline \
+  && uv run mighty-colab --auth=adc install -s pipeline requests 2>&1 | tail -2 \
+  && uv run mighty-colab --auth=adc exec -s pipeline -f /tmp/local_pipeline.py \
+  && uv run mighty-colab --auth=adc download -s pipeline /content/results.json /tmp/results.json \
+  && uv run mighty-colab --auth=adc stop -s pipeline
 ```
 
 ```output
@@ -561,7 +561,7 @@ Wrote results.json: {'status': 'ok', 'computed_at': '2026-05-07T23:22:34.924350Z
 Upload a `requirements.txt` to the VM, install via `-r`, then verify the version on the VM matches what we asked for.
 
 ```bash
-uv run colab --auth=adc new -s env-test
+uv run mighty-colab --auth=adc new -s env-test
 ```
 
 ```output
@@ -570,7 +570,7 @@ uv run colab --auth=adc new -s env-test
 ```
 
 ```bash
-uv run colab --auth=adc upload -s env-test /tmp/requirements.txt /content/requirements.txt
+uv run mighty-colab --auth=adc upload -s env-test /tmp/requirements.txt /content/requirements.txt
 ```
 
 ```output
@@ -578,7 +578,7 @@ uv run colab --auth=adc upload -s env-test /tmp/requirements.txt /content/requir
 ```
 
 ```bash
-uv run colab --auth=adc install -s env-test -r /tmp/requirements.txt 2>&1 | tail -3
+uv run mighty-colab --auth=adc install -s env-test -r /tmp/requirements.txt 2>&1 | tail -3
 ```
 
 ```output
@@ -587,7 +587,7 @@ Installation Complete (via uv)!
 ```
 
 ```bash
-echo 'import requests; print("requests:", requests.__version__)' | uv run colab --auth=adc exec -s env-test
+echo 'import requests; print("requests:", requests.__version__)' | uv run mighty-colab --auth=adc exec -s env-test
 ```
 
 ```output
@@ -599,7 +599,7 @@ requests: 2.31.0
 `colab url -s <name>` prints a URL that, when opened in a browser, makes the Colab frontend connect to the existing colab-cli session instead of provisioning a fresh VM. By default it just prints the URL (pipeable, e.g. `colab url -s s1 | xclip`); `--open` would open it directly in the system browser.
 
 ```bash
-uv run colab --auth=adc url -s env-test
+uv run mighty-colab --auth=adc url -s env-test
 ```
 
 ```output
@@ -607,7 +607,7 @@ https://colab.research.google.com/notebooks/empty.ipynb?dbu=%2Ftun%2Fm%2Fm-s-kkb
 ```
 
 ```bash
-uv run colab --auth=adc stop -s env-test
+uv run mighty-colab --auth=adc stop -s env-test
 ```
 
 ```output
@@ -616,7 +616,7 @@ uv run colab --auth=adc stop -s env-test
 ```
 
 ```bash
-uv run colab --auth=adc sessions
+uv run mighty-colab --auth=adc sessions
 ```
 
 ```output

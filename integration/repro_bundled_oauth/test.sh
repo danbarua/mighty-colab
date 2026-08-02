@@ -57,13 +57,13 @@ if [ -f "$CONFIG_PATH" ]; then
     echo "[*] Temporarily backed up .colab-cli-oauth-config.json to $CONFIG_BACKUP"
 fi
 
-# 2. Run colab sessions command to trigger the OAuth flow
-echo "[*] Running 'colab --auth=oauth2 sessions' (expecting to trigger browser flow)..."
+# 2. Run mighty-colab sessions command to trigger the OAuth flow
+echo "[*] Running 'mighty-colab --auth=oauth2 sessions' (expecting to trigger browser flow)..."
 # We expect the command to block waiting for authorization, so we run it with a timeout.
 # We redirect output to a file so we can inspect it.
 OUTPUT_LOG=$(mktemp)
 set +e
-PYTHONUNBUFFERED=1 timeout 5 uv run colab --auth=oauth2 sessions > "$OUTPUT_LOG" 2>&1
+PYTHONUNBUFFERED=1 timeout 5 uv run mighty-colab --auth=oauth2 sessions > "$OUTPUT_LOG" 2>&1
 EXIT_CODE=$?
 set -e
 

@@ -25,7 +25,7 @@ SCRIPT_FILE="plot_gen.py"
 # Cleanup on exit
 cleanup() {
     echo "[*] Cleaning up..."
-    colab stop -s "$SESSION_NAME" || true
+    mighty-colab stop -s "$SESSION_NAME" || true
     rm -f "$SCRIPT_FILE" "$OUTPUT_FILE"
 }
 trap cleanup EXIT

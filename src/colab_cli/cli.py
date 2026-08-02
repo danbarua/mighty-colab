@@ -24,6 +24,7 @@ from colab_cli import auto_update
 from colab_cli.auth import AuthProvider
 from colab_cli.common import state, setup_logging
 from colab_cli.commands import session, execution, files, automation, run, ssh, utility
+from colab_cli.commands import adopt
 
 
 class AlphabeticalGroup(TyperGroup):
@@ -139,6 +140,7 @@ def help_command(
 
 
 # Register subcommands
+adopt.register(app)
 session.register(app)
 execution.register(app)
 files.register(app)

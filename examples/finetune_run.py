@@ -13,16 +13,16 @@
 #
 # 2. Pipe the local env var into the colab kernel before running this script:
 #
-#       echo "import os; os.environ['HF_TOKEN'] = '$HF_TOKEN'" | colab exec
+#       echo "import os; os.environ['HF_TOKEN'] = '$HF_TOKEN'" | mighty-colab exec
 #
 # 3. Verify the kernel received it:
 #
-#       echo 'import os; print(bool(os.environ.get("HF_TOKEN")))' | colab exec
+#       echo 'import os; print(bool(os.environ.get("HF_TOKEN")))' | mighty-colab exec
 #       # → should print: True
 #
 # 4. Run this script:
 #
-#       colab exec -f finetune_run.py
+#       mighty-colab exec -f finetune_run.py
 #
 # Note: HF_TOKEN lives in the colab kernel for the lifetime of the session.
 # If you `colab stop` or the session expires, you'll need to re-pipe it (step 2).

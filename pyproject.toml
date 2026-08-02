@@ -32,6 +32,7 @@ dependencies = [
     "jupyter-kernel-client",
     "nbformat>=5.10.4",
     "packaging>=24.0",
+    "pip>=26.2",
     "prompt-toolkit>=3.0.52",
     "pydantic>=2.12.5",
     "pygments>=2.19.2",
@@ -43,7 +44,7 @@ dependencies = [
 ]
 
 [project.scripts]
-colab = "colab_cli.cli:main"
+mighty-colab = "colab_cli.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/danbarua/mighty-colab"
