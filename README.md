@@ -42,13 +42,14 @@ This CLI can co-exist with the official `colab` CLI.
 
 ## Installation
 
-Install the package using `uv` (recommended) or standard `pip`:
+`mighty-colab` is [published on PyPI](https://pypi.org/project/mighty-colab/). Install it using `uv`
+(recommended) or standard `pip`:
 
 ```bash
 # Using uv (recommended)
-uv tool install mighty-colab --index https://us-central1-python.pkg.dev/mighty-colab/python-repo/simple/
+uv tool install mighty-colab
 # Using pip
-pip install mighty-colab --extra-index-url https://us-central1-python.pkg.dev/mighty-colab/python-repo/simple/
+pip install mighty-colab
 ```
 
 ---
@@ -77,9 +78,8 @@ mighty-colab stop
 ## MCP Server Configuration
 
 `mighty-colab` embeds an MCP (Model Context Protocol) server, exposing its commands as
-tools for AI agents like Claude. Since the package is hosted on a private index (see
-[Installation](#installation)), point your MCP client's `uvx` invocation at that same
-index rather than installing the tool separately:
+tools for AI agents like Claude. Since the package is on PyPI, `uvx` can run it directly
+without a separate install step:
 
 ```json
 {
@@ -87,8 +87,6 @@ index rather than installing the tool separately:
     "mighty-colab": {
       "command": "uvx",
       "args": [
-        "--index",
-        "https://us-central1-python.pkg.dev/mighty-colab/python-repo/simple/",
         "mighty-colab",
         "mcp"
       ],

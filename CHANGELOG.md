@@ -31,6 +31,10 @@ below corresponds to a tag of the same name.
 - Renamed the project, PyPI package, and installed executable from
   `google-colab-cli` to **`mighty-colab`**. Install with `pip install
   mighty-colab` or `uv tool install mighty-colab`.
+- `mighty-colab` is now published on the public PyPI index (previously
+  available only via a private Artifact Registry index). `uvx mighty-colab
+  mcp` and `pip`/`uv tool install` no longer require pointing at a custom
+  index.
 
 ### Removed
 
