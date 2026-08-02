@@ -1,5 +1,6 @@
 ---
 log:
+2026-08-02: The update probe now fetches `PYPI_UPDATE_URL` (a hardcoded `https://pypi.org/pypi/mighty-colab/json` constant in `auto_update.py`), instead of the persisted `Settings.update_url`. The `update_url` field stays in `state.py`/`SettingsStore` unchanged — this fork intends to keep living alongside upstream `colab`, and leaving that file untouched keeps future merges from upstream conflict-free. Fixes installs whose `~/.config/colab-cli/settings.json` still has a stale pre-rename feed URL on disk (e.g. `google-colab-cli`), which previously overrode the code default forever since pydantic only applies a field default when the key is absent from the saved JSON.
 2026-06-11: Replaced the `oauth2` provider's `run_local_server()` (localhost redirect) with a remote copy-paste flow (`_run_remote_flow` in `auth.py`). The CLI now prints an authorization URL built with `redirect_uri=https://sdk.cloud.google.com/applicationdefaultauthcode.html` and `token_usage=remote`, then reads the pasted authorization code via `input()` and exchanges it with `flow.fetch_token(code=...)`. This is the same flow `gcloud auth application-default login` uses and works identically in local and remote/headless/container environments, removing the heuristic of whether to auto-open a browser. Confirmed server-side acceptance with a live GET-only check against the bundled cloud-SDK client (`764086051850-...`); the OOB redirect and a non-bundled client id were both verified to be rejected (`OOB flow has been blocked` / `redirect_uri_mismatch`). Unit tests in `tests/test_auth.py` assert no localhost server is started, the redirect URI + `token_usage=remote` are set, and the pasted code is exchanged.
 2026-06-01: Enabled `colab update --install` self-update on macOS in addition to Linux. Refactored platform check logic to keep the implementation DRY and updated both tests and documentation. Also, on these platforms, an additional message is shown recommending `colab update --install` to upgrade in place, positioned above the standard `pip`/`uv` installation command.
 2026-05-29: Added default OAuth2 client config (`oauth_config.json`) as a bundled package resource and restored fallback loading logic in `get_credentials()`. The CLI now falls back to using these default credentials when no explicit local config is found. Added `integration/repro_bundled_oauth` integration test.
@@ -182,14 +183,20 @@ remediation guidance) rather than silently after ~1 minute via the daemon.
     Typer callback in `cli.py`.
 -   **Manual-check**: `colab update` forces a check and prints the status.
 -   **Implementation**:
-    -   Fetches a PyPI-style JSON document from a configurable `update_url`
-        (default: `https://pypi.org/pypi/mighty-colab/json`) and reads
-        `info.version`.
+    -   Fetches a PyPI-style JSON document from the hardcoded
+        `PYPI_UPDATE_URL` constant in `auto_update.py`
+        (`https://pypi.org/pypi/mighty-colab/json`) and reads
+        `info.version`. This is **not** read from `Settings.update_url` —
+        the field still exists in `state.py`/`SettingsStore` for
+        upstream-merge compatibility, but the update probe ignores it, so a
+        stale value left over on disk from before the `mighty-colab` rename
+        can't silently keep pointing at the wrong feed.
     -   Compares the fetched version with the current CLI version using
         PEP 440 / semantic versioning, falling back to string equality when a
         version is unparseable.
     -   Persists the following fields in `~/.config/colab-cli/settings.json`:
-        -   `update_url`: source configuration.
+        -   `update_url`: unused by the update probe (see above); retained
+            only for schema/merge compatibility with upstream `colab`.
         -   `last_check`: timestamp of the last fetch (drives the daily
             throttle).
         -   `enable_update_check`: master switch for both the daily fetch and

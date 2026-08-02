@@ -38,6 +38,12 @@ from colab_cli.state import Settings
 
 # PyPI distribution name (different from the importable package name `colab`).
 PYPI_PACKAGE_NAME = "mighty-colab"
+# Hardcoded rather than read from Settings.update_url: this fork intentionally
+# diverges from upstream `colab` here, and keeping the divergence local to a
+# constant (instead of touching state.py/SettingsStore) keeps merges from
+# upstream conflict-free. It also means installs upgrading from a pre-fork
+# settings.json with a stale `update_url` on disk still probe the right feed.
+PYPI_UPDATE_URL = f"https://pypi.org/pypi/{PYPI_PACKAGE_NAME}/json"
 
 
 # ---------- Version detection -------------------------------------------
@@ -153,7 +159,7 @@ def check_for_updates(quiet: bool = False) -> None:
     current = get_app_version()
 
     try:
-        pypi = _fetch_pypi(settings.update_url, quiet)
+        pypi = _fetch_pypi(PYPI_UPDATE_URL, quiet)
         pypi_v = _parse_version(pypi)
 
         if _is_newer(pypi_v, current):
