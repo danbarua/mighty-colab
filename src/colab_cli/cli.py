@@ -24,7 +24,7 @@ from colab_cli import auto_update
 from colab_cli.auth import AuthProvider
 from colab_cli.common import state, setup_logging
 from colab_cli.commands import session, execution, files, automation, run, ssh, utility
-from colab_cli.commands import adopt
+from colab_cli.commands import adopt, mcp
 
 
 class AlphabeticalGroup(TyperGroup):
@@ -148,6 +148,7 @@ automation.register(app)
 run.register(app)
 ssh.register(app)
 utility.register(app)
+mcp.register(app)
 
 
 def main():

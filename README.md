@@ -14,7 +14,15 @@ Designed to support seamless developer productivity, headless automation, and AI
 > Looking for in-notebook, interactive agent-assisted coding instead of a terminal workflow? See the [Official Colab MCP Server](https://github.com/googlecolab/colab-mcp).
 
 > [!TIP]
-> TODO: This project intends to embed and extend a [Community Fork](https://github.com/SebastianGilPinzon/colab-mcp) of the Colab MCP Server.
+> This project embeds an MCP Server wrapper around automation-friendly CLI commands.
+
+---
+
+> [!NOTE]
+> What problem does this project solve?
+> 1) Adds `adopt session <SESSION_ID>` command to allow control of CoLab runtimes started outside the cli.
+> 2) Adds `adopt --orhanage` command to adopt all running CoLab runtime instances.
+> 3) Embeds an MCP Server.
 
 ---
 
