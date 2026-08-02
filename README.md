@@ -91,7 +91,10 @@ index rather than installing the tool separately:
         "https://us-central1-python.pkg.dev/mighty-colab/python-repo/simple/",
         "mighty-colab",
         "mcp"
-      ]
+      ],
+      "env": {
+        "UV_WORKING_DIR": "/Optional/Path/To/Working_Dir"
+      }
     }
   }
 }
