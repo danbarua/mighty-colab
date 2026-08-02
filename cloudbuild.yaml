@@ -5,6 +5,12 @@ substitutions:
   _AR_LOCATION: us-central1
   _AR_REPOSITORY: python-repo
   # PROJECT_ID is automatically populated by Cloud Build
+  # Service account registered as the PyPI trusted publisher for this project.
+  # Cloud Build's metadata proxy has no "default" identity alias, so `id`
+  # must be told explicitly which service account to mint an OIDC token for.
+  # The build's own runtime service account needs roles/iam.serviceAccountTokenCreator
+  # on this account to impersonate it.
+  _PYPI_SA_EMAIL: 195633828295-compute@developer.gserviceaccount.com
 
 steps:
   # 1. Ensure hatch-vcs sees the tag.
@@ -57,15 +63,20 @@ steps:
   - id: publish-to-pypi
     name: ghcr.io/astral-sh/uv:python3.13-bookworm
     entrypoint: bash
+    env:
+      # Cloud Build's metadata server has no "default" service-account alias
+      # (unlike a plain GCE VM), so `id` must be told which identity to
+      # request an OIDC token for. See _PYPI_SA_EMAIL above.
+      - GOOGLE_SERVICE_ACCOUNT_NAME=${_PYPI_SA_EMAIL}
     args:
       - -c
-      - |                                                                                                                                                                                                                                                                          
-        set -e                                                                                                                                                                                                                                                                     
-        uv pip install --system -U id twine                                                                                                                                                                                                                                        
-        oidc_token=$(python -m id pypi)                                                                                                                                                                                                                                            
-        resp=$(curl -s -X POST https://pypi.org/_/oidc/mint-token -d "{\"token\": \"${oidc_token}\"}")                                                                                                                                                                             
-        api_token=$(python -c "import sys,json;print(json.load(sys.stdin)['token'])" <<< "$resp")                                                                                                                                                                                  
-        TWINE_USERNAME=__token__ TWINE_PASSWORD="$api_token" twine upload dist/*          
+      - |
+        set -e
+        uv pip install --system -U id twine
+        oidc_token=$(python -m id pypi)
+        resp=$(curl -s -X POST https://pypi.org/_/oidc/mint-token -d "{\"token\": \"${oidc_token}\"}")
+        api_token=$(python -c "import sys,json;print(json.load(sys.stdin)['token'])" <<< "$resp")
+        TWINE_USERNAME=__token__ TWINE_PASSWORD="$api_token" twine upload dist/*
 
 # Surface the built artifacts in the Cloud Build UI.
 artifacts:
