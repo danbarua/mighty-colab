@@ -284,9 +284,10 @@ def run_command(
         ),
     ] = None,
 ):
-    """Run a Python script on a fresh Colab VM, then release the VM
+    """Run a Python script on a fresh Colab VM
 
-    Designed to be used as a shebang interpreter, e.g.
+    The VM is released once the script finishes. Designed to be used as a
+    shebang interpreter, e.g.
 
         #!/usr/bin/env -S mighty-colab run --gpu T4
 
