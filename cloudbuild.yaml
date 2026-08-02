@@ -75,7 +75,7 @@ steps:
         uv pip install --system -U id twine
         oidc_token=$(python -m id pypi)
         resp=$(curl -s -X POST https://pypi.org/_/oidc/mint-token -d "{\"token\": \"${oidc_token}\"}")
-        api_token=$(python -c "import sys,json;print(json.load(sys.stdin)['token'])" <<< "$resp")
+        api_token=$(python -c "import sys, json; data = json.load(sys.stdin); sys.exit('PyPI OIDC token mint failed: ' + json.dumps(data)) if 'token' not in data else print(data['token'])" <<< "$resp")
         TWINE_USERNAME=__token__ TWINE_PASSWORD="$api_token" twine upload dist/*
 
 # Surface the built artifacts in the Cloud Build UI.
