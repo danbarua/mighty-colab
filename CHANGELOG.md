@@ -57,9 +57,15 @@ below corresponds to a tag of the same name.
 - **exec:** clarified `-f/--file`'s help text — it's a local path read and
   transmitted to the remote kernel, not a path that must already exist on
   the VM.
-- **upload:** a bare HTTP 500 on upload now surfaces a hint that it may be
-  an undocumented Colab/Jupyter backend file-size limit, instead of a bare
-  "500 Server Error".
+- **upload:** large files (over 1MB) are now uploaded using the Jupyter
+  Contents API's real chunked-upload protocol (matching JupyterLab's own
+  client: 1MB slices, numbered requests ending in a `chunk: -1` finalizer)
+  instead of a single request that could hit an HTTP 500 from a
+  request-size limit somewhere in the backend stack. Automatic for both
+  `upload` and `edit` — no new command or flag. Verified live against a
+  real session at 50MB and 160MB with byte-exact integrity. A bare HTTP 500
+  on upload still surfaces a hint pointing at an undocumented backend limit
+  as a fallback, for any other cause (e.g. a storage quota).
 
 ### Removed
 

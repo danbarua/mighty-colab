@@ -13,12 +13,22 @@
 # limitations under the License.
 
 import base64
+import os
 from urllib.parse import quote
 
 import requests
 
 from colab_cli.state import SessionState
 from colab_cli.utils import get_status_code
+
+# 1MB, matching JupyterLab's own chunked-upload protocol
+# (packages/filebrowser/src/model.ts). Files at or under this size upload in
+# a single request; larger files are sliced into CHUNK_SIZE pieces sent as
+# sequential requests, the last one flagged chunk=-1 to tell the server to
+# finalize the save. This exists to route around request-body-size limits
+# in the stack (proxy/gateway/tunnel), not any limit the Contents API itself
+# imposes.
+CHUNK_SIZE = 1024 * 1024
 
 
 class ContentsClient:
@@ -69,22 +79,43 @@ class ContentsClient:
         return self._request("GET", path)
 
     def upload(self, local_path: str, remote_path: str):
-        with open(local_path, "rb") as f:
-            content = f.read()
-
-        b64_content = base64.b64encode(content).decode("ascii")
+        file_size = os.path.getsize(local_path)
         filename = remote_path.split("/")[-1]
-
-        payload = {
+        base_payload = {
             "name": filename,
             "path": remote_path,
             "type": "file",
             "format": "base64",
-            "content": b64_content,
-            "chunk": 1,
         }
 
-        return self._request("PUT", remote_path, json_data=payload)
+        if file_size <= CHUNK_SIZE:
+            with open(local_path, "rb") as f:
+                content_b64 = base64.b64encode(f.read()).decode("ascii")
+            return self._request(
+                "PUT",
+                remote_path,
+                json_data={**base_payload, "content": content_b64, "chunk": 1},
+            )
+
+        result = None
+        with open(local_path, "rb") as f:
+            chunk_index = 0
+            bytes_sent = 0
+            while True:
+                piece = f.read(CHUNK_SIZE)
+                chunk_index += 1
+                bytes_sent += len(piece)
+                is_last = bytes_sent >= file_size
+                chunk = -1 if is_last else chunk_index
+                content_b64 = base64.b64encode(piece).decode("ascii")
+                result = self._request(
+                    "PUT",
+                    remote_path,
+                    json_data={**base_payload, "content": content_b64, "chunk": chunk},
+                )
+                if is_last:
+                    break
+        return result
 
     def download(self, remote_path: str, local_path: str):
         data = self._request("GET", remote_path, params={"content": "1"})
