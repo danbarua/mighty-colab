@@ -45,14 +45,21 @@ File management on the Colab VM will be implemented using the Jupyter Contents A
 - **Base URL**: The backend URL obtained during session assignment.
 - **Proxy Token**: The `colab-runtime-proxy-token` is required for each request.
 - **Error Handling**: Handle 404 (not found) and 403 (unauthorized).
-- **Large Files**: Confirmed in practice — uploads well under 200MB can fail with a bare `500
-  Internal Server Error` from the Colab/Jupyter backend. This appears to be a size limit, but the
-  actual threshold is undocumented and not queryable from the client, so we can't detect or
-  enforce it up front. `ContentsClient._request()` (`contents.py`) special-cases a `500` on
-  `PUT`/`POST` to raise a clearer message pointing at the likely cause, rather than a bare "500
-  Server Error" — this is a better error, not a fix, since we don't control the limit itself.
-  A kernel-side streaming/chunked-upload fallback (bypassing the Contents API's single-request
-  `PUT` entirely) remains a possible future workaround if this becomes a frequent blocker.
+- **Large Files — fixed via chunked upload**: uploads well under 200MB in a single request could
+  fail with a bare `500 Internal Server Error` from the Colab/Jupyter backend, most likely a
+  request-body-size limit somewhere in the stack (proxy/gateway/tunnel), not a Contents-API-level
+  restriction. The Jupyter Contents API has a real chunked-upload protocol for exactly this —
+  confirmed against JupyterLab's own client source (`packages/filebrowser/src/model.ts`): files
+  are sliced into `CHUNK_SIZE` (1MB) pieces and sent as sequential `PUT` requests numbered
+  `1, 2, 3, ...`, with the final request flagged `chunk: -1` to tell the server to finalize the
+  save. `ContentsClient.upload()` (`contents.py`) now implements this correctly — files at/under
+  1MB still go out as a single request (`chunk: 1`, unchanged from before); larger files are
+  chunked automatically, no separate command or flag needed. Verified live against a real session:
+  50MB and 160MB uploads (the latter close to a previously-failing size) both succeeded with
+  byte-exact integrity confirmed via `os.path.getsize` on the VM.
+- The existing `500`-specific error hint in `ContentsClient._request()` is kept as a fallback for
+  any other cause of a `500` (e.g. a genuine per-account storage quota, which chunking can't route
+  around) — but the size-limit-driven case that originally motivated it should no longer occur.
 
 ## Testing Strategy
 TDD is mandatory for all file management features.
