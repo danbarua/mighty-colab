@@ -45,7 +45,14 @@ File management on the Colab VM will be implemented using the Jupyter Contents A
 - **Base URL**: The backend URL obtained during session assignment.
 - **Proxy Token**: The `colab-runtime-proxy-token` is required for each request.
 - **Error Handling**: Handle 404 (not found) and 403 (unauthorized).
-- **Large Files**: The Contents API might have limitations for very large files. If so, we'll implement a fallback via the kernel (streaming chunks).
+- **Large Files**: Confirmed in practice — uploads well under 200MB can fail with a bare `500
+  Internal Server Error` from the Colab/Jupyter backend. This appears to be a size limit, but the
+  actual threshold is undocumented and not queryable from the client, so we can't detect or
+  enforce it up front. `ContentsClient._request()` (`contents.py`) special-cases a `500` on
+  `PUT`/`POST` to raise a clearer message pointing at the likely cause, rather than a bare "500
+  Server Error" — this is a better error, not a fix, since we don't control the limit itself.
+  A kernel-side streaming/chunked-upload fallback (bypassing the Contents API's single-request
+  `PUT` entirely) remains a possible future workaround if this becomes a frequent blocker.
 
 ## Testing Strategy
 TDD is mandatory for all file management features.

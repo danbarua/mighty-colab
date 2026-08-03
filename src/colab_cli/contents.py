@@ -42,6 +42,21 @@ class ContentsClient:
         if get_status_code(response) == 404:
             raise FileNotFoundError(f"File or directory not found: {path}")
 
+        if get_status_code(response) == 500 and method in ("PUT", "POST"):
+            # The Colab/Jupyter backend returns a bare 500 for at least one
+            # known failure mode: the uploaded payload exceeding an
+            # undocumented size limit (the actual threshold isn't published
+            # anywhere and isn't queryable). This isn't a fix -- we can't
+            # enforce a limit we don't know -- just a better error message
+            # than a bare "500 Server Error" for the most likely cause.
+            raise requests.exceptions.HTTPError(
+                f"Upload failed with a server error (HTTP 500) for '{path}'. "
+                "This can happen when a file exceeds an undocumented "
+                "Colab/Jupyter backend size limit; consider splitting the "
+                "upload or reducing the file size.",
+                response=response,
+            )
+
         response.raise_for_status()
 
         # DELETE doesn't return JSON

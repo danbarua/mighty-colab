@@ -90,6 +90,24 @@ def test_404_error(mock_request, client):
 
 
 @patch("colab_cli.contents.requests.request")
+def test_upload_500_error_hints_at_size_limit(mock_request, client, tmp_path):
+    """A bare 500 from the Colab/Jupyter backend on upload is a known-but-
+    undocumented failure mode (likely a size limit with no published
+    threshold). We can't enforce a limit we don't know, but the error
+    message should at least point at the likely cause instead of a bare
+    'Internal Server Error'."""
+    mock_resp = MagicMock(spec=Response)
+    mock_resp.status_code = 500
+    mock_request.return_value = mock_resp
+
+    local_file = tmp_path / "big.bin"
+    local_file.write_bytes(b"x")
+
+    with pytest.raises(Exception, match="undocumented"):
+        client.upload(str(local_file), "content/big.bin")
+
+
+@patch("colab_cli.contents.requests.request")
 def test_download_file(mock_request, client, tmp_path):
     mock_resp = MagicMock(spec=Response)
     mock_resp.status_code = 200
