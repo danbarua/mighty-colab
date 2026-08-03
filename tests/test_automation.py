@@ -82,6 +82,66 @@ def test_cli_install(mock_state, mock_runtime_class, mock_session):
 
 @patch("colab_cli.commands.automation.ColabRuntime")
 @patch("colab_cli.common.state")
+def test_cli_install_exits_nonzero_when_install_fails(mock_state, mock_runtime_class, mock_session):
+    """`install` must surface a real failure via a non-zero exit code.
+
+    Today it doesn't: run_automation() never returns a success signal, so
+    install() always falls through to a clean exit even when the remote
+    code raised (e.g. both uv and pip failed on a nonexistent package).
+    That leaves an automated caller (a script, or the MCP wrapper) with no
+    reliable way to detect the failure other than string-sniffing stderr.
+    """
+    mock_state.store.get.return_value = mock_session
+    mock_state.resolve_session.return_value = "test-session"
+
+    mock_runtime = mock_runtime_class.return_value
+    mock_runtime.execute_code.return_value = [
+        {
+            "output_type": "error",
+            "ename": "CalledProcessError",
+            "evalue": "Command '['pip', 'install', 'this-package-does-not-exist']' returned non-zero exit status 1.",
+            "traceback": ["CalledProcessError: ..."],
+        }
+    ]
+
+    result = runner.invoke(
+        app, ["install", "-s", "test-session", "this-package-does-not-exist"]
+    )
+
+    assert result.exit_code != 0
+
+
+@patch("colab_cli.commands.automation.ColabRuntime")
+@patch("colab_cli.common.state")
+def test_cli_install_only_falls_back_to_pip_when_uv_unavailable(
+    mock_state, mock_runtime_class, mock_session
+):
+    """The generated install code must check uv's availability up front,
+    not blindly retry every uv failure via pip.
+
+    Today it uses a bare `except:` around the uv install call, so a
+    genuinely nonexistent package fails via uv, gets silently retried via
+    pip (a second, doomed network round-trip), fails identically, and both
+    tracebacks get chained together ("During handling of the above
+    exception..."). A missing/broken uv binary is the only case pip should
+    ever be asked to rescue.
+    """
+    mock_state.store.get.return_value = mock_session
+    mock_state.resolve_session.return_value = "test-session"
+
+    mock_runtime = mock_runtime_class.return_value
+    mock_runtime.execute_code.return_value = [{"text": "Installed"}]
+
+    result = runner.invoke(app, ["install", "-s", "test-session", "pandas"])
+    assert result.exit_code == 0
+
+    called_code = mock_runtime.execute_code.call_args[0][0]
+    assert "shutil.which" in called_code
+    assert "except:" not in called_code
+
+
+@patch("colab_cli.commands.automation.ColabRuntime")
+@patch("colab_cli.common.state")
 def test_cli_drivemount(mock_state, mock_runtime_class, mock_session):
     mock_state.store.get.return_value = mock_session
     mock_state.resolve_session.return_value = "test-session"
