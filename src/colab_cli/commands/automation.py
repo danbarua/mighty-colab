@@ -46,7 +46,10 @@ def run_automation(
     allow_stdin: bool = False,
     path: str = None,
     timeout: Optional[float] = None,
-):
+) -> bool:
+    """Runs `code` on the session's kernel. Returns False if any output was
+    an error, True otherwise (callers that don't need the signal can ignore
+    the return value)."""
     from colab_cli.common import state
 
     s = state.store.get(name)
@@ -153,6 +156,7 @@ def run_automation(
             name, "automation_result", {"op": op, "outputs": outputs}
         )
 
+        had_error = False
         for out in outputs:
             if "text" in out:
                 sys.stdout.write(out["text"])
@@ -161,6 +165,7 @@ def run_automation(
                 if text is not None:
                     _console.print(text)
             elif out.get("output_type") == "error":
+                had_error = True
                 ename = out.get("ename", "Error")
                 evalue = out.get("evalue", "")
                 tb = out.get("traceback", [])
@@ -168,6 +173,7 @@ def run_automation(
                     sys.stderr.write("".join(tb) + "\n")
                 else:
                     sys.stderr.write(f"{ename}: {evalue}\n")
+        return not had_error
     finally:
         s.running = None
         state.store.add(s)
@@ -249,19 +255,21 @@ def install(
 
     cmd_str = ", ".join(f"'{c}'" for c in commands)
     code = f"""
-import subprocess, sys
+import shutil, subprocess, sys
 def install():
     packages = [{cmd_str}]
-    try:
+    if shutil.which('uv'):
         subprocess.check_call(['uv', 'pip', 'install', '--system'] + packages)
         print('Installation Complete (via uv)!')
-    except:
+    else:
         subprocess.check_call([sys.executable, '-m', 'pip', 'install'] + packages)
         print('Installation Complete (via pip)!')
 install()
 """
     typer.echo(f"[colab] Installing packages on {name} (preferring uv)...")
-    run_automation(name, "install", code)
+    ok = run_automation(name, "install", code)
+    if not ok:
+        raise typer.Exit(1)
 
 
 def register(app: typer.Typer):
