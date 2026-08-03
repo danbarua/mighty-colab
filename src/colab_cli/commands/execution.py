@@ -142,7 +142,17 @@ def exec_command(
         Optional[str], typer.Option("-s", "--session", help="Session name")
     ] = None,
     file: Annotated[
-        Optional[str], typer.Option("-f", "--file", help="File to execute")
+        Optional[str],
+        typer.Option(
+            "-f",
+            "--file",
+            help=(
+                "Local file path (.py or .ipynb) to read and execute on the "
+                "remote kernel. Read from the local filesystem and "
+                "transmitted as code -- not a path that must already exist "
+                "on the VM."
+            ),
+        ),
     ] = None,
     output_image: Annotated[
         Optional[str], typer.Option("--output-image", help="Path to save plot")
