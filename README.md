@@ -143,6 +143,7 @@ Run `mighty-colab <command> --help` to view specific options, defaults, and deta
 | `mighty-colab auth [-s NAME]` | Authenticate the VM for GCP services (BigQuery, GCS, etc.) |
 | `mighty-colab drivemount [-s NAME] [PATH]` | Mount Google Drive on the VM (default: `/content/drive`) |
 | `mighty-colab install [-s NAME] [-r FILE \| PKG...]` | Install packages on the VM using `uv` (falls back to `pip`) |
+| `mighty-colab reinstall [-s NAME] [-r FILE \| PKG...]` | Same as `install`, then restarts the kernel on success so an already-imported package's new version takes effect |
 | `mighty-colab log [-s NAME] [-n N] [-o FILE]` | View or export session history (`.ipynb`, `.md`, `.txt`, `.jsonl`) |
 | `mighty-colab pay` | Open the Colab subscription page to manage compute units |
 | `mighty-colab version` | Print the installed version of the CLI |

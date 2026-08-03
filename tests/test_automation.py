@@ -142,6 +142,49 @@ def test_cli_install_only_falls_back_to_pip_when_uv_unavailable(
 
 @patch("colab_cli.commands.automation.ColabRuntime")
 @patch("colab_cli.common.state")
+def test_cli_reinstall_restarts_kernel_on_success(mock_state, mock_runtime_class, mock_session):
+    """mighty-colab extension: `reinstall` = install + restart, so an
+    already-imported package's new version is actually importable in the
+    next exec call."""
+    mock_state.store.get.return_value = mock_session
+    mock_state.resolve_session.return_value = "test-session"
+
+    mock_runtime = mock_runtime_class.return_value
+    mock_runtime.execute_code.return_value = [{"text": "Installed"}]
+
+    result = runner.invoke(app, ["reinstall", "-s", "test-session", "jax"])
+
+    assert result.exit_code == 0
+    mock_runtime.restart.assert_called_once()
+
+
+@patch("colab_cli.commands.automation.ColabRuntime")
+@patch("colab_cli.common.state")
+def test_cli_reinstall_skips_restart_on_failure(mock_state, mock_runtime_class, mock_session):
+    """A failed install must never restart the kernel -- the caller needs
+    the kernel left alone to troubleshoot, and restarting would just discard
+    diagnostic state for no benefit."""
+    mock_state.store.get.return_value = mock_session
+    mock_state.resolve_session.return_value = "test-session"
+
+    mock_runtime = mock_runtime_class.return_value
+    mock_runtime.execute_code.return_value = [
+        {
+            "output_type": "error",
+            "ename": "CalledProcessError",
+            "evalue": "boom",
+            "traceback": ["CalledProcessError: boom"],
+        }
+    ]
+
+    result = runner.invoke(app, ["reinstall", "-s", "test-session", "jax"])
+
+    assert result.exit_code != 0
+    mock_runtime.restart.assert_not_called()
+
+
+@patch("colab_cli.commands.automation.ColabRuntime")
+@patch("colab_cli.common.state")
 def test_cli_drivemount(mock_state, mock_runtime_class, mock_session):
     mock_state.store.get.return_value = mock_session
     mock_state.resolve_session.return_value = "test-session"

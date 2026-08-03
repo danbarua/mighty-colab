@@ -222,21 +222,16 @@ def drivemount(
     )
 
 
-def install(
-    session: Annotated[
-        Optional[str], typer.Option("-s", "--session", help="Session name")
-    ] = None,
-    packages: Annotated[
-        Optional[List[str]], typer.Argument(help="Packages to install")
-    ] = None,
-    requirement: Annotated[
-        Optional[str], typer.Option("-r", "--requirement", help="Requirements file")
-    ] = None,
-):
-    """Install python packages on the VM"""
+def _run_install(
+    name: str, packages: Optional[List[str]], requirement: Optional[str]
+) -> bool:
+    """Builds and runs the install code for `name`. Returns True on success.
+
+    Shared by `install` and `reinstall` so the latter can restart the kernel
+    only when this actually succeeded.
+    """
     from colab_cli.common import state
 
-    name = state.resolve_session(session)
     if not packages and not requirement:
         typer.echo("[colab] No packages or requirements specified.")
         raise typer.Exit(1)
@@ -267,12 +262,82 @@ def install():
 install()
 """
     typer.echo(f"[colab] Installing packages on {name} (preferring uv)...")
-    ok = run_automation(name, "install", code)
-    if not ok:
+    return run_automation(name, "install", code)
+
+
+def install(
+    session: Annotated[
+        Optional[str], typer.Option("-s", "--session", help="Session name")
+    ] = None,
+    packages: Annotated[
+        Optional[List[str]], typer.Argument(help="Packages to install")
+    ] = None,
+    requirement: Annotated[
+        Optional[str], typer.Option("-r", "--requirement", help="Requirements file")
+    ] = None,
+):
+    """Install python packages on the VM"""
+    from colab_cli.common import state
+
+    name = state.resolve_session(session)
+    if not _run_install(name, packages, requirement):
         raise typer.Exit(1)
+
+
+def reinstall(
+    session: Annotated[
+        Optional[str], typer.Option("-s", "--session", help="Session name")
+    ] = None,
+    packages: Annotated[
+        Optional[List[str]], typer.Argument(help="Packages to install")
+    ] = None,
+    requirement: Annotated[
+        Optional[str], typer.Option("-r", "--requirement", help="Requirements file")
+    ] = None,
+):
+    """Install python packages on the VM, then restart the kernel.
+
+    mighty-colab extension (not part of upstream `colab`): plain `install`
+    only runs pip/uv -- Python caches imports in sys.modules, so reinstalling
+    an already-imported package (e.g. upgrading a pinned jax/torch version)
+    has no visible effect until the kernel restarts. Use this instead of
+    `install` whenever the package may already be imported in the current
+    session. The restart is skipped entirely if the install fails.
+    """
+    from colab_cli.common import state
+
+    name = state.resolve_session(session)
+    if not _run_install(name, packages, requirement):
+        raise typer.Exit(1)
+
+    s = state.store.get(name)
+    typer.echo(f"[colab] Install succeeded — restarting kernel on {name}...")
+
+    def on_started(kid):
+        s.kernel_id = kid
+        state.store.add(s)
+
+    def on_sess_started(sid):
+        s.session_id = sid
+        state.store.add(s)
+
+    runtime = ColabRuntime(
+        s.url,
+        s.token,
+        kernel_id=s.kernel_id,
+        session_id=s.session_id,
+        on_kernel_started=on_started,
+        on_session_started=on_sess_started,
+    )
+    try:
+        runtime.restart()
+    finally:
+        runtime.stop()
+    typer.echo("[colab] Kernel restarted.")
 
 
 def register(app: typer.Typer):
     app.command(hidden=True)(auth)
     app.command()(drivemount)
     app.command()(install)
+    app.command()(reinstall)

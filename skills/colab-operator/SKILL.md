@@ -73,7 +73,8 @@ by running `uv tool install mighty-colab` or `pip install mighty-colab`.
 ### Automate
 - `colab auth -s <name>` — VM-side GCP creds, needed before in-VM GCS/BigQuery calls (interactive; not agent-runnable).
 - `colab drivemount -s <name> [PATH]` — mounts Drive at `/content/drive` by default (interactive; not agent-runnable).
-- `colab install -s <name> pkg1 pkg2` — installs via `uv pip install --system`, falling back to `pip`. Also `colab install -s <name> -r requirements.txt`.
+- `colab install -s <name> pkg1 pkg2` — installs via `uv pip install --system` if `uv` is on the VM, otherwise `pip`. Also `colab install -s <name> -r requirements.txt`.
+- **`colab reinstall`** — same as `install`, but restarts the kernel afterward (only if the install succeeds). Prefer this over `install` whenever the package may already be imported in the session (e.g. upgrading an already-imported `jax`/`torch`): Python caches imports in `sys.modules`, so a plain `install` alone has no visible effect on a package that's already loaded until the kernel restarts. `install` never restarts on its own — it stays a faithful match to upstream `colab install`.
 
 ### Inspect & report
 - `colab help` (or `colab help <cmd>`) lists/explains commands; the listing is alphabetical.
