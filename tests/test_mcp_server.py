@@ -212,6 +212,33 @@ def _sample(count, flag, tag):
     click.echo(f"count={count} flag={flag} tags={list(tag)}")
 
 
+@click.command()
+def _sample_ansi():
+    """A synthetic command emitting IPython-style colored traceback text."""
+    click.echo(
+        "\x1b[0;31m---------------------------------------------------------"
+        "------------------\x1b[0m\x1b[0;31mCalledProcessError\x1b[0m"
+        "Traceback (most recent call last)"
+    )
+
+
+def test_invoke_command_strips_ansi_escape_codes():
+    """Regression test for the raw \\x1b[0;31m-style SGR codes IPython's
+    colored traceback formatter embeds in Colab kernel error output --
+    unreadable noise for an MCP client, even though a human terminal wants
+    them. Stripped only at this MCP boundary; the CLI's own stdout/stderr
+    keeps its color for direct terminal use."""
+    group = click.Group(commands={"sample-ansi": _sample_ansi})
+    _, commands = build_tools(group)
+
+    ok, text = invoke_command("sample-ansi", commands["sample-ansi"], {})
+
+    assert ok is True
+    assert "\x1b" not in text
+    assert "[0;31m" not in text
+    assert "CalledProcessError" in text
+
+
 def test_synthetic_command_schema_and_dispatch():
     group = click.Group(commands={"sample": _sample})
     tools, commands = build_tools(group)

@@ -32,6 +32,7 @@ reset both to their defaults on every single call.
 
 import contextlib
 import io
+import re
 from typing import Any, Dict, List, Tuple
 
 import click
@@ -39,6 +40,18 @@ import typer
 import mcp.types as types
 from mcp.server.lowlevel import Server
 from mcp.server.stdio import stdio_server
+
+# Colab kernels format tracebacks with IPython's colored formatter, which
+# embeds raw ANSI SGR escape bytes (e.g. \x1b[0;31m) in error output. Those
+# are meaningless -- and hard to parse -- in a JSON text field read by an
+# MCP client, even though they're exactly what a human wants in a real
+# terminal. So we strip them only here, at the MCP boundary, leaving the
+# CLI's own stdout/stderr (and a human's terminal experience) untouched.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
+
+
+def _strip_ansi(text: str) -> str:
+    return _ANSI_RE.sub("", text)
 
 # Commands that require a live human at a terminal (interactive shell, editor,
 # TTY auth ceremony) or are internal-only. Never exposed as MCP tools, even
@@ -181,7 +194,7 @@ def invoke_command(name: str, cmd: click.Command, arguments: Dict[str, Any]) -> 
     output = io.StringIO()
 
     def captured() -> str:
-        return output.getvalue().strip()
+        return _strip_ansi(output.getvalue()).strip()
 
     try:
         with click.Context(cmd, info_name=name) as ctx:
