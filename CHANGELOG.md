@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 The package version is derived from the git tag via `hatch-vcs`; each release
 below corresponds to a tag of the same name.
 
-## [Unreleased]
+## [0.1.20] - 2026-08-02
 
 ### Added
 
@@ -67,6 +67,11 @@ below corresponds to a tag of the same name.
   MCP server above.
 
 [Unreleased]: https://github.com/danbarua/mighty-colab/compare/v0.6.0...HEAD
+
+---
+
+# Google CoLab CLI Change Log
+`mighty-colab` was forked from [upstream](https://github.com/googlecolab/google-colab-cli) at `v0.6.0`.
 
 ## [0.6.0] - 2026-06-16
 
