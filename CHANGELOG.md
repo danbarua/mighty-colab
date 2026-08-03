@@ -12,6 +12,12 @@ below corresponds to a tag of the same name.
 
 ### Added
 
+- **reinstall:** `colab reinstall` installs packages like `install`, then
+  restarts the kernel if (and only if) the install succeeds. Python caches
+  imports in `sys.modules`, so reinstalling an already-imported package
+  (e.g. upgrading a pinned `jax`/`torch` version) has no visible effect
+  until the kernel restarts; plain `install` intentionally never restarts
+  on its own, to stay a faithful match to upstream `colab install`.
 - **adopt:** `colab adopt ENDPOINT` brings a Colab runtime that was started
   outside the CLI (e.g. from the Colab web UI, or a process that exited
   before persisting local state) under local session tracking, so
@@ -35,6 +41,25 @@ below corresponds to a tag of the same name.
   available only via a private Artifact Registry index). `uvx mighty-colab
   mcp` and `pip`/`uv tool install` no longer require pointing at a custom
   index.
+
+### Fixed
+
+- **mcp:** Error/traceback text returned by MCP tool calls no longer
+  contains raw ANSI escape codes (e.g. `\x1b[0;31m`) from IPython's colored
+  traceback formatter. Stripped only at the MCP wrapper boundary
+  (`mcp_server.py`) — the CLI's own terminal output is untouched, so a human
+  running `mighty-colab exec` directly still gets colored tracebacks.
+- **install:** now reports failures with a non-zero exit code instead of
+  always exiting `0` regardless of outcome, and the `uv`→`pip` fallback only
+  triggers when `uv` itself isn't available on the VM rather than retrying
+  every failure (including a nonexistent package) via `pip` and chaining
+  both tracebacks together.
+- **exec:** clarified `-f/--file`'s help text — it's a local path read and
+  transmitted to the remote kernel, not a path that must already exist on
+  the VM.
+- **upload:** a bare HTTP 500 on upload now surfaces a hint that it may be
+  an undocumented Colab/Jupyter backend file-size limit, instead of a bare
+  "500 Server Error".
 
 ### Removed
 
