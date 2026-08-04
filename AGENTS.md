@@ -30,11 +30,19 @@
     - `uv run` ensures the `colab` command (entry point) is available in the shell environment.
 - **Continuous Improvement**: Whenever the user provides feedback, workflow advice, or corrections, immediately encode that advice into this `AGENTS.md` file. The goal is to learn from review and never repeat the same errors.
 
+## Git & Commit Conventions
+- Always create clean, scoped commits (one logical change per commit) and push when the work is verified.
+- Before committing, run `git status` and `git log --oneline -5` to confirm no other session has interleaved changes into the working tree. If unexpected staged/committed work appears, STOP and report before proceeding.
+- Never `git add -A` in this repo; stage explicit file paths only.
+
 ## Tools & Workflow
 - **Workflow**:
     1.  **Draft**: Plan and start the task. Create a new git branch before working on new features or changes.
     2.  **Refine**: Implement changes and verify with tests and linting. Run tests using `uv run pytest tests/` and resolve any lint errors using `uv run ruff check . --fix`.
     3.  **Finalize**: Ensure everything is complete and correct. **Whenever features are added or behaviors change, you MUST re-review the corresponding design document in `docs/` and update it to reflect the new state. You should also add a brief log entry to the frontmatter of the updated design document with the current date summarizing the change.** Finally, commit the finished changes to the git branch for review.
+
+## Extending Upstream CLIs
+- Do not change the behavior or flags of existing upstream commands. Add new, separately-named commands (e.g., `reinstall`) so patches stay upstream-mergeable.
 
 ## Subcommand Workflows
 - **Session Management**: `new`, `sessions`, `status`, `stop`.
