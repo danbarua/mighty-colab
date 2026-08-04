@@ -149,13 +149,20 @@ def build_tools(click_group: click.Group) -> Tuple[List[types.Tool], Dict[str, c
                 required.append(param.name)
 
         input_schema: Dict[str, Any] = {"type": "object", "properties": properties}
+
         if required:
             input_schema["required"] = sorted(required)
+
+        description: str = (cmd.help or cmd.short_help or "")
+
+        if name == "version":
+            from colab_cli.auto_update import get_app_version
+            description = f"Version: {get_app_version()}"
 
         tools.append(
             types.Tool(
                 name=name,
-                description=cmd.help or cmd.short_help or "",
+                description=description,
                 input_schema=input_schema,
             )
         )

@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import click
 import pytest
@@ -133,6 +133,20 @@ def test_adopt_schema_matches_command(tools_and_commands):
     assert props["orphanage"]["type"] == "boolean"
     assert props["name"]["type"] == "string"
     assert "required" not in by_name["adopt"].input_schema
+
+
+def test_version_description_returns_actual_version(click_group):
+    # `tools_and_commands` is module-scoped and built once, before this
+    # patch takes effect -- reading it here would just see whatever version
+    # was installed the first time any test in this module touched the
+    # fixture. Build tools fresh, inside the patched context, instead.
+    with patch("colab_cli.auto_update.installed_version") as mock_version:
+        mock_version.return_value = "1.2.3"
+        tools, _ = build_tools(click_group)
+        by_name = {t.name: t for t in tools}
+        tool = by_name["version"]
+        description = tool.description
+        assert description == "Version: 1.2.3"
 
 
 # --- dispatch: invoking a Click command's callback in-process ---------------

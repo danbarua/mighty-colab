@@ -85,3 +85,9 @@ dev = [
     "pytest-mock>=3.15.1",
     "ruff>=0.15.6",
 ]
+
+[tool.ruff]
+# Sample/reference scripts, not part of the installed package -- they
+# intentionally install dependencies at runtime (`os.system("pip install
+# ...")`) before importing them, which trips E402.
+extend-exclude = ["examples"]
