@@ -52,8 +52,9 @@ by running `uv tool install mighty-colab` or `pip install mighty-colab`.
 ### Adopt orphaned sessions
 - If `colab sessions` shows an assignment marked `[?]` (billed server-side but with no local record — e.g. started from the Colab web UI, or a process that exited before persisting state), claim it with `colab adopt <ENDPOINT>` (same endpoint string `colab sessions`/`colab status` print).
 - `colab adopt --orphanage` claims every `[?]` assignment in one pass instead of one at a time.
-- `-n/--name <name>` sets a friendly local name (defaults to the endpoint string itself).
-- Idempotent: re-adopting an endpoint already tracked locally — including a session created normally via `colab new` — is a no-op, not a reset.
+- `-n/--name <name>` sets a friendly local name (defaults to the endpoint string itself). Reusing a name that already tracks a *different* endpoint errors instead of silently repointing it — pick another name or `colab stop -s <name>` first.
+- **No keep-alive daemon by default** — adopt assumes whoever created the runtime (e.g. an open Colab browser tab) is already keeping it alive. Pass `--keep-alive` to also start the CLI's own daemon, e.g. for a runtime whose creating process/tab is gone.
+- Re-running `colab adopt <ENDPOINT>` for a session already tracked under the *same* name refreshes its runtime proxy token (expires roughly hourly) — safe to re-run, and the fix for a stale-token 401 instead of tearing down and reallocating. Re-adopting under a *different* name, or an endpoint already owned by a session created via `colab new`, is a no-op.
 
 ### Execute
 - **Preferred**: `colab exec -s <name> -f <script.py>` runs a local script on the remote VM (read locally, sent to the kernel — no manual upload needed).

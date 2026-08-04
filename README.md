@@ -116,8 +116,8 @@ Run `mighty-colab <command> --help` to view specific options, defaults, and deta
 | `mighty-colab restart-kernel [-s NAME]` | Restart the active session's Jupyter kernel |
 | `mighty-colab stop [-s NAME]` | Terminate a session VM and tear down its keep-alive daemon |
 | `mighty-colab url [-s NAME] [--open]` | Print or open a browser URL connecting to the active session |
-| `mighty-colab adopt ENDPOINT [-n NAME]` | Bring a runtime started outside the CLI under local session tracking |
-| `mighty-colab adopt --orphanage` | Adopt every orphaned server-side assignment at once |
+| `mighty-colab adopt ENDPOINT [-n NAME] [--keep-alive]` | Bring a runtime started outside the CLI under local session tracking (re-running refreshes its proxy token) |
+| `mighty-colab adopt --orphanage [--keep-alive]` | Adopt every orphaned server-side assignment at once |
 
 ### Execution
 | Command | Description |
