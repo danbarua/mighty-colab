@@ -174,8 +174,11 @@ def edit(
 
         try:
             contents.download(remote_path, local_path)
-        except Exception:
-            # If download fails, assume file doesn't exist and start empty
+        except FileNotFoundError:
+            # Genuinely doesn't exist yet -- start empty. Any other
+            # exception (auth/network/5xx) is not "the file doesn't
+            # exist" and must propagate instead of silently opening an
+            # empty buffer that could then overwrite real remote content.
             pass
 
         hash_before = get_file_hash(local_path)

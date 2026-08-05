@@ -538,6 +538,28 @@ def test_cli_edit_with_changes(
     assert "Edited and uploaded 'remote.txt'" in result.output
 
 
+@patch("colab_cli.commands.files.ContentsClient")
+@patch("click.edit")
+def test_cli_edit_propagates_non_notfound_download_errors(
+    mock_edit, mock_contents_class, mock_store, mock_common_state
+):
+    """Regression guard: edit() must only treat a genuine FileNotFoundError
+    as "the file doesn't exist yet, start empty" -- any other download
+    failure (auth, network, 5xx) must NOT be silently swallowed, since
+    that would let the command proceed to open an empty editor buffer and
+    potentially upload it over the real remote file."""
+    mock_store.get.return_value = MagicMock()
+    mock_common_state.resolve_session.return_value = "s1"
+    mock_contents_class.return_value.download.side_effect = ConnectionError(
+        "backend unreachable"
+    )
+
+    result = runner.invoke(app, ["edit", "-s", "s1", "remote.txt"])
+
+    assert result.exit_code != 0
+    mock_contents_class.return_value.upload.assert_not_called()
+
+
 def test_cli_edit_not_found_goes_to_stderr(mock_store, mock_common_state):
     mock_store.get.return_value = None
     mock_common_state.resolve_session.return_value = "bogus"
