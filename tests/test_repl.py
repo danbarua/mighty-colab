@@ -131,6 +131,36 @@ def test_cli_repl_piped(mock_runtime_class, mock_store, mock_common_state):
     mock_runtime.execute_code.assert_any_call("print(1)", output_hook=ANY)
 
 
+def test_cli_repl_piped_exits_nonzero_when_remote_code_raises(
+    mock_runtime_class, mock_store, mock_common_state
+):
+    """Regression guard: piped `colab repl` must surface a remote exception
+    as a non-zero exit code, not just print it and exit 0 -- the same class
+    of bug fixed in `exec_command` (commit 679c0b6)."""
+    mock_session = MagicMock()
+    mock_session.name = "s1"
+    mock_session.url = "http://url"
+    mock_session.token = "token"
+    mock_session.kernel_id = None
+    mock_session.session_id = None
+    mock_store.get.return_value = mock_session
+
+    mock_common_state.resolve_session.return_value = "s1"
+    mock_runtime = mock_runtime_class.return_value
+    mock_runtime.execute_code.return_value = [
+        {
+            "output_type": "error",
+            "ename": "ValueError",
+            "evalue": "boom",
+            "traceback": ["Traceback...\n", "ValueError: boom\n"],
+        }
+    ]
+
+    result = runner.invoke(app, ["repl", "-s", "s1"], input="raise ValueError('boom')")
+
+    assert result.exit_code == 1
+
+
 def test_cli_repl_missing_session(mock_common_state):
     mock_common_state.resolve_session.side_effect = SystemExit(1)
     result = runner.invoke(app, ["repl", "-s", "missing"])
