@@ -118,20 +118,73 @@ that `---` separator.
     not valid git syntax (`--tag` isn't a flag; it's `--tags` for "push all
     tags", which isn't what's wanted here).
 
-14. ```bash
-    gh release create vX.Y.Z --generate-notes
+## Wait for Cloud Build, then publish the GitHub Release
+
+The tag push above triggers Cloud Build (`cloudbuild.yaml`, trigger
+`publish-on-tag` in the `mighty-colab` GCP project) to build and publish to
+PyPI — asynchronously, on GitHub's webhook, completely decoupled from this
+script. **Do not create the GitHub Release until that build actually
+succeeds** — the Release object is what GitHub's "Watch → Releases" email
+notification fires on, so creating it unconditionally would email "release
+done" even when the PyPI publish silently failed.
+
+14. **Locate the triggered build** (there's a webhook delay before it
+    appears — poll up to ~60s):
+    ```bash
+    BUILD_ID=""
+    for i in $(seq 1 12); do
+      BUILD_ID=$(gcloud builds list --project=mighty-colab \
+        --filter="substitutions.TAG_NAME=vX.Y.Z" \
+        --format="value(id)" --limit=1)
+      [ -n "$BUILD_ID" ] && break
+      sleep 5
+    done
     ```
-    Publishes an actual GitHub Release object (the tag alone doesn't create
-    one). This exists purely so GitHub's own repo-watch notifications
-    ("Watch" → "Custom" → "Releases") can email the maintainer on release —
-    it's not the canonical release notes source (`CHANGELOG.md` is). If
-    this step fails (e.g. `gh` not installed/authenticated), don't fail the
-    whole release over it — the tag has already pushed and `hatch-vcs`
-    already picked it up; just tell the user the Release object step failed
-    and they can run the command above manually.
+    If `BUILD_ID` is still empty after this loop, skip straight to the
+    "Cloud Build not confirmed" outcome below — do not treat it as a script
+    error, and do not retry indefinitely.
+
+15. **Poll until the build reaches a terminal status** (cap ~10 minutes;
+    real releases have taken ~60-90s historically, so this is a generous
+    ceiling, not an expected wait):
+    ```bash
+    STATUS="QUEUED"
+    for i in $(seq 1 40); do
+      STATUS=$(gcloud builds describe "$BUILD_ID" --project=mighty-colab \
+        --format="value(status)")
+      case "$STATUS" in
+        SUCCESS|FAILURE|INTERNAL_ERROR|TIMEOUT|CANCELLED|EXPIRED) break ;;
+      esac
+      sleep 15
+    done
+    ```
+
+16. **Branch on the outcome:**
+    - **`STATUS = SUCCESS`**: publish the Release.
+      ```bash
+      gh release create vX.Y.Z --generate-notes
+      ```
+      This is not the canonical release-notes source (`CHANGELOG.md` is) —
+      it exists purely so GitHub's own repo-watch notification can email
+      the maintainer on a *confirmed-published* release. If `gh` itself
+      fails here (not installed/authenticated), don't fail the whole
+      release over it — report that the Release step failed and that the
+      user can run the command above manually once `gh` is fixed.
+    - **`BUILD_ID` was never found, or `STATUS` is anything else** (still
+      building past the cap, `FAILURE`, `INTERNAL_ERROR`, `TIMEOUT`,
+      `CANCELLED`, `EXPIRED`): do **not** create a GitHub Release. Report
+      to the user that the tag/version bump succeeded but Cloud Build did
+      not confirm success, with a link to
+      `https://console.cloud.google.com/cloud-build/builds;region=global/${BUILD_ID}?project=mighty-colab`
+      (or, if `BUILD_ID` is empty, the builds list:
+      `https://console.cloud.google.com/cloud-build/builds?project=mighty-colab`)
+      so they can check manually and create the Release themselves once
+      they've confirmed the PyPI publish actually happened.
 
 ## Done
 
 Report the new tag to the user and note that `hatch-vcs` will pick it up
 automatically on the next build (`uv run mighty-colab version` will reflect
-it once the tag is checked out locally).
+it once the tag is checked out locally). State clearly whether the GitHub
+Release was published (Cloud Build confirmed SUCCESS) or skipped (build
+not confirmed) — these are two different end states, not the same "done."
