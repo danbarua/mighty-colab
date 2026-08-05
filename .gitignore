@@ -73,6 +73,9 @@ venv.bak/
 .mypy_cache/
 .pyre/
 
+# Claude Code worktree scratch space (isolated agent work)
+.claude/worktrees/
+
 # Logs
 colab.log
 *.log
