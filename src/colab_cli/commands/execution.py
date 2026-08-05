@@ -179,7 +179,7 @@ def exec_command(
     name = state.resolve_session(session)
     s = state.store.get(name)
     if not s:
-        typer.echo(f"[colab] Session '{name}' not found.")
+        typer.echo(f"[colab] Session '{name}' not found.", err=True)
         raise typer.Exit(1)
 
     code_blocks = []
@@ -202,7 +202,10 @@ def exec_command(
                 code_blocks.append({"code": f.read(), "id": None})
     else:
         if is_stdin_tty():
-            typer.echo("[colab] Error: No input provided. Pipe code or provide a file.")
+            typer.echo(
+                "[colab] Error: No input provided. Pipe code or provide a file.",
+                err=True,
+            )
             raise typer.Exit(1)
         code_blocks.append({"code": sys.stdin.read(), "id": None})
 
@@ -233,7 +236,8 @@ def exec_command(
     except Exception as e:
         if is_terminal_error(e):
             typer.echo(
-                f"[colab] Session '{name}' appears to be lost (404/401). Cleaning up."
+                f"[colab] Session '{name}' appears to be lost (404/401). Cleaning up.",
+                err=True,
             )
             state.prune_session(name)
             raise typer.Exit(1)
@@ -319,7 +323,7 @@ def repl(
     name = state.resolve_session(session)
     s = state.store.get(name)
     if not s:
-        typer.echo(f"[colab] Session '{name}' not found.")
+        typer.echo(f"[colab] Session '{name}' not found.", err=True)
         raise typer.Exit(1)
 
     def on_started(kid):
@@ -346,7 +350,8 @@ def repl(
     except Exception as e:
         if is_terminal_error(e):
             typer.echo(
-                f"[colab] Session '{name}' appears to be lost (404/401). Cleaning up."
+                f"[colab] Session '{name}' appears to be lost (404/401). Cleaning up.",
+                err=True,
             )
             state.prune_session(name)
             raise typer.Exit(1)
@@ -410,7 +415,7 @@ def console(
     name = state.resolve_session(session)
     s = state.store.get(name)
     if not s:
-        typer.echo(f"[colab] Session '{name}' not found.")
+        typer.echo(f"[colab] Session '{name}' not found.", err=True)
         raise typer.Exit(1)
     state.history.log_event(s.name, "console_started", {})
     s.running = "console"
@@ -420,7 +425,8 @@ def console(
     except Exception as e:
         if is_terminal_error(e):
             typer.echo(
-                f"[colab] Session '{name}' appears to be lost (404/401). Cleaning up."
+                f"[colab] Session '{name}' appears to be lost (404/401). Cleaning up.",
+                err=True,
             )
             state.prune_session(name)
             raise typer.Exit(1)

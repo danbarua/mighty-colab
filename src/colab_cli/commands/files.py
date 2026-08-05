@@ -35,7 +35,7 @@ def ls(
     name = state.resolve_session(session)
     s = state.store.get(name)
     if not s:
-        typer.echo(f"[colab] Session '{name}' not found.")
+        typer.echo(f"[colab] Session '{name}' not found.", err=True)
         raise typer.Exit(1)
     contents = ContentsClient(s)
     try:
@@ -51,7 +51,7 @@ def ls(
         else:
             typer.echo(data.get("name"))
     except Exception as e:
-        typer.echo(f"[colab] Error: {e}")
+        typer.echo(f"[colab] Error: {e}", err=True)
         raise typer.Exit(1)
 
 
@@ -67,7 +67,7 @@ def rm(
     name = state.resolve_session(session)
     s = state.store.get(name)
     if not s:
-        typer.echo(f"[colab] Session '{name}' not found.")
+        typer.echo(f"[colab] Session '{name}' not found.", err=True)
         raise typer.Exit(1)
     contents = ContentsClient(s)
     try:
@@ -75,7 +75,7 @@ def rm(
         state.history.log_event(name, "file_operation", {"op": "rm", "path": path})
         typer.echo(f"[colab] Deleted {path}")
     except Exception as e:
-        typer.echo(f"[colab] Error: {e}")
+        typer.echo(f"[colab] Error: {e}", err=True)
         raise typer.Exit(1)
 
 
@@ -92,10 +92,10 @@ def upload(
     name = state.resolve_session(session)
     s = state.store.get(name)
     if not s:
-        typer.echo(f"[colab] Session '{name}' not found.")
+        typer.echo(f"[colab] Session '{name}' not found.", err=True)
         raise typer.Exit(1)
     if not os.path.isfile(local_path):
-        typer.echo(f"[colab] Local file '{local_path}' not found.")
+        typer.echo(f"[colab] Local file '{local_path}' not found.", err=True)
         raise typer.Exit(1)
     contents = ContentsClient(s)
     try:
@@ -107,7 +107,7 @@ def upload(
         )
         typer.echo(f"[colab] Uploaded '{local_path}' to '{remote_path}'")
     except Exception as e:
-        typer.echo(f"[colab] Upload failed: {e}")
+        typer.echo(f"[colab] Upload failed: {e}", err=True)
         raise typer.Exit(1)
 
 
@@ -128,7 +128,7 @@ def download(
     name = state.resolve_session(session)
     s = state.store.get(name)
     if not s:
-        typer.echo(f"[colab] Session '{name}' not found.")
+        typer.echo(f"[colab] Session '{name}' not found.", err=True)
         raise typer.Exit(1)
     contents = ContentsClient(s)
     try:
@@ -140,7 +140,7 @@ def download(
         )
         typer.echo(f"[colab] Downloaded '{remote_path}' to '{local_path}'")
     except Exception as e:
-        typer.echo(f"[colab] Download failed: {e}")
+        typer.echo(f"[colab] Download failed: {e}", err=True)
         raise typer.Exit(1)
 
 
@@ -156,7 +156,7 @@ def edit(
     name = state.resolve_session(session)
     s = state.store.get(name)
     if not s:
-        typer.echo(f"[colab] Session '{name}' not found.")
+        typer.echo(f"[colab] Session '{name}' not found.", err=True)
         raise typer.Exit(1)
 
     contents = ContentsClient(s)
