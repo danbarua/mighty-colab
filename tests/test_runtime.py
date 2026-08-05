@@ -15,6 +15,7 @@
 from unittest.mock import MagicMock, patch
 
 import jupyter_kernel_client
+import requests
 
 from colab_cli.runtime import ColabRuntime
 
@@ -47,6 +48,32 @@ def test_colab_runtime_kernel_client():
         mock_kc_cls.assert_called_once_with(**expected_kwargs)
         mock_kc.start.assert_called_once()
         assert kc == mock_kc
+
+
+def test_colab_runtime_kernel_client_retry_cleans_up_stale_client():
+    """On a ReadTimeout/ConnectTimeout retry, the partially-started client
+    from the failed attempt must be cleaned up (channels/socket closed)
+    before the reference to it is discarded and replaced on the next
+    attempt -- otherwise whatever channels/socket the partial start opened
+    are leaked."""
+    target_attr = "ColabKernelClient" if hasattr(jupyter_kernel_client, "ColabKernelClient") else "KernelClient"
+
+    mock_client_1 = MagicMock()
+    mock_client_1.start.side_effect = requests.exceptions.ReadTimeout()
+    mock_client_2 = MagicMock()
+
+    with patch.object(
+        jupyter_kernel_client, target_attr, side_effect=[mock_client_1, mock_client_2]
+    ), patch("colab_cli.runtime.time.sleep") as mock_sleep:
+        runtime = ColabRuntime("http://url", "token123")
+
+        kc = runtime.kernel_client
+
+        assert kc == mock_client_2
+        mock_sleep.assert_called_once()
+        # The first (failed) client's channels/socket must be closed before
+        # the retry loop discards the reference to it.
+        mock_client_1._manager.client.stop_channels.assert_called_once()
 
 
 def test_colab_runtime_execute_code():
