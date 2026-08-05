@@ -8,6 +8,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 The package version is derived from the git tag via `hatch-vcs`; each release
 below corresponds to a tag of the same name.
 
+## [Unreleased]
+
+### Added
+
+- **adopt:** `--keep-alive` opts in to starting the CLI's own keep-alive
+  daemon on `colab adopt ENDPOINT` / `colab adopt --orphanage`. Previously
+  adopt never started one, assuming the runtime's creator (e.g. an open
+  Colab browser tab) was already keeping it alive.
+
+### Fixed
+
+- **exec:** `mighty-colab exec` now exits with a non-zero status code when
+  the remote script raises an uncaught exception, instead of always
+  exiting `0` regardless of outcome. Applies uniformly whether the code
+  comes from stdin, a `.py` file, or a notebook — a failing notebook cell
+  still lets later cells run and the output notebook still gets saved;
+  only the process exit code now reflects the failure.
+- **adopt:** re-running `colab adopt NAME` with a name that already tracks
+  a *different* endpoint now errors instead of silently repointing it.
+  Re-adopting an endpoint already tracked under the *same* name now
+  refreshes its runtime proxy token (which expires roughly hourly) instead
+  of being an unconditional no-op.
+- **mcp:** the `version` tool's description now matches the CLI's own
+  `colab version` output format (`"Version: X.Y.Z"`) instead of the bare
+  version string.
+
 ## [0.1.20] - 2026-08-02
 
 ### Added
@@ -72,7 +98,7 @@ below corresponds to a tag of the same name.
 - The experimental `colab-mcp` git submodule, superseded by the hand-rolled
   MCP server above.
 
-[Unreleased]: https://github.com/danbarua/mighty-colab/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/danbarua/mighty-colab/compare/v0.1.20...HEAD
 
 ---
 
