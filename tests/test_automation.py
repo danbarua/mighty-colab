@@ -33,6 +33,42 @@ def mock_session():
 
 @patch("colab_cli.commands.automation.ColabRuntime")
 @patch("colab_cli.common.state")
+def test_run_automation_reuses_the_persistent_kernel(mock_state, mock_runtime_class):
+    """Regression guard: run_automation() previously started a brand-new,
+    untracked kernel on every auth/drivemount/install call (no kernel_id/
+    session_id passed, no start callbacks). Since ColabRuntime forces
+    _own_kernel=False and stop() defaults shutdown_kernel=False, that kernel
+    was never recorded and never shut down by anything -- not even `colab
+    stop`. It must instead reuse and persist the session's tracked kernel,
+    exactly like exec_command/repl/reinstall's own restart step do."""
+    from colab_cli.state import SessionState
+
+    session = SessionState(
+        name="test-session",
+        token="test-token",
+        url="https://test.url",
+        endpoint="e1",
+        kernel_id="kernel-abc",
+        session_id="jsess-xyz",
+    )
+    mock_state.store.get.return_value = session
+
+    mock_runtime = mock_runtime_class.return_value
+    mock_runtime.execute_code.return_value = [{"text": "ok"}]
+
+    from colab_cli.commands.automation import run_automation
+
+    run_automation("test-session", "auth", "print(1)")
+
+    _, kwargs = mock_runtime_class.call_args
+    assert kwargs.get("kernel_id") == "kernel-abc"
+    assert kwargs.get("session_id") == "jsess-xyz"
+    assert kwargs.get("on_kernel_started") is not None
+    assert kwargs.get("on_session_started") is not None
+
+
+@patch("colab_cli.commands.automation.ColabRuntime")
+@patch("colab_cli.common.state")
 def test_cli_auth(mock_state, mock_runtime_class, mock_session):
     mock_state.store.get.return_value = mock_session
     mock_state.resolve_session.return_value = "test-session"
