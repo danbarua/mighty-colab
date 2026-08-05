@@ -280,6 +280,30 @@ def test_cli_drivemount(mock_state, mock_runtime_class, mock_session):
 
 @patch("colab_cli.commands.automation.ColabRuntime")
 @patch("colab_cli.common.state")
+def test_drivemount_escapes_path_with_quotes(mock_state, mock_runtime_class, mock_session):
+    """Regression guard: the mount path was interpolated into the generated
+    remote code via manual f-string quoting (f"'{path}'") with no escaping --
+    the same class of bug fixed in _run_install (AGENTS.md #23's repr()
+    pattern applies here too). A path containing a single quote must not
+    corrupt the generated Python source."""
+    mock_state.store.get.return_value = mock_session
+    mock_state.resolve_session.return_value = "test-session"
+
+    mock_runtime = mock_runtime_class.return_value
+    mock_runtime.execute_code.return_value = [{"text": "Mounted"}]
+
+    path = "/weird'path"
+    runner.invoke(app, ["drivemount", "-s", "test-session", path])
+
+    called_code = mock_runtime.execute_code.call_args[0][0]
+    # Must be syntactically valid Python -- a quote in `path` currently
+    # breaks the naive f"'{path}'" interpolation.
+    compile(called_code, "<drivemount>", "exec")
+    assert repr(path) in called_code
+
+
+@patch("colab_cli.commands.automation.ColabRuntime")
+@patch("colab_cli.common.state")
 def test_cli_auth_uses_long_timeout(mock_state, mock_runtime_class, mock_session):
     """`colab auth` walks the user through a paste-the-code flow that
     routinely takes >10s, so it must pass a generous timeout to
