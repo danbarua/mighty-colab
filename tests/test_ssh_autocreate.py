@@ -23,6 +23,7 @@ disconnect (installing SIGHUP/SIGTERM/SIGINT handlers so teardown survives the
 way OpenSSH ends a ProxyCommand).
 """
 
+import re
 from unittest.mock import MagicMock
 
 from colab_cli.cli import app
@@ -32,6 +33,8 @@ from typer.testing import CliRunner
 import typer
 
 runner = CliRunner()
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
 
 
 def _make_session(
@@ -306,8 +309,16 @@ def test_proxy_mode_signal_handler_installation(
 
 
 def test_ssh_help_advertises_autocreate_flags():
-    """`colab ssh --help` advertises --rm, --gpu, and --tpu."""
+    """`colab ssh --help` advertises --rm, --gpu, and --tpu.
+
+    Rich's syntax highlighting for Click options colors each leading `-`
+    separately (e.g. `--rm` renders as `\x1b[1;36m-\x1b[0m\x1b[1;36m-rm\x1b[0m`),
+    so a raw substring search for "--rm" can fail even though the flag is
+    visually present -- strip ANSI codes first, same as `mcp_server.py`'s
+    `_strip_ansi` does at its own boundary.
+    """
     result = runner.invoke(app, ["ssh", "--help"])
     assert result.exit_code == 0
+    output = _ANSI_RE.sub("", result.output)
     for flag in ("--rm", "--gpu", "--tpu"):
-        assert flag in result.output
+        assert flag in output
