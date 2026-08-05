@@ -121,6 +121,9 @@ def _refresh_endpoint(existing: SessionState, keep_alive: bool):
 
     if keep_alive and not existing.keep_alive_pid:
         _preflight_keep_alive(existing.endpoint, existing.name)
+        # Persist BEFORE spawning so the daemon's own state.store.get(name)
+        # check doesn't race the parent.
+        state.store.add(existing)
         existing.keep_alive_pid = _start_keep_alive(existing.endpoint, existing.name)
 
     state.store.add(existing)
