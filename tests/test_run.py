@@ -559,6 +559,39 @@ def test_run_systemexit_zero_treated_as_success(
     mock_client.unassign.assert_called_once_with("ep-123")
 
 
+def test_run_systemexit_false_treated_as_success(
+    mock_client,
+    mock_store,
+    mock_runtime_class,
+    mock_spawn_keep_alive,
+    assign_response,
+    script_path,
+):
+    """`raise SystemExit(False)` must exit 0, matching real CPython
+    semantics (bool is an int subclass, int(False) == 0) -- the kernel
+    reports evalue as the string "False", which isn't int()-able, so this
+    must be special-cased the same way "0"/"None"/"" already are."""
+    mock_client.assign.return_value = assign_response
+    mock_runtime = mock_runtime_class.return_value
+
+    def execute_with_systemexit(code, output_hook=None, **kwargs):
+        outputs = [_systemexit_output("False")]
+        if output_hook:
+            for o in outputs:
+                output_hook(o)
+        return outputs
+
+    mock_runtime.execute_code.side_effect = execute_with_systemexit
+
+    persisted = {}
+    mock_store.add.side_effect = lambda s: persisted.setdefault("s", s)
+    mock_store.get.side_effect = lambda name: persisted.get("s")
+
+    result = runner.invoke(app, ["run", str(script_path)])
+    assert result.exit_code == 0, result.output
+    mock_client.unassign.assert_called_once_with("ep-123")
+
+
 def test_run_systemexit_nonzero_propagates_code(
     mock_client,
     mock_store,
