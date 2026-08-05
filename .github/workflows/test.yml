@@ -1,0 +1,25 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+          python-version: "3.12"
+
+      # --frozen: fail loudly if uv.lock is out of sync with pyproject.toml,
+      # instead of silently re-resolving it (see the mcp-dependency uv.lock
+      # drift this caught locally on 2026-08-03).
+      - run: uv run --frozen pytest tests/ -q
+
+      - run: uv run --frozen ruff check .
