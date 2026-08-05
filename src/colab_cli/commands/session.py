@@ -344,7 +344,8 @@ def status(
         if s:
             _print_status_for(s)
         else:
-            typer.echo(f"[colab] Session '{session}' not found.")
+            typer.echo(f"[colab] Session '{session}' not found.", err=True)
+            raise typer.Exit(1)
         return
 
     if not local_sessions:
@@ -365,8 +366,8 @@ def stop(
     name = state.resolve_session(session)
     s = state.store.get(name)
     if not s:
-        typer.echo(f"[colab] Session '{name}' not found.")
-        return
+        typer.echo(f"[colab] Session '{name}' not found.", err=True)
+        raise typer.Exit(1)
 
     typer.echo(f"[colab] Stopping session '{name}'...")
     if s.keep_alive_pid:

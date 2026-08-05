@@ -177,8 +177,8 @@ def test_cli_status(mock_store, mock_common_state):
     # Test with missing session
     mock_store.get.return_value = None
     result = runner.invoke(app, ["status", "-s", "missing"])
-    assert result.exit_code == 0
-    assert "Session 'missing' not found" in result.output
+    assert result.exit_code == 1
+    assert "Session 'missing' not found" in result.stderr
 
     # Test list all sessions: same unified format
     mock_store.get.return_value = mock_session_state
@@ -245,6 +245,18 @@ def test_cli_stop(mock_client, mock_store, mock_common_state):
 
     mock_client.unassign.assert_called_with("e1")
     mock_store.remove.assert_called_with("s1")
+
+
+def test_cli_stop_missing_session_fails(mock_client, mock_store, mock_common_state):
+    mock_store.get.return_value = None
+    mock_common_state.resolve_session.return_value = "missing"
+
+    result = runner.invoke(app, ["stop", "-s", "missing"])
+    assert result.exit_code == 1
+    assert "Session 'missing' not found" in result.stderr
+
+    mock_client.unassign.assert_not_called()
+    mock_store.remove.assert_not_called()
 
 
 def test_cli_sessions_prune(mock_common_state):
