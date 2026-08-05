@@ -35,17 +35,21 @@ below corresponds to a tag of the same name.
 
 ### Changed
 
-- **BREAKING: `status`:** `colab status -s NAME` on a session with no local
-  record now prints "not found" to stderr and exits non-zero, matching
-  every other session-targeting *query*/*operate* command (`exec`, `repl`,
+- **`status`:** `colab status -s NAME` on a session with no local record
+  now prints "not found" to stderr and exits non-zero, matching every
+  other session-targeting *query*/*operate* command (`exec`, `repl`,
   `console`, `ls`, `rm`, `upload`, `download`, `edit`, `url`, `ssh`).
   Previously it printed to stdout and exited `0`, so a caller couldn't
   distinguish "found and OK" from "no such session" via exit code alone.
-  Any script that greps `status`'s stdout for "not found" instead of
-  checking the exit code, or redirects stderr away before grepping, needs
-  updating. Also affects the MCP server: `call_tool("status", ...)` on an
-  unknown session now returns an error result (`is_error: true`) instead of
-  a successful result containing the "not found" text.
+  This does not break a grep-based idempotency guard that checks for the
+  "not found" text inside an `if` (rather than trusting `status`'s own
+  exit code) and merges stderr into what it greps — the shape used by at
+  least one known downstream consumer. A caller that checks `status`'s
+  exit code directly, or that greps stdout only without redirecting
+  stderr, will see a real behavior change. Also affects the MCP server:
+  `call_tool("status", ...)` on an unknown session now returns an error
+  result (`is_error: true`) instead of a successful result containing the
+  "not found" text.
 
   `colab stop` deliberately keeps its existing exit-0/stdout behavior on a
   missing session and is *not* part of this change: `stop` is a teardown
