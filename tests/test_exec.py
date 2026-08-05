@@ -188,6 +188,19 @@ def test_cli_exec_not_found(mock_common_state):
     assert result.exit_code == 1
 
 
+def test_cli_exec_session_missing_from_store_goes_to_stderr(
+    mock_store, mock_common_state
+):
+    # Case where the session simply isn't in the store (exercises the
+    # "not found" echo inside exec_command itself, and confirms it lands
+    # on stderr rather than stdout).
+    mock_store.get.return_value = None
+    mock_common_state.resolve_session.return_value = "missing"
+    result = runner.invoke(app, ["exec", "-s", "missing"])
+    assert result.exit_code == 1
+    assert "not found" in result.stderr
+
+
 def test_cli_exec_no_input(mock_store, mock_common_state, mocker):
     mock_session = MagicMock()
     mock_session.name = "s1"
@@ -201,6 +214,7 @@ def test_cli_exec_no_input(mock_store, mock_common_state, mocker):
     result = runner.invoke(app, ["exec", "-s", "s1"])
     assert result.exit_code == 1
     assert "No input provided" in result.output
+    assert "No input provided" in result.stderr
 
 
 @patch("colab_cli.commands.execution.handle_image")
@@ -310,6 +324,7 @@ def test_cli_exec_lost_session_prunes(
     result = runner.invoke(app, ["exec", "-s", "lost-sess"], input="print(1)")
     assert result.exit_code == 1
     assert "appears to be lost" in result.output
+    assert "appears to be lost" in result.stderr
     mock_common_state.prune_session.assert_called_once_with("lost-sess")
 
 
