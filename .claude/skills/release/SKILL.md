@@ -118,9 +118,20 @@ that `---` separator.
     not valid git syntax (`--tag` isn't a flag; it's `--tags` for "push all
     tags", which isn't what's wanted here).
 
+14. ```bash
+    gh release create vX.Y.Z --generate-notes
+    ```
+    Publishes an actual GitHub Release object (the tag alone doesn't create
+    one). This exists purely so GitHub's own repo-watch notifications
+    ("Watch" → "Custom" → "Releases") can email the maintainer on release —
+    it's not the canonical release notes source (`CHANGELOG.md` is). If
+    this step fails (e.g. `gh` not installed/authenticated), don't fail the
+    whole release over it — the tag has already pushed and `hatch-vcs`
+    already picked it up; just tell the user the Release object step failed
+    and they can run the command above manually.
+
 ## Done
 
-That's it — no PR, no `gh release create`. Report the new tag to the user
-and note that `hatch-vcs` will pick it up automatically on the next build
-(`uv run mighty-colab version` will reflect it once the tag is checked out
-locally).
+Report the new tag to the user and note that `hatch-vcs` will pick it up
+automatically on the next build (`uv run mighty-colab version` will reflect
+it once the tag is checked out locally).
