@@ -54,6 +54,25 @@ below corresponds to a tag of the same name.
   that was never recorded locally and never shut down by anything —
   including `colab stop` — so repeated `colab install` calls accumulated
   orphaned kernel processes on the VM indefinitely.
+- **restart-kernel:** `colab restart-kernel -s NAME` on an unknown session
+  now prints a clean "not found" message instead of crashing with a raw
+  `AttributeError` — it was the only session-targeting command missing
+  that guard.
+- **run:** `sys.exit(False)` in a `colab run`-executed script now correctly
+  exits `0`, matching real Python semantics (`bool` is an `int` subclass),
+  instead of being mis-mapped to exit code `1`.
+- **install/reinstall:** package names and requirement-file paths are now
+  safely quoted (via `repr()`) when building the remote install code.
+  Previously a name containing a single quote could corrupt the generated
+  Python source instead of producing a clean literal.
+- **adopt:** refreshing a session with `--keep-alive` now persists local
+  state *before* spawning the keep-alive daemon (matching the existing
+  fresh-adopt behavior), instead of only after — closing a narrow window
+  where a crash mid-spawn could leave the daemon's PID untracked.
+- Error and "not found" messages in `ls`/`rm`/`upload`/`download`/`edit`
+  and `exec`/`repl`/`console` now print to stderr instead of stdout,
+  matching every other command's convention — so scripts piping/checking
+  a command's real output aren't polluted by, or blind to, error text.
 
 ## [0.1.20] - 2026-08-02
 
