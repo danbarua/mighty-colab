@@ -235,13 +235,50 @@ def test_cli_exec_outputs(
     mock_runtime.execute_code.side_effect = mock_execute_code
 
     result = runner.invoke(app, ["exec", "-s", "s1"], input="do_stuff()")
-    assert result.exit_code == 0
+    assert result.exit_code == 1
 
     mock_handle_image.assert_any_call("png_data", "image/png", target_path=None)
     mock_handle_image.assert_any_call("jpeg_data", "image/jpeg", target_path=None)
 
     assert "ValueError: bad\n" in result.stderr
     assert "line1\nline2\n" in result.stderr
+
+
+def test_cli_exec_exits_nonzero_when_remote_code_raises(
+    mock_store, mock_runtime_class, mock_common_state
+):
+    """An uncaught exception in the remote script produces an `error`-type
+    output; `exec` must surface that as a non-zero process exit code, not
+    just print it to stderr and exit 0."""
+    mock_session = MagicMock()
+    mock_session.name = "s1"
+    mock_session.url = "http://url"
+    mock_session.token = "token"
+    mock_session.kernel_id = None
+    mock_session.session_id = None
+    mock_store.get.return_value = mock_session
+
+    mock_common_state.resolve_session.return_value = "s1"
+    mock_runtime = mock_runtime_class.return_value
+
+    error_output = {
+        "output_type": "error",
+        "ename": "ValueError",
+        "evalue": "boom",
+        "traceback": ["Traceback...\n", "ValueError: boom\n"],
+    }
+
+    def mock_execute_code(code, output_hook=None, **kwargs):
+        if output_hook:
+            output_hook(error_output)
+        return [error_output]
+
+    mock_runtime.execute_code.side_effect = mock_execute_code
+
+    result = runner.invoke(app, ["exec", "-s", "s1"], input="raise ValueError('boom')")
+
+    assert result.exit_code == 1
+    assert "ValueError: boom" in result.stderr
 
 
 def test_cli_exec_empty_code(mock_runtime_class, mock_store, mock_common_state):

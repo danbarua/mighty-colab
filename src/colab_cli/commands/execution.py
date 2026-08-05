@@ -239,6 +239,7 @@ def exec_command(
             raise typer.Exit(1)
         raise e
 
+    had_error = False
     try:
         is_nb = file and file.endswith(".ipynb")
         s.running = f"exec({file or 'stdin'})"
@@ -273,6 +274,8 @@ def exec_command(
                 output_hook=lambda o: display_output(o, output_image),
                 timeout=timeout,
             )
+            if any(o.get("output_type") == "error" for o in outputs):
+                had_error = True
             if "cell" in block:
                 save_output(outputs, block["cell"])
             state.history.log_event(
@@ -294,6 +297,12 @@ def exec_command(
             typer.echo(f"[colab] Saving notebook with outputs to '{output_file}'...")
             with open(output_file, "w", encoding="utf-8") as f:
                 nbformat.write(nb, f)
+
+    # Raised after the `finally` above has run, so all blocks still execute
+    # and (for notebooks) the output file is still saved even when a later
+    # cell errors -- only the process exit code reflects the failure.
+    if had_error:
+        raise typer.Exit(1)
 
 
 def repl(
