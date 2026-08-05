@@ -12,6 +12,18 @@ below corresponds to a tag of the same name.
 
 ### Fixed
 
+- **stop:** a genuine teardown failure (`unassign` erroring on a network
+  blip or backend error) now prints a clean warning to stderr and exits
+  non-zero, instead of an unhandled Python traceback. Local session
+  tracking is kept (not removed) on this path so the VM isn't forgotten
+  while it may still be billing, and `colab stop -s NAME` can be retried.
+  This is what makes the not-found/genuine-failure distinction in `stop`
+  actually usable by a caller: not-found still exits `0` (idempotent,
+  unchanged), a real failure now exits `1` with an actionable message
+  instead of relying on an uncaught exception happening to also be
+  non-zero. Mirrors the equivalent handling `colab run`'s teardown
+  (`_teardown` in `run.py`) already had.
+
 - **docs:** `README.md` and `skills/colab-operator/SKILL.md` claimed the
   global `--auth` flag defaults to `adc`. It has actually defaulted to
   `oauth2` (an interactive browser flow) since upstream `#41` restored a

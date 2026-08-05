@@ -247,6 +247,34 @@ def test_cli_stop(mock_client, mock_store, mock_common_state):
     mock_store.remove.assert_called_with("s1")
 
 
+def test_cli_stop_unassign_failure_warns_and_keeps_local_state(
+    mock_client, mock_store, mock_common_state
+):
+    # A genuine teardown failure (network blip, backend error) must be
+    # distinguishable from the idempotent not-found case: non-zero exit, a
+    # clean warning (not a raw traceback) telling the operator the VM may
+    # still be billing, and local tracking kept so `colab stop` can be
+    # retried instead of losing the only record of a possibly-still-running
+    # VM.
+    mock_session_state = MagicMock()
+    mock_session_state.endpoint = "e1"
+    mock_session_state.name = "s1"
+    mock_session_state.url = "http://url"
+    mock_session_state.token = "token"
+    mock_session_state.kernel_id = None
+    mock_session_state.keep_alive_pid = None
+    mock_store.get.return_value = mock_session_state
+    mock_common_state.resolve_session.return_value = "s1"
+    mock_client.unassign.side_effect = Exception("boom")
+
+    result = runner.invoke(app, ["stop", "-s", "s1"])
+    assert result.exit_code == 1
+    assert "may still be billing" in result.stderr
+    assert "colab stop -s s1" in result.stderr
+
+    mock_store.remove.assert_not_called()
+
+
 def test_cli_stop_missing_session_is_idempotent(mock_client, mock_store, mock_common_state):
     # `stop` on an already-gone session is success, not failure: "not found"
     # means the postcondition already holds. Teardown code must be callable

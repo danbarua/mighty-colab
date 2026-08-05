@@ -386,7 +386,21 @@ def stop(
     except Exception:
         pass
 
-    state.client.unassign(s.endpoint)
+    try:
+        state.client.unassign(s.endpoint)
+    except Exception:
+        # Distinguish a genuine teardown failure from the idempotent
+        # not-found case above: non-zero exit instead of an unhandled
+        # traceback, and local state is kept (not removed) so the VM isn't
+        # silently forgotten while it may still be billing.
+        typer.echo(
+            f"[colab] Failed to unassign '{name}' -- the VM may still be "
+            f"billing. Local tracking was kept so you can retry with "
+            f"`colab stop -s {name}`.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
     state.store.remove(name)
     state.history.log_event(name, "session_terminated", {"reason": "user_requested"})
     typer.echo("[colab] Session terminated.")
