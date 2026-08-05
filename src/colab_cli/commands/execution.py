@@ -364,10 +364,12 @@ def repl(
         )
         s.running = "repl(stdin)"
         state.store.add(s)
+        had_error = False
         try:
             outputs = runtime.execute_code(
                 code, output_hook=lambda o: display_output(o, output_image)
             )
+            had_error = any(o.get("output_type") == "error" for o in outputs)
             state.history.log_event(
                 name, "execution", {"code": code, "outputs": outputs, "source": "piped"}
             )
@@ -375,6 +377,9 @@ def repl(
             s.running = None
             state.store.add(s)
             runtime.stop()
+
+        if had_error:
+            raise typer.Exit(1)
     else:
         from colab_cli.repl import ColabREPL
 
