@@ -167,6 +167,18 @@ def test_cli_repl_missing_session(mock_common_state):
     assert result.exit_code == 1
 
 
+def test_cli_repl_session_missing_from_store_goes_to_stderr(
+    mock_store, mock_common_state
+):
+    # Exercise repl()'s own "not found" echo (rather than resolve_session's)
+    # so we can confirm the message lands on stderr.
+    mock_store.get.return_value = None
+    mock_common_state.resolve_session.return_value = "missing"
+    result = runner.invoke(app, ["repl", "-s", "missing"])
+    assert result.exit_code == 1
+    assert "not found" in result.stderr
+
+
 def test_cli_repl_piped_empty(mock_runtime_class, mock_store, mock_common_state):
     mock_session = MagicMock()
     mock_session.name = "s1"

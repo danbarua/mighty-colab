@@ -381,6 +381,14 @@ def test_cli_console(mock_store, mock_common_state):
         mock_connect.assert_called_once_with(mock_session_state)
 
 
+def test_cli_console_not_found_goes_to_stderr(mock_store, mock_common_state):
+    mock_store.get.return_value = None
+    mock_common_state.resolve_session.return_value = "bogus"
+    result = runner.invoke(app, ["console", "-s", "bogus"])
+    assert result.exit_code == 1
+    assert "not found" in result.stderr
+
+
 @patch("colab_cli.commands.files.ContentsClient")
 def test_cli_ls(mock_contents_class, mock_store, mock_common_state):
     mock_session_state = MagicMock()
@@ -403,6 +411,14 @@ def test_cli_ls(mock_contents_class, mock_store, mock_common_state):
     assert "b_file" in result.output
 
 
+def test_cli_ls_not_found_goes_to_stderr(mock_store, mock_common_state):
+    mock_store.get.return_value = None
+    mock_common_state.resolve_session.return_value = "bogus"
+    result = runner.invoke(app, ["ls", "-s", "bogus"])
+    assert result.exit_code == 1
+    assert "not found" in result.stderr
+
+
 @patch("colab_cli.commands.files.ContentsClient")
 def test_cli_rm(mock_contents_class, mock_store, mock_common_state):
     mock_session_state = MagicMock()
@@ -414,6 +430,14 @@ def test_cli_rm(mock_contents_class, mock_store, mock_common_state):
 
     mock_contents_class.return_value.rm.assert_called_once_with("content/file.txt")
     assert "Deleted content/file.txt" in result.output
+
+
+def test_cli_rm_not_found_goes_to_stderr(mock_store, mock_common_state):
+    mock_store.get.return_value = None
+    mock_common_state.resolve_session.return_value = "bogus"
+    result = runner.invoke(app, ["rm", "-s", "bogus", "content/file.txt"])
+    assert result.exit_code == 1
+    assert "not found" in result.stderr
 
 
 @patch("colab_cli.commands.files.os.path.isfile")
@@ -433,6 +457,14 @@ def test_cli_upload(mock_contents_class, mock_isfile, mock_store, mock_common_st
     assert "Uploaded 'local.txt' to 'remote.txt'" in result.output
 
 
+def test_cli_upload_not_found_goes_to_stderr(mock_store, mock_common_state):
+    mock_store.get.return_value = None
+    mock_common_state.resolve_session.return_value = "bogus"
+    result = runner.invoke(app, ["upload", "-s", "bogus", "local.txt", "remote.txt"])
+    assert result.exit_code == 1
+    assert "not found" in result.stderr
+
+
 @patch("colab_cli.commands.files.ContentsClient")
 def test_cli_download(mock_contents_class, mock_store, mock_common_state):
     mock_session_state = MagicMock()
@@ -446,6 +478,14 @@ def test_cli_download(mock_contents_class, mock_store, mock_common_state):
         "remote.txt", "local.txt"
     )
     assert "Downloaded 'remote.txt' to 'local.txt'" in result.output
+
+
+def test_cli_download_not_found_goes_to_stderr(mock_store, mock_common_state):
+    mock_store.get.return_value = None
+    mock_common_state.resolve_session.return_value = "bogus"
+    result = runner.invoke(app, ["download", "-s", "bogus", "remote.txt", "local.txt"])
+    assert result.exit_code == 1
+    assert "not found" in result.stderr
 
 
 @patch("colab_cli.commands.files.ContentsClient")
@@ -496,6 +536,14 @@ def test_cli_edit_with_changes(
     mock_contents_class.return_value.download.assert_called_once()
     mock_contents_class.return_value.upload.assert_called_once()
     assert "Edited and uploaded 'remote.txt'" in result.output
+
+
+def test_cli_edit_not_found_goes_to_stderr(mock_store, mock_common_state):
+    mock_store.get.return_value = None
+    mock_common_state.resolve_session.return_value = "bogus"
+    result = runner.invoke(app, ["edit", "-s", "bogus", "remote.txt"])
+    assert result.exit_code == 1
+    assert "not found" in result.stderr
 
 
 def _make_400_error(message="Bad Request"):
