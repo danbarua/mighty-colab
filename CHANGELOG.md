@@ -10,6 +10,8 @@ below corresponds to a tag of the same name.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-08-05
+
 ### Fixed
 
 - **exec/repl:** a non-terminal error during the `/content` pre-flight
@@ -159,7 +161,8 @@ below corresponds to a tag of the same name.
 - The experimental `colab-mcp` git submodule, superseded by the hand-rolled
   MCP server above.
 
-[Unreleased]: https://github.com/danbarua/mighty-colab/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/danbarua/mighty-colab/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/danbarua/mighty-colab/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/danbarua/mighty-colab/compare/v0.1.23...v0.2.0
 
 ---
