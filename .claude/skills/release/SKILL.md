@@ -55,9 +55,9 @@ tags, no pushes.
    - If the user gave one, normalize it to `vX.Y.Z` (prefix with `v` if
      they omitted it). Validate it's strictly greater than the current
      version; fail otherwise.
-   - Otherwise, default to a **minor** bump: `vX.(Y+1).0` — increment the
-     minor component, reset patch to `0`. Always minor by default,
-     regardless of what kind of changes are in the changelog.
+   - Otherwise, default to a **patch** bump: `vX.Y.(Z+1)` — increment the
+     patch component only. Always patch by default, regardless of what
+     kind of changes are in the changelog.
 
 ## Update CHANGELOG.md
 
