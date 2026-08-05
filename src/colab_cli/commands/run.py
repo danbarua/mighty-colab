@@ -162,12 +162,12 @@ def _systemexit_code(out) -> int:
     """Map a SystemExit kernel output back to a CPython-style integer exit code.
 
     CPython conventions (mirrored):
-      - `sys.exit()` / `sys.exit(None)` / `sys.exit(0)` -> 0
+      - `sys.exit()` / `sys.exit(None)` / `sys.exit(0)` / `sys.exit(False)` -> 0
       - `sys.exit(<int>)`                                -> <int>
       - `sys.exit('msg')` (any non-int)                  -> 1
     """
     evalue = (out.get("evalue") or "").strip()
-    if evalue in ("", "None", "0"):
+    if evalue in ("", "None", "0", "False"):
         return 0
     try:
         return int(evalue)
