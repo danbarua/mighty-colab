@@ -153,6 +153,20 @@ class ColabRuntime:
                     requests.exceptions.ConnectTimeout,
                 ) as e:
                     last_err = e
+                    # Close whatever partially-started client this attempt
+                    # built before the next iteration discards the
+                    # reference -- same best-effort cleanup as stop().
+                    if self._kernel_client:
+                        try:
+                            client = self._kernel_client._manager.client
+                            client.stop_channels()
+                            if client.kernel_socket:
+                                client.kernel_socket.close()
+                        except Exception:
+                            logging.exception(
+                                "Error closing kernel client before retry"
+                            )
+                        self._kernel_client = None
                     if i < retries - 1:
                         sleep_time = backoff ** (i + 1)
                         logging.debug(
