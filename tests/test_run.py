@@ -115,6 +115,44 @@ def test_run_basic_flow(
     mock_client.unassign.assert_called_once_with("ep-123")
 
 
+def test_run_teardown_warns_and_preserves_state_when_unassign_fails(
+    mock_client,
+    mock_store,
+    mock_runtime_class,
+    mock_spawn_keep_alive,
+    assign_response,
+    script_path,
+):
+    """Regression guard: if unassign() fails during teardown, `colab run`
+    must not silently delete local session state -- that destroys the only
+    recovery path (`colab stop -s NAME` retry) while the VM may still be
+    billing. The script's own exit code must still reflect the script, not
+    the teardown failure (existing, intentional design -- do not change
+    that part)."""
+    mock_client.assign.return_value = assign_response
+    mock_runtime = mock_runtime_class.return_value
+    mock_runtime.execute_code.return_value = []
+    mock_client.unassign.side_effect = Exception("network blip")
+
+    persisted = {}
+
+    def store_add(s):
+        persisted["s"] = s
+
+    def store_get(name):
+        return persisted.get("s")
+
+    mock_store.add.side_effect = store_add
+    mock_store.get.side_effect = store_get
+
+    result = runner.invoke(app, ["run", str(script_path)])
+
+    assert result.exit_code == 0, result.output
+    mock_client.unassign.assert_called_once_with("ep-123")
+    mock_store.remove.assert_not_called()
+    assert "still be billing" in result.output
+
+
 # ---------------------------------------------------------------------------
 # --keep flag
 # ---------------------------------------------------------------------------
