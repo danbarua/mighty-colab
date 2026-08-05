@@ -10,6 +10,8 @@ below corresponds to a tag of the same name.
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-08-05
+
 ### Fixed
 
 - **stop:** a genuine teardown failure (`unassign` erroring on a network
@@ -184,7 +186,8 @@ below corresponds to a tag of the same name.
 - The experimental `colab-mcp` git submodule, superseded by the hand-rolled
   MCP server above.
 
-[Unreleased]: https://github.com/danbarua/mighty-colab/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/danbarua/mighty-colab/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/danbarua/mighty-colab/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/danbarua/mighty-colab/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/danbarua/mighty-colab/compare/v0.1.23...v0.2.0
 
