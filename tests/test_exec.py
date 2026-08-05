@@ -328,6 +328,25 @@ def test_cli_exec_lost_session_prunes(
     mock_common_state.prune_session.assert_called_once_with("lost-sess")
 
 
+def test_cli_exec_preflight_nonterminal_error_still_stops_runtime(
+    mock_runtime_class, mock_store, mock_common_state
+):
+    """Regression guard: a non-terminal pre-flight error (not a 404/401)
+    must still call runtime.stop() before propagating -- otherwise the
+    lazily-started kernel client/websocket connection leaks."""
+    mock_session = MagicMock()
+    mock_session.name = "s1"
+    mock_store.get.return_value = mock_session
+    mock_common_state.resolve_session.return_value = "s1"
+
+    mock_runtime = mock_runtime_class.return_value
+    mock_runtime.execute_code.side_effect = Exception("connection reset")
+
+    result = runner.invoke(app, ["exec", "-s", "s1"], input="print(1)")
+    assert result.exit_code != 0
+    mock_runtime.stop.assert_called_once()
+
+
 def test_cli_exec_timeout(mock_store, mock_runtime_class, mock_common_state, tmp_path):
     mock_session = MagicMock()
     mock_session.url = "http://url"
