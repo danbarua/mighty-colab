@@ -53,7 +53,25 @@ def run_automation(
     from colab_cli.common import state
 
     s = state.store.get(name)
-    runtime = ColabRuntime(s.url, s.token, session_name=s.name, history=state.history)
+
+    def on_started(kid):
+        s.kernel_id = kid
+        state.store.add(s)
+
+    def on_sess_started(sid):
+        s.session_id = sid
+        state.store.add(s)
+
+    runtime = ColabRuntime(
+        s.url,
+        s.token,
+        session_name=s.name,
+        history=state.history,
+        kernel_id=s.kernel_id,
+        session_id=s.session_id,
+        on_kernel_started=on_started,
+        on_session_started=on_sess_started,
+    )
 
     def drivefs_hook(deserialize_msg, wsclient):
         content = deserialize_msg.get("content", {})
