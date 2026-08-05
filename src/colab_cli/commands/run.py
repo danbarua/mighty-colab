@@ -498,7 +498,13 @@ def _teardown(name: str, s: SessionState, *, reason: str) -> None:
     try:
         state.client.unassign(s.endpoint)
     except Exception:
-        pass
+        typer.echo(
+            f"[colab] WARNING: failed to unassign '{name}' -- the VM may "
+            f"still be billing. Local tracking was kept so you can retry "
+            f"with `colab stop -s {name}`.",
+            err=True,
+        )
+        return
 
     try:
         state.store.remove(name)
