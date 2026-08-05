@@ -402,6 +402,10 @@ def test_adopt_refresh_can_start_keep_alive_when_requested_and_missing(
     adopt(endpoint="e1", name="my-session", keep_alive=True)
 
     spawn.assert_called_once()
+    # Persisted twice: once before spawning (so the daemon's own
+    # state.store.get(name) check doesn't race the parent), once after to
+    # record the PID -- matching _adopt_endpoint's established pattern.
+    assert mock_common_state.store.add.call_count == 2
     saved = mock_common_state.store.add.call_args.args[0]
     assert saved.keep_alive_pid == 7777
 
