@@ -47,6 +47,28 @@ class TestHistory(unittest.TestCase):
         self.assertIn("s2", sessions)
         self.assertEqual(len(sessions), 2)
 
+    def test_log_event_uses_a_write_lock(self):
+        """Regression guard: log_event must serialize concurrent writers to
+        the same session's history file via a real file lock -- this is
+        the only piece of shared on-disk state in the codebase without one
+        (see state.py's _LockedFileStore for the established pattern)."""
+        import filelock
+        from unittest.mock import patch
+
+        real_rwlock = filelock.ReadWriteLock
+
+        created_locks = []
+
+        def spying_rwlock(*args, **kwargs):
+            rw = real_rwlock(*args, **kwargs)
+            created_locks.append(rw)
+            return rw
+
+        with patch("colab_cli.history.filelock.ReadWriteLock", side_effect=spying_rwlock):
+            self.logger.log_event("test-session", "session_created", {})
+
+        self.assertTrue(created_locks, "log_event never constructed a ReadWriteLock")
+
 
 if __name__ == "__main__":
     unittest.main()

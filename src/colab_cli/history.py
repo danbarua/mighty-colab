@@ -17,6 +17,8 @@ import json
 import os
 from typing import Any, Dict, List
 
+import filelock
+
 
 class HistoryLogger:
     def __init__(self, log_dir: str = "~/.config/colab-cli/history"):
@@ -25,6 +27,12 @@ class HistoryLogger:
 
     def _get_log_path(self, session_name: str) -> str:
         return os.path.join(self.log_dir, f"{session_name}.jsonl")
+
+    def _lock_for(self, log_path: str) -> filelock.ReadWriteLock:
+        # is_singleton=False matches state.py's _LockedFileStore: each lock
+        # instance contends via the real lock file on disk, not Python
+        # object identity, so a fresh instance per call is fine.
+        return filelock.ReadWriteLock(f"{log_path}.lock", is_singleton=False)
 
     def log_event(self, session_name: str, event_type: str, data: Dict[str, Any]):
         """
@@ -44,8 +52,9 @@ class HistoryLogger:
             "event_type": event_type,
             **data,
         }
-        with open(log_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(event) + "\n")
+        with self._lock_for(log_path).write_lock():
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(event) + "\n")
 
     def list_sessions(self) -> List[str]:
         if not os.path.exists(self.log_dir):
@@ -57,9 +66,10 @@ class HistoryLogger:
         if not os.path.exists(log_path):
             return []
 
-        history = []
-        with open(log_path, "r", encoding="utf-8") as f:
-            for line in f:
-                if line.strip():
-                    history.append(json.loads(line))
+        with self._lock_for(log_path).read_lock():
+            history = []
+            with open(log_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.strip():
+                        history.append(json.loads(line))
         return history
