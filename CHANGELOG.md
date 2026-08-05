@@ -10,6 +10,22 @@ below corresponds to a tag of the same name.
 
 ## [Unreleased]
 
+### Fixed
+
+- **exec/repl:** a non-terminal error during the `/content` pre-flight
+  setup call now stops the runtime before propagating, instead of leaking
+  the kernel client's websocket connection.
+- **runtime:** the kernel-client startup retry loop (on `ReadTimeout`/
+  `ConnectTimeout`) now closes the previous partially-started client
+  before retrying, instead of discarding it without cleanup.
+- **edit:** only a genuine "file not found" now falls back to starting
+  from an empty buffer. Previously any download failure (auth, network,
+  5xx) was silently treated the same way, risking an empty/incomplete
+  edit overwriting real remote content.
+- **history:** session history reads/writes are now locked (mirroring
+  `state.py`'s existing pattern), closing the one piece of shared on-disk
+  state in the codebase that had no locking at all.
+
 ## [0.2.0] - 2026-08-05
 
 ### Added
