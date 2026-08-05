@@ -103,6 +103,13 @@ class ContentsClient:
             bytes_sent = 0
             while True:
                 piece = f.read(CHUNK_SIZE)
+                if not piece and bytes_sent < file_size:
+                    raise IOError(
+                        f"'{local_path}' changed size during upload (read 0 "
+                        f"bytes at offset {bytes_sent} but expected "
+                        f"{file_size} bytes total); aborting instead of "
+                        "retrying forever."
+                    )
                 chunk_index += 1
                 bytes_sent += len(piece)
                 is_last = bytes_sent >= file_size
