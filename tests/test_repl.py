@@ -161,6 +161,24 @@ def test_cli_repl_piped_exits_nonzero_when_remote_code_raises(
     assert result.exit_code == 1
 
 
+def test_cli_repl_preflight_nonterminal_error_still_stops_runtime(
+    mock_runtime_class, mock_store, mock_common_state
+):
+    """Same regression guard as exec_command's: a non-terminal pre-flight
+    error must still call runtime.stop() before propagating."""
+    mock_session = MagicMock()
+    mock_session.name = "s1"
+    mock_store.get.return_value = mock_session
+    mock_common_state.resolve_session.return_value = "s1"
+
+    mock_runtime = mock_runtime_class.return_value
+    mock_runtime.execute_code.side_effect = Exception("connection reset")
+
+    result = runner.invoke(app, ["repl", "-s", "s1"], input="print(1)")
+    assert result.exit_code != 0
+    mock_runtime.stop.assert_called_once()
+
+
 def test_cli_repl_missing_session(mock_common_state):
     mock_common_state.resolve_session.side_effect = SystemExit(1)
     result = runner.invoke(app, ["repl", "-s", "missing"])
