@@ -33,6 +33,27 @@ below corresponds to a tag of the same name.
 - **mcp:** the `version` tool's description now matches the CLI's own
   `colab version` output format (`"Version: X.Y.Z"`) instead of the bare
   version string.
+- **repl:** piped `colab repl` (`echo code | colab repl -s NAME`) now exits
+  with a non-zero status code when the remote code raises an uncaught
+  exception, instead of always exiting `0` — the same class of bug just
+  fixed in `exec` above, in the REPL's non-interactive path.
+- **run:** if `colab run`'s post-script teardown fails to unassign the VM
+  (network blip, transient backend error), it now prints a warning and
+  keeps the session's local tracking instead of silently deleting it. The
+  VM may still be billing in that case, and local state is what lets
+  `colab stop -s NAME` retry the unassign; deleting it was the only way to
+  recover. The script's own exit code is still unaffected by a teardown
+  failure, as before.
+- **upload:** the chunked-upload loop (for files over 1MB) now aborts with
+  a clear error instead of looping forever if the local file yields fewer
+  bytes mid-upload than its size promised when the upload started (e.g. the
+  file is truncated or actively being written to while uploading).
+- **auth/drivemount/install/reinstall:** these commands now reuse and
+  track the session's persistent kernel instead of silently starting a
+  new, untracked one on every call. Previously each call spun up a kernel
+  that was never recorded locally and never shut down by anything —
+  including `colab stop` — so repeated `colab install` calls accumulated
+  orphaned kernel processes on the VM indefinitely.
 
 ## [0.1.20] - 2026-08-02
 
