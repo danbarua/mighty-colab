@@ -247,13 +247,17 @@ def test_cli_stop(mock_client, mock_store, mock_common_state):
     mock_store.remove.assert_called_with("s1")
 
 
-def test_cli_stop_missing_session_fails(mock_client, mock_store, mock_common_state):
+def test_cli_stop_missing_session_is_idempotent(mock_client, mock_store, mock_common_state):
+    # `stop` on an already-gone session is success, not failure: "not found"
+    # means the postcondition already holds. Teardown code must be callable
+    # unconditionally (e.g. after a `new`/`exec` that may or may not have
+    # created anything) without a false-positive failure/leak signal.
     mock_store.get.return_value = None
     mock_common_state.resolve_session.return_value = "missing"
 
     result = runner.invoke(app, ["stop", "-s", "missing"])
-    assert result.exit_code == 1
-    assert "Session 'missing' not found" in result.stderr
+    assert result.exit_code == 0
+    assert "Session 'missing' not found" in result.output
 
     mock_client.unassign.assert_not_called()
     mock_store.remove.assert_not_called()

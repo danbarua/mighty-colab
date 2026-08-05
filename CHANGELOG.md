@@ -23,22 +23,27 @@ below corresponds to a tag of the same name.
 
 ### Changed
 
-- **BREAKING: `status`/`stop`:** `colab status -s NAME` and `colab stop -s
-  NAME` on a session with no local record now print "not found" to stderr
-  and exit non-zero, matching every other session-targeting command
-  (`exec`, `repl`, `console`, `ls`, `rm`, `upload`, `download`, `edit`,
-  `url`, `ssh`). Previously both printed to stdout and exited `0`, so a
-  script chaining on `status`/`stop` couldn't distinguish "found and OK"
-  from "no such session" via exit code alone. Any script that greps
-  `status`'s stdout for "not found" instead of checking the exit code, or
-  redirects stderr away before grepping, needs updating. Also affects the
-  MCP server: `call_tool("status" | "stop", ...)` on an unknown session now
-  returns an error result (`is_error: true`) instead of a successful result
-  containing the "not found" text. Note `stop` is now the odd one out
-  compared to `rm -f`-style idempotent teardown commands elsewhere: an
-  unconditional teardown line that calls `stop` on a session already gone
-  (e.g. auto-pruned by `exec`/`repl` after a 404) now fails instead of
-  succeeding — guard or ignore-error such lines if that matters to you.
+- **BREAKING: `status`:** `colab status -s NAME` on a session with no local
+  record now prints "not found" to stderr and exits non-zero, matching
+  every other session-targeting *query*/*operate* command (`exec`, `repl`,
+  `console`, `ls`, `rm`, `upload`, `download`, `edit`, `url`, `ssh`).
+  Previously it printed to stdout and exited `0`, so a caller couldn't
+  distinguish "found and OK" from "no such session" via exit code alone.
+  Any script that greps `status`'s stdout for "not found" instead of
+  checking the exit code, or redirects stderr away before grepping, needs
+  updating. Also affects the MCP server: `call_tool("status", ...)` on an
+  unknown session now returns an error result (`is_error: true`) instead of
+  a successful result containing the "not found" text.
+
+  `colab stop` deliberately keeps its existing exit-0/stdout behavior on a
+  missing session and is *not* part of this change: `stop` is a teardown
+  (desired-state) operation, not a query, so "not found" means the
+  postcondition already holds rather than that the command failed —
+  matching `rm -f` / `kill ... || true` / `DELETE`'s idempotency
+  conventions. Making it an error would turn "nothing to clean up, no
+  compute is billing" into a false-positive failure indistinguishable from
+  a real leak, and would make it unsafe for callers to add a stop-status
+  check for genuine teardown failures (every not-found would also trip it).
 
 ## [0.2.1] - 2026-08-05
 

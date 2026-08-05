@@ -366,8 +366,13 @@ def stop(
     name = state.resolve_session(session)
     s = state.store.get(name)
     if not s:
-        typer.echo(f"[colab] Session '{name}' not found.", err=True)
-        raise typer.Exit(1)
+        # Idempotent by design: "not found" means the postcondition (no
+        # session) already holds, not that teardown failed. Callers doing
+        # unconditional cleanup after a possibly-failed `new`/`exec` must be
+        # able to call `stop` without it turning "nothing to clean up" into
+        # a false-positive failure/leak signal.
+        typer.echo(f"[colab] Session '{name}' not found.")
+        return
 
     typer.echo(f"[colab] Stopping session '{name}'...")
     if s.keep_alive_pid:
