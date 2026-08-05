@@ -176,6 +176,63 @@ def test_upload_file_size_exact_multiple_of_chunk_size(mock_request, client, tmp
 
 
 @patch("colab_cli.contents.requests.request")
+def test_upload_aborts_instead_of_spinning_when_file_shrinks(
+    mock_request, client, tmp_path, mocker
+):
+    """Regression guard for an infinite-loop hazard: `is_last` is computed
+    by comparing `bytes_sent` against a `file_size` snapshot taken *before*
+    the loop starts. If the file yields fewer bytes than that snapshot
+    promised (TOCTOU: truncated or actively-written file), `f.read()` can
+    return b"" forever while `bytes_sent` never catches up -- the loop must
+    detect this and raise instead of spinning. The fake file below is capped
+    at a handful of empty reads (raising a distinct sentinel error) purely
+    so this test fails fast instead of hanging if the bug is still present;
+    the real fix must raise on the very first short read, well before that
+    cap is ever hit."""
+    mock_resp = MagicMock(spec=Response)
+    mock_resp.status_code = 200
+    mock_request.return_value = mock_resp
+
+    local_file = tmp_path / "shrinking.bin"
+    local_file.write_bytes(os.urandom(CHUNK_SIZE * 2 + 100))
+
+    real_open = open
+
+    class TooManyEmptyReads(Exception):
+        pass
+
+    class ShrinkingFile:
+        def __init__(self, path, mode):
+            self._f = real_open(path, mode)
+            self._reads = 0
+
+        def read(self, n):
+            self._reads += 1
+            if self._reads == 1:
+                return self._f.read(n)
+            if self._reads > 5:
+                raise TooManyEmptyReads(
+                    "upload loop read empty chunks 5+ times without "
+                    "terminating -- infinite loop on a shrinking file"
+                )
+            return b""
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info):
+            self._f.close()
+            return False
+
+    mocker.patch(
+        "colab_cli.contents.open", side_effect=lambda p, m: ShrinkingFile(p, m)
+    )
+
+    with pytest.raises(IOError):
+        client.upload(str(local_file), "content/shrinking.bin")
+
+
+@patch("colab_cli.contents.requests.request")
 def test_download_file(mock_request, client, tmp_path):
     mock_resp = MagicMock(spec=Response)
     mock_resp.status_code = 200
