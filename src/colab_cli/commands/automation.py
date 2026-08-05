@@ -228,7 +228,7 @@ def drivemount(
     from colab_cli.common import state
 
     name = state.resolve_session(session)
-    code = f"from google.colab import drive\ndrive.mount('{path}')"
+    code = f"from google.colab import drive\ndrive.mount({path!r})"
     typer.echo(f"[colab] Mounting Google Drive to '{path}' on {name}...")
     run_automation(
         name,
