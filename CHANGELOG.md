@@ -65,6 +65,9 @@ below corresponds to a tag of the same name.
   safely quoted (via `repr()`) when building the remote install code.
   Previously a name containing a single quote could corrupt the generated
   Python source instead of producing a clean literal.
+- **drivemount:** the mount path is now safely quoted (via `repr()`) when
+  building the remote code, the same fix as install/reinstall above for a
+  path containing a single quote.
 - **adopt:** refreshing a session with `--keep-alive` now persists local
   state *before* spawning the keep-alive daemon (matching the existing
   fresh-adopt behavior), instead of only after — closing a narrow window
