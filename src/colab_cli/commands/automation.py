@@ -266,7 +266,7 @@ def _run_install(
     if packages:
         commands.extend(packages)
 
-    cmd_str = ", ".join(f"'{c}'" for c in commands)
+    cmd_str = ", ".join(repr(c) for c in commands)
     code = f"""
 import shutil, subprocess, sys
 def install():
