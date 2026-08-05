@@ -151,7 +151,7 @@ Run `mighty-colab <command> --help` to view specific options, defaults, and deta
 | `mighty-colab mcp` | Start a stdio MCP server exposing these commands as tools for AI agents |
 
 ### Global Options
-* `--auth {oauth2,adc}` — Authentication strategy for the Colab API (default: `adc`).
+* `--auth {oauth2,adc}` — Authentication strategy for the Colab API (default: `oauth2`, an interactive browser flow — agents/headless use should always pass `--auth=adc` explicitly).
 * `-c, --client-oauth-config PATH` — Path to public OAuth client credentials configuration (default: `~/.colab-cli-oauth-config.json`).
 * `--config PATH` — Path to local session metadata storage (default: `~/.config/colab-cli/sessions.json`).
 * `--logtostderr` — Direct debug logging output to stderr.

@@ -10,6 +10,17 @@ below corresponds to a tag of the same name.
 
 ## [Unreleased]
 
+### Fixed
+
+- **docs:** `README.md` and `skills/colab-operator/SKILL.md` claimed the
+  global `--auth` flag defaults to `adc`. It has actually defaulted to
+  `oauth2` (an interactive browser flow) since upstream `#41` restored a
+  bundled OAuth2 client config; the docs were never updated to match. Left
+  uncorrected, this reads as "agents get ADC for free," when an agent that
+  doesn't explicitly pass `--auth=adc` actually hits the exact interactive
+  flow this skill elsewhere says to avoid. Code is unchanged — `--auth=adc`
+  must still be passed explicitly for headless/agent use.
+
 ### Changed
 
 - **BREAKING: `status`/`stop`:** `colab status -s NAME` and `colab stop -s

@@ -26,7 +26,7 @@ by running `uv tool install mighty-colab` or `pip install mighty-colab`.
 - **`colab` is fire-and-forget.** Each command authenticates, does one thing, and exits. A detached background daemon (spawned by `colab new`) handles keep-alive; you don't manage it.
 
 ## Authentication (the #1 thing that blocks agents)
-- The global flag is `--auth={adc,oauth2}` and the **default is `adc`** (Application Default Credentials). It must come *before* the subcommand: `colab --auth=adc new -s x`.
+- The global flag is `--auth={adc,oauth2}` and the **default is `oauth2`** (interactive browser consent flow) — **always pass `--auth=adc` explicitly for agent/headless use**, since the default is not agent-safe on its own. It must come *before* the subcommand: `colab --auth=adc new -s x`.
 - **ADC setup** (most reliable for headless/agent use). The Colab backends need a specific scope set, so re-mint ADC with all four scopes:
   ```bash
   gcloud auth application-default login \
