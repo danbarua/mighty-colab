@@ -178,6 +178,39 @@ def test_cli_install_only_falls_back_to_pip_when_uv_unavailable(
 
 @patch("colab_cli.commands.automation.ColabRuntime")
 @patch("colab_cli.common.state")
+def test_install_escapes_package_names_with_quotes(mock_state, mock_runtime_class):
+    """Regression guard: package names/requirement paths were interpolated
+    into the generated remote install code via manual f-string quoting
+    (f"'{c}'") with no escaping. A name containing a single quote corrupts
+    the generated Python source -- must use repr() instead (AGENTS.md #23's
+    established pattern for this exact class of problem)."""
+    from colab_cli.state import SessionState
+
+    session = SessionState(
+        name="test-session", token="t", url="https://test.url", endpoint="e1"
+    )
+    mock_state.store.get.return_value = session
+
+    mock_runtime = mock_runtime_class.return_value
+    mock_runtime.execute_code.return_value = [{"text": "ok"}]
+
+    from colab_cli.commands.automation import _run_install
+
+    _run_install("test-session", ["weird'pkg"], None)
+
+    code = mock_runtime.execute_code.call_args[0][0]
+    # The generated packages list must be valid, round-trippable Python --
+    # exec()'ing just the list-literal line must reproduce the exact input.
+    packages_line = next(
+        line for line in code.splitlines() if line.strip().startswith("packages =")
+    )
+    scope = {}
+    exec(packages_line.strip(), scope)
+    assert scope["packages"] == ["weird'pkg"]
+
+
+@patch("colab_cli.commands.automation.ColabRuntime")
+@patch("colab_cli.common.state")
 def test_cli_reinstall_restarts_kernel_on_success(mock_state, mock_runtime_class, mock_session):
     """mighty-colab extension: `reinstall` = install + restart, so an
     already-imported package's new version is actually importable in the
