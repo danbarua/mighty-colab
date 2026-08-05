@@ -259,6 +259,9 @@ def restart_kernel(
 
     name = state.resolve_session(session)
     s = state.store.get(name)
+    if not s:
+        typer.echo(f"[colab] Session '{name}' not found.", err=True)
+        raise typer.Exit(1)
 
     def on_started(kid):
         s.kernel_id = kid
