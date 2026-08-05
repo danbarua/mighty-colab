@@ -160,16 +160,24 @@ done" even when the PyPI publish silently failed.
     ```
 
 16. **Branch on the outcome:**
-    - **`STATUS = SUCCESS`**: publish the Release.
+    - **`STATUS = SUCCESS`**: publish the Release using the section you
+      just wrote in `CHANGELOG.md` (step 7's renamed heading) as the
+      release notes — not `--generate-notes`, which fabricates notes from
+      commit/PR history and would diverge from the curated changelog:
       ```bash
-      gh release create vX.Y.Z --generate-notes
+      awk '/^## \[X\.Y\.Z\]/{flag=1; next} /^## \[/{flag=0} flag' \
+        CHANGELOG.md > /tmp/release-notes-X.Y.Z.md
+      gh release create vX.Y.Z --title vX.Y.Z --notes-file /tmp/release-notes-X.Y.Z.md
+      rm -f /tmp/release-notes-X.Y.Z.md
       ```
-      This is not the canonical release-notes source (`CHANGELOG.md` is) —
-      it exists purely so GitHub's own repo-watch notification can email
-      the maintainer on a *confirmed-published* release. If `gh` itself
-      fails here (not installed/authenticated), don't fail the whole
-      release over it — report that the Release step failed and that the
-      user can run the command above manually once `gh` is fixed.
+      The Release object itself exists purely so GitHub's own repo-watch
+      notification can email the maintainer on a *confirmed-published*
+      release — `CHANGELOG.md` stays the canonical source, this just
+      mirrors that exact section into the Release rather than reinventing
+      separate notes. If `gh` itself fails here (not installed/
+      authenticated), don't fail the whole release over it — report that
+      the Release step failed and that the user can run the commands
+      above manually once `gh` is fixed.
     - **`BUILD_ID` was never found, or `STATUS` is anything else** (still
       building past the cap, `FAILURE`, `INTERNAL_ERROR`, `TIMEOUT`,
       `CANCELLED`, `EXPIRED`): do **not** create a GitHub Release. Report
