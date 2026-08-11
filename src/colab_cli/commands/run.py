@@ -44,7 +44,11 @@ from colab_cli.client import (
     PostAssignmentResponse,
     Variant,
 )
-from colab_cli.commands.execution import _build_env_prelude, _parse_env_vars
+from colab_cli.commands.execution import (
+    _build_env_prelude,
+    _build_script_prelude,
+    _parse_env_vars,
+)
 from colab_cli.commands.session import (
     _is_scope_error,
     _scope_remediation_message,
@@ -81,9 +85,11 @@ def _build_script_payload(
 ) -> str:
     """Wrap the script body so it executes with native-`python`-like semantics.
 
-    Specifically:
+    Specifically (see `_build_script_prelude` for the shared half, also
+    used by `exec -f`):
       - `sys.argv = [<basename>, *script_args]` so `argparse` etc. work.
       - `__name__ = '__main__'` so `if __name__ == "__main__":` guards fire.
+      - `__file__` set to a synthetic `<mighty-colab-exec:...>` sentinel.
       - Requested `--env KEY=VALUE` pairs are written into `os.environ`.
       - Suppress the IPython UserWarning "To exit: use 'exit', 'quit', or
         Ctrl-D." which fires whenever the script calls `sys.exit(...)`. This
@@ -97,14 +103,9 @@ def _build_script_payload(
     with open(script_path, "r", encoding="utf-8") as f:
         body = f.read()
 
-    # `repr()` produces a safe, round-trippable Python literal for arbitrary
-    # strings (handles quotes, backslashes, non-ASCII).
-    argv_literal = f"[{', '.join(repr(x) for x in [basename] + script_args)}]"
-
     return (
-        "import sys, warnings\n"
-        f"sys.argv = {argv_literal}\n"
-        "__name__ = '__main__'\n"
+        _build_script_prelude(basename, script_args)
+        + "import warnings\n"
         "warnings.filterwarnings('ignore', message=\"To exit: use\")\n"
         + _build_env_prelude(env_vars or {})
         + _strip_shebang(body)

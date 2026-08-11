@@ -58,8 +58,73 @@ def test_cli_exec_file(mock_store, mock_runtime_class, mock_common_state, tmp_pa
     mock_runtime.execute_code.assert_any_call(
         "import os; os.makedirs('/content', exist_ok=True); os.chdir('/content')"
     )
+    expected = (
+        "import sys\n"
+        "sys.argv = ['script.py']\n"
+        "__name__ = '__main__'\n"
+        "__file__ = '<mighty-colab-exec:script.py>'\n"
+        "print('hello')"
+    )
+    mock_runtime.execute_code.assert_any_call(expected, output_hook=ANY, timeout=30.0)
+
+
+def test_cli_exec_file_prelude_precedes_env_prelude(
+    mock_store, mock_runtime_class, mock_common_state, tmp_path
+):
+    """The script prelude (argv/__name__/__file__) must come before the
+    --env prelude, matching `colab run`'s existing ordering."""
+    mock_session = MagicMock()
+    mock_session.url = "http://url"
+    mock_session.token = "token123"
+    mock_session.name = "s1"
+    mock_session.kernel_id = None
+    mock_session.session_id = None
+    mock_store.get.return_value = mock_session
+
+    mock_common_state.resolve_session.return_value = "s1"
+    mock_runtime = mock_runtime_class.return_value
+    mock_runtime.execute_code.return_value = []
+
+    script = tmp_path / "script.py"
+    script.write_text("print('hello')")
+
+    result = runner.invoke(
+        app, ["exec", "-s", "s1", "-f", str(script), "--env", "HF_TOKEN=abc"]
+    )
+    assert result.exit_code == 0, result.output
+    expected = (
+        "import sys\n"
+        "sys.argv = ['script.py']\n"
+        "__name__ = '__main__'\n"
+        "__file__ = '<mighty-colab-exec:script.py>'\n"
+        "import os\n"
+        "os.environ['HF_TOKEN'] = 'abc'\n"
+        "print('hello')"
+    )
+    mock_runtime.execute_code.assert_any_call(expected, output_hook=ANY, timeout=30.0)
+
+
+def test_cli_exec_stdin_has_no_script_prelude(
+    mock_store, mock_runtime_class, mock_common_state
+):
+    """Piped/stdin code has no filename to honor argv/__file__ with, so it
+    must be sent unmodified -- unlike -f, which now gets the full prelude."""
+    mock_session = MagicMock()
+    mock_session.name = "s1"
+    mock_session.url = "http://url"
+    mock_session.token = "token"
+    mock_session.kernel_id = None
+    mock_session.session_id = None
+    mock_store.get.return_value = mock_session
+
+    mock_common_state.resolve_session.return_value = "s1"
+    mock_runtime = mock_runtime_class.return_value
+    mock_runtime.execute_code.return_value = []
+
+    result = runner.invoke(app, ["exec", "-s", "s1"], input="print(42)")
+    assert result.exit_code == 0
     mock_runtime.execute_code.assert_any_call(
-        "print('hello')", output_hook=ANY, timeout=30.0
+        "print(42)", output_hook=ANY, timeout=30.0
     )
 
 
@@ -367,6 +432,11 @@ def test_cli_exec_timeout(mock_store, mock_runtime_class, mock_common_state, tmp
         app, ["exec", "-s", "s1", "-f", str(script), "--timeout", "3600"]
     )
     assert result.exit_code == 0
-    mock_runtime.execute_code.assert_any_call(
-        "print('hello')", output_hook=ANY, timeout=3600.0
+    expected = (
+        "import sys\n"
+        "sys.argv = ['script.py']\n"
+        "__name__ = '__main__'\n"
+        "__file__ = '<mighty-colab-exec:script.py>'\n"
+        "print('hello')"
     )
+    mock_runtime.execute_code.assert_any_call(expected, output_hook=ANY, timeout=3600.0)

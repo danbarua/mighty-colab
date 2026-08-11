@@ -347,6 +347,34 @@ def test_run_sets_dunder_main(
     assert "__name__" in body and "'__main__'" in body
 
 
+def test_run_sets_file_sentinel(
+    mock_client,
+    mock_store,
+    mock_runtime_class,
+    mock_spawn_keep_alive,
+    assign_response,
+    script_path,
+):
+    """`__file__` must be a synthetic sentinel, not silently undefined --
+    nothing from the caller's local filesystem exists on the remote kernel,
+    so a plausible-looking real path would be actively misleading (a real
+    incident: module-scope `os.path.dirname(__file__)` crashed a billing
+    run with NameError before this existed)."""
+    mock_client.assign.return_value = assign_response
+    mock_runtime = mock_runtime_class.return_value
+    mock_runtime.execute_code.return_value = []
+
+    persisted = {}
+    mock_store.add.side_effect = lambda s: persisted.setdefault("s", s)
+    mock_store.get.side_effect = lambda name: persisted.get("s")
+
+    result = runner.invoke(app, ["run", str(script_path)])
+    assert result.exit_code == 0, result.output
+    code_calls = [c.args[0] for c in mock_runtime.execute_code.call_args_list]
+    body = next(c for c in code_calls if "hello from script" in c)
+    assert "__file__ = '<mighty-colab-exec:script.py>'" in body
+
+
 # ---------------------------------------------------------------------------
 # Error handling
 # ---------------------------------------------------------------------------

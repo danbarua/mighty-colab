@@ -75,6 +75,34 @@ def _build_env_prelude(env_vars: dict[str, str]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _build_script_prelude(basename: str, script_args: Optional[List[str]] = None) -> str:
+    """Python source giving text-transmitted code `python script.py`-like
+    semantics: `sys.argv`, `__name__ == "__main__"`, and a `__file__`
+    sentinel.
+
+    Nothing from the caller's local filesystem exists on the remote kernel
+    -- the code is sent as text, not read from a real file there -- so a
+    plausible-looking local path (e.g. the caller's actual local path)
+    would be actively misleading: code doing `open(__file__)` would fail
+    on a path that looks like it should exist, rather than obviously not.
+    `<mighty-colab-exec:basename>` follows Python's own convention for
+    code with no backing file (CPython itself uses `<stdin>`, `<string>`,
+    `<doctest ...>`), keeping the basename for readable tracebacks while
+    being unambiguous that it's synthetic. Without this, module-scope code
+    referencing `__file__` (e.g. `os.path.dirname(os.path.abspath(__file__))`
+    to locate a sibling module) raises `NameError` -- this crashed a real
+    billing run.
+    """
+    argv_literal = repr([basename, *(script_args or [])])
+    file_literal = repr(f"<mighty-colab-exec:{basename}>")
+    return (
+        "import sys\n"
+        f"sys.argv = {argv_literal}\n"
+        "__name__ = '__main__'\n"
+        f"__file__ = {file_literal}\n"
+    )
+
+
 def save_output(outputs, cell):
     if cell is None:
         return
@@ -255,6 +283,8 @@ def exec_command(
 
         for i, block in enumerate(code_blocks):
             code = _build_env_prelude(env_vars) + block["code"]
+            if file and not is_nb:
+                code = _build_script_prelude(os.path.basename(file)) + code
             identifier = None
             if is_nb:
                 title_match = TITLE_REGEX.search(code)
