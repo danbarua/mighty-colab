@@ -438,6 +438,7 @@ def spawn_exec_async(
     output_image: Optional[str] = None,
     auth_provider=None,
     config_path=None,
+    json_result_path: Optional[str] = None,
 ) -> int:
     """Spawns a detached `exec` process with stdio redirected to a log file.
 
@@ -451,6 +452,13 @@ def spawn_exec_async(
     Both `auth_provider` and `config_path` are propagated as global flags
     for the same reason as `spawn_keep_alive`: the detached child re-parses
     argv from scratch and does not inherit the parent's parsed Typer flags.
+
+    `json_result_path`, when set, is passed through as the child's own
+    hidden `--json-result-path` -- it writes its `--json` envelope to that
+    sidecar file once the run finishes, instead of stdout (which is already
+    redirected to `log_path` here and isn't meant to carry JSON). Note this
+    is independent of the child's own `--json` global flag, which is
+    deliberately never set here -- see `exec_async`.
     """
     cmd = [sys.executable, "-m", "colab_cli.cli"]
     if auth_provider is not None:
@@ -464,6 +472,8 @@ def spawn_exec_async(
         cmd.extend(["--output-image", output_image])
     for item in env or []:
         cmd.extend(["--env", item])
+    if json_result_path:
+        cmd.extend(["--json-result-path", json_result_path])
 
     kwargs = {}
     if sys.platform != "win32":
@@ -534,10 +544,14 @@ def exec_async(
     name = state.resolve_session(session)
     s = state.store.get(name)
     if not s:
+        if state.json_output:
+            emit_json(build_envelope("error", exit_code=1, reason="session_not_found"))
         typer.echo(f"[colab] Session '{name}' not found.", err=True)
         raise typer.Exit(1)
 
     if s.exec_pid and pid_alive(s.exec_pid):
+        if state.json_output:
+            emit_json(build_envelope("error", exit_code=1, reason="already_running"))
         typer.echo(
             f"[colab] Session '{name}' already has a background exec running "
             f"(pid={s.exec_pid}). Follow it with `mighty-colab log -s {name} -f`, "
@@ -548,6 +562,8 @@ def exec_async(
 
     if not file:
         if is_stdin_tty():
+            if state.json_output:
+                emit_json(build_envelope("error", exit_code=1, reason="no_input"))
             typer.echo(
                 "[colab] Error: exec-async requires -f/--file, or piped code. "
                 "A live terminal can't be forwarded to a background process.",
@@ -584,6 +600,12 @@ def exec_async(
         if other_name == name:
             continue
         if other.exec_log_path == log_path and pid_alive(other.exec_pid):
+            if state.json_output:
+                emit_json(
+                    build_envelope(
+                        "error", exit_code=1, reason="log_path_collision"
+                    )
+                )
             typer.echo(
                 f"[colab] Refusing to start: '{log_path}' is currently "
                 f"being written by session '{other_name}' "
@@ -597,6 +619,11 @@ def exec_async(
     s.exec_log_path = log_path
     state.store.add(s)
 
+    # Only the sidecar path is propagated to the child, never `--json`
+    # itself -- the child must keep rendering live to `log_path` exactly as
+    # it does today (see `spawn_exec_async`'s docstring).
+    json_result_path = f"{log_path}.json" if state.json_output else None
+
     pid = spawn_exec_async(
         file,
         name,
@@ -606,10 +633,13 @@ def exec_async(
         output_image=output_image,
         auth_provider=state.auth_provider,
         config_path=state.config_path,
+        json_result_path=json_result_path,
     )
     s.exec_pid = pid
     state.store.add(s)
 
+    if state.json_output:
+        emit_json(build_envelope("started", pid=pid, log_path=log_path))
     typer.echo(f"[colab] Started background exec (pid={pid}).")
     typer.echo(f"[colab] Follow output with: mighty-colab log -s {name} -f")
 
