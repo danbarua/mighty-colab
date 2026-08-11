@@ -10,6 +10,41 @@ below corresponds to a tag of the same name.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-11
+
+### Added
+
+- **exec-async:** new background counterpart to `exec`, which blocks the
+  caller until the run finishes. Spawns the same execution path as a
+  detached process and returns almost immediately regardless of the
+  submitted script's runtime. `colab status` reports whether a background
+  job is tracked and where its log lives.
+- **log:** `-f/--follow` tails a running `exec-async` job's raw
+  stdout/stderr live, until it finishes. `--tail [-n N]` is a non-blocking
+  sibling: prints the job's current output once and exits immediately,
+  whether the job is still running or already finished.
+- **exec-async:** `--output-log <path>` redirects the raw output log to
+  any writable location instead of the default under
+  `~/.config/colab-cli/history/`, for callers (e.g. sandboxed agents)
+  without write access there.
+
+### Fixed
+
+- **version:** an editable/dev install (`pip install -e .` / `uv sync`)
+  now reports the live git commit hash instead of a stale version string
+  frozen in place the last time the environment was synced.
+- **mcp:** `log`'s `--follow` flag is no longer exposed as an MCP tool
+  parameter — it can block a single tool call for the unbounded duration
+  of a background job, which MCP's request/response model (and Claude
+  Desktop specifically) can't represent. The rest of `log`, including the
+  new `--tail`, is unaffected.
+- **docs:** `skills/colab-operator/SKILL.md` (bundled, also served via
+  `colab skill`) consistently invokes `mighty-colab` instead of `colab`
+  throughout, and now documents two gotchas that previously crashed a real
+  billing run: `exec -f`'s text-transmission execution model (no
+  `__file__`, no script semantics) and `--timeout`'s "gap between outputs,
+  not wall clock" semantics.
+
 ## [0.2.2] - 2026-08-05
 
 ### Fixed
@@ -186,7 +221,8 @@ below corresponds to a tag of the same name.
 - The experimental `colab-mcp` git submodule, superseded by the hand-rolled
   MCP server above.
 
-[Unreleased]: https://github.com/danbarua/mighty-colab/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/danbarua/mighty-colab/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/danbarua/mighty-colab/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/danbarua/mighty-colab/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/danbarua/mighty-colab/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/danbarua/mighty-colab/compare/v0.1.23...v0.2.0
