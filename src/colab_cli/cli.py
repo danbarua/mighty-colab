@@ -21,10 +21,37 @@ from typer.core import TyperGroup
 from typing_extensions import Annotated
 
 from colab_cli import auto_update
+from colab_cli import common
 from colab_cli.auth import AuthProvider
 from colab_cli.common import state, setup_logging
 from colab_cli.commands import session, execution, files, automation, run, ssh, utility
 from colab_cli.commands import adopt, mcp
+
+_original_echo = typer.echo
+
+
+def _json_aware_echo(message=None, file=None, nl=True, err=False, color=None):
+    """Route `typer.echo(...)` calls to stderr while `--json` is active.
+
+    Installed once, globally, by reassigning `typer.echo` itself: every one
+    of this codebase's ~160 `typer.echo(...)` call sites is module-qualified
+    (no `from typer import echo`, no direct `click.echo`), so Python's
+    attribute-lookup-at-call-time means this single reassignment covers all
+    of them with zero per-call-site edits.
+
+    Looks up `common.state` fresh on every call (not a closed-over
+    reference) so it reflects whatever `--json` actually did for *this*
+    invocation. A no-op when `--json` isn't set (the default) -- zero risk
+    to existing behavior. The final JSON envelope itself must be printed via
+    the original `typer.echo` (or with an explicit `file=`) so it isn't
+    caught by its own redirect rule.
+    """
+    if common.state.json_output and not err and file is None:
+        err = True
+    return _original_echo(message=message, file=file, nl=nl, err=err, color=color)
+
+
+typer.echo = _json_aware_echo
 
 
 class AlphabeticalGroup(TyperGroup):
@@ -66,6 +93,17 @@ def callback(
     logtostderr: Annotated[
         bool, typer.Option("--logtostderr", help="Log all output to stderr")
     ] = False,
+    json_output: Annotated[
+        bool,
+        typer.Option(
+            "--json",
+            help=(
+                "Emit machine-readable JSON on stdout for exec/run/exec-async/"
+                "log --tail. Human-readable '[colab] ...' chatter moves to "
+                "stderr. Implies --logtostderr."
+            ),
+        ),
+    ] = False,
     auth: Annotated[
         AuthProvider,
         typer.Option(
@@ -83,6 +121,13 @@ def callback(
     """
     state.client_oauth_config = client_oauth_config
     state.config_path = config
+    state.json_output = json_output
+    if json_output:
+        # Free complementary flip: also route logging.* output to stderr.
+        # Unrelated mechanism from the typer.echo redirect above (this one
+        # controls the stdlib `logging` module), but both belong on stderr
+        # under --json for the same reason -- stdout must carry the JSON only.
+        logtostderr = True
     state.logtostderr = logtostderr
     state.auth_provider = auth
     setup_logging(logtostderr)

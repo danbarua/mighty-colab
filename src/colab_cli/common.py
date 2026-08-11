@@ -14,6 +14,7 @@
 
 import logging
 import os
+import re
 import signal
 import sys
 import time
@@ -26,12 +27,97 @@ from colab_cli.client import Client, Prod
 from colab_cli.history import HistoryLogger
 from colab_cli.state import StateStore, SettingsStore
 
+# `--json` envelope schema version, stamped on every emitted envelope so a
+# consumer can detect drift between the CLI version they wrote a recipe
+# against and the one that's actually running.
+SCHEMA_VERSION = "1"
+
+# Colab kernels format tracebacks with IPython's colored formatter, which
+# embeds raw ANSI SGR escape bytes (e.g. \x1b[0;31m) in error output. Those
+# are meaningless -- and hard to parse -- in a JSON text field, even though
+# they're exactly what a human wants in a real terminal. Shared by the MCP
+# boundary and `--json` envelope building so both strip the same way.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
+
+
+def _strip_ansi(text: str) -> str:
+    return _ANSI_RE.sub("", text)
+
+
+def _is_systemexit(out) -> bool:
+    """True iff this output is a `raise SystemExit(...)` (a.k.a. `sys.exit`)."""
+    return out.get("output_type") == "error" and out.get("ename") == "SystemExit"
+
+
+def _systemexit_code(out) -> int:
+    """Map a SystemExit kernel output back to a CPython-style integer exit code.
+
+    CPython conventions (mirrored):
+      - `sys.exit()` / `sys.exit(None)` / `sys.exit(0)` / `sys.exit(False)` -> 0
+      - `sys.exit(<int>)`                                -> <int>
+      - `sys.exit('msg')` (any non-int)                  -> 1
+    """
+    evalue = (out.get("evalue") or "").strip()
+    if evalue in ("", "None", "0", "False"):
+        return 0
+    try:
+        return int(evalue)
+    except ValueError:
+        return 1
+
+
+def _exit_code_from_outputs(outputs) -> int:
+    """Derive the CLI's exit code from the kernel's outputs for a single cell.
+
+    A `SystemExit` is treated like CPython would treat the same call from a
+    plain `python script.py` invocation. Any *other* error (uncaught
+    exception, NameError, etc.) is exit 1.
+    """
+    code = 0
+    for o in outputs:
+        if o.get("output_type") != "error":
+            continue
+        if _is_systemexit(o):
+            ec = _systemexit_code(o)
+            # Last SystemExit wins, matching the runtime -- and any non-zero
+            # eclipses any prior zero.
+            code = ec if ec != 0 else code
+        else:
+            return 1
+    return code
+
+
+def build_envelope(
+    status: str, exit_code: int = 0, reason: Optional[str] = None, **extra
+) -> dict:
+    """Build a `--json` response envelope.
+
+    Every JSON emitter (exec, run, exec-async, log --tail) funnels its
+    response through this, so the envelope shape can't drift between
+    commands.
+    """
+    # Imported lazily: auto_update.py imports `state` from this module at
+    # its own top level, so a top-level import here would be circular.
+    from colab_cli.auto_update import get_app_version
+
+    envelope = {
+        "schema_version": SCHEMA_VERSION,
+        "cli_version": get_app_version(),
+        "status": status,
+        "exit_code": exit_code,
+    }
+    if reason is not None:
+        envelope["reason"] = reason
+    envelope.update(extra)
+    return envelope
+
 
 class State:
     def __init__(self):
         self.client_oauth_config = os.path.expanduser("~/.colab-cli-oauth-config.json")
         self.config_path = None
         self.logtostderr = False
+        self.json_output = False
         self.auth_provider = AuthProvider.OAUTH2
         self._client = None
         self._store = None

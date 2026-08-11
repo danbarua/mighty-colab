@@ -29,6 +29,12 @@ def mock_common_state(mocker):
     # Default behavior for sync_sessions
     mock_state.sync_sessions.return_value = ({}, [])
 
+    # `state` is a MagicMock, so an unset `json_output` would auto-vivify as
+    # a truthy MagicMock and silently flip every `--json`-gated branch on.
+    # Pin the real default here; tests that want `--json` behavior override
+    # it explicitly.
+    mock_state.json_output = False
+
     # Global patch for ColabRuntime to prevent network calls
     # We patch it in the modules where it is imported and used
     mocker.patch("colab_cli.commands.session.ColabRuntime")

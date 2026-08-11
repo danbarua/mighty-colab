@@ -49,6 +49,7 @@ from colab_cli.commands.execution import (
     _build_script_prelude,
     _parse_env_vars,
 )
+from colab_cli.common import _exit_code_from_outputs, _is_systemexit
 from colab_cli.commands.session import (
     _is_scope_error,
     _scope_remediation_message,
@@ -152,49 +153,6 @@ def _strip_shebang(body: str) -> str:
         nl = body.find("\n")
         return body[nl + 1 :] if nl != -1 else ""
     return body
-
-
-def _is_systemexit(out) -> bool:
-    """True iff this output is a `raise SystemExit(...)` (a.k.a. `sys.exit`)."""
-    return out.get("output_type") == "error" and out.get("ename") == "SystemExit"
-
-
-def _systemexit_code(out) -> int:
-    """Map a SystemExit kernel output back to a CPython-style integer exit code.
-
-    CPython conventions (mirrored):
-      - `sys.exit()` / `sys.exit(None)` / `sys.exit(0)` / `sys.exit(False)` -> 0
-      - `sys.exit(<int>)`                                -> <int>
-      - `sys.exit('msg')` (any non-int)                  -> 1
-    """
-    evalue = (out.get("evalue") or "").strip()
-    if evalue in ("", "None", "0", "False"):
-        return 0
-    try:
-        return int(evalue)
-    except ValueError:
-        return 1
-
-
-def _exit_code_from_outputs(outputs) -> int:
-    """Derive the CLI's exit code from the kernel's outputs for a single cell.
-
-    A `SystemExit` is treated like CPython would treat the same call from a
-    plain `python script.py` invocation. Any *other* error (uncaught
-    exception, NameError, etc.) is exit 1.
-    """
-    code = 0
-    for o in outputs:
-        if o.get("output_type") != "error":
-            continue
-        if _is_systemexit(o):
-            ec = _systemexit_code(o)
-            # Last SystemExit wins, matching the runtime — and any non-zero
-            # eclipses any prior zero.
-            code = ec if ec != 0 else code
-        else:
-            return 1
-    return code
 
 
 def _make_run_output_hook(output_image=None):
