@@ -164,12 +164,17 @@ Still open:
    `mighty-colab help exec` at runtime, so running that test answers it.
    (Upstream is frozen, so this can only have changed in our own fork.)
 
-3. **The stale skill copy.** `bonsai-2026/.claude/skills/mighty-colab/SKILL.md`
-   still says `--auth` defaults to `adc`. It defaults to `oauth2` — an
+3. **The stale skill copy.** **[✅ Resolved, verified 2026-08-11 — no commit
+   hash here, the fix landed as a file sync in `bonsai-2026`, not a commit in
+   this repo]** `bonsai-2026/.claude/skills/mighty-colab/SKILL.md` now reads
+   byte-identical to the canonical `skills/colab-operator/SKILL.md` (`oauth2`
+   correctly stated as the default, plus everything else added since,
+   including the `mighty-colab` rename and the `exec-async` docs). Originally:
+   still said `--auth` defaults to `adc`. It defaults to `oauth2` — an
    interactive browser flow — and we corrected the canonical copy in `a070161`.
-   The wrong value sits in a document whose own heading calls authentication
-   "the #1 thing that blocks agents." Left uncorrected deliberately (that repo
-   is out of scope for this write-up), but do not quote `adc` as the default.
+   The wrong value sat in a document whose own heading calls authentication
+   "the #1 thing that blocks agents." Left uncorrected deliberately at the
+   time (that repo was out of scope for this write-up).
 
 ---
 
@@ -702,7 +707,8 @@ rest of the list credible.
   imposed that on us.
 - We changed `status`/`stop` exit codes on an inference nobody had asked for,
   and reverted both (`e3cd8e1`). Self-inflicted, caught, reverted before release.
-- The stale skill copy in the consuming repo is duplication we chose.
+- The stale skill copy in the consuming repo is duplication we chose. **[✅
+  Resolved 2026-08-11]**
 
 ### Explicitly not Colab's problem — see the next section
 
@@ -778,6 +784,16 @@ thread, whose only job is to keep the transport alive.
 `run_ladder_stage1.py:117, 156-166`.
 
 ### 4. Give `exec -f` `run`'s execution semantics — or name the model in the flag
+
+**[✅ Done — `241b48b`, 2026-08-11]** `exec -f` (non-notebook files) and `run`
+now share one prelude builder (`_build_script_prelude()` in
+`commands/execution.py`) setting `sys.argv`, `__name__ = '__main__'`, and
+`__file__` — the last of which neither command set before. `__file__` is a
+synthetic `<mighty-colab-exec:basename>` sentinel rather than the caller's
+real local path, since nothing from the local filesystem exists on the
+runtime and a plausible-looking real path would be more misleading, not
+less. Verified live against a real Colab session, including the exact
+`os.path.dirname(os.path.abspath(__file__))` pattern from story 1 below.
 
 `colab run` sets `sys.argv` and `__name__ = '__main__'`
 (`run.py:104-108`); `exec -f` sets neither, and neither sets `__file__`. If
