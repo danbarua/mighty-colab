@@ -172,3 +172,51 @@ def test_spawn_exec_async_omits_flag_when_no_json_result_path(mocker):
 
     cmd = mock_popen.call_args.args[0]
     assert "--json-result-path" not in cmd
+
+
+@patch("colab_cli.commands.execution.spawn_exec_async")
+def test_exec_async_removes_stale_sidecar_before_restart(
+    mock_spawn, mock_store, mock_common_state, tmp_path
+):
+    """A finished run #1 leaves `<log_path>.json` behind. A restarted run #2
+    at the same log path must not let that stale sidecar shadow its own
+    in-flight state -- `log --tail --json` checks the sidecar before pid
+    liveness, so a poller during run #2 would otherwise see run #1's
+    terminal verdict while the new job is still executing."""
+    sidecar_path = tmp_path / "s1.exec.log.json"
+    sidecar_path.write_text('{"status": "ok", "exit_code": 0}')
+
+    mock_session = MagicMock()
+    mock_session.name = "s1"
+    mock_session.exec_pid = None
+    mock_store.get.return_value = mock_session
+    mock_store.list.return_value = {"s1": mock_session}
+    mock_common_state.resolve_session.return_value = "s1"
+    mock_common_state.history.log_dir = str(tmp_path)
+    mock_common_state.json_output = False
+    mock_spawn.return_value = 6666
+
+    exec_async(session="s1", file="script.py")
+
+    assert not sidecar_path.exists()
+
+
+@patch("colab_cli.commands.execution.spawn_exec_async")
+def test_exec_async_no_error_when_no_stale_sidecar(
+    mock_spawn, mock_store, mock_common_state, tmp_path
+):
+    """Regression guard: the common case (no leftover sidecar) must not
+    raise just because there's nothing to remove."""
+    mock_session = MagicMock()
+    mock_session.name = "s1"
+    mock_session.exec_pid = None
+    mock_store.get.return_value = mock_session
+    mock_store.list.return_value = {"s1": mock_session}
+    mock_common_state.resolve_session.return_value = "s1"
+    mock_common_state.history.log_dir = str(tmp_path)
+    mock_common_state.json_output = False
+    mock_spawn.return_value = 7777
+
+    exec_async(session="s1", file="script.py")
+
+    mock_spawn.assert_called_once()

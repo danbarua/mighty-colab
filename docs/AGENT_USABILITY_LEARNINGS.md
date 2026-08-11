@@ -775,7 +775,13 @@ result to a `<log_path>.json` sidecar file that survives session teardown;
 against real feedback from the consumer agent behind this ask, plus a
 second review pass — see the design plan referenced in the
 `feature/structured-outputs` branch history for the full rationale,
-including the exact `SystemExit(0)` incident described below.
+including the exact `SystemExit(0)` incident described below. Verified
+against extensive mocked unit tests and one offline real-wiring smoke test
+(`mighty-colab --json log -s no-such-session --tail`, no session/billing
+involved); the full live-backend integration script
+(`integration/repro_json_output/`) is written but **not yet run against a
+real Colab session** as of this entry — pending that run before this is
+fully confirmed end to end.
 
 *Traces to:* `679c0b6`; the sentinel pattern
 (`bonsai-2026/Makefile`, the `grep -q *_OK` lines);

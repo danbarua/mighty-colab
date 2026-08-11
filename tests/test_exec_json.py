@@ -224,6 +224,30 @@ def test_exec_json_traceback_ansi_stripped_with_raw_preserved(
     assert out["traceback_raw"] == raw_tb
 
 
+def test_exec_json_transport_failure_mid_run_emits_error_envelope(
+    mock_session, mock_runtime_class, mock_common_state
+):
+    """A genuine transport failure (connection drop, TimeoutError) during
+    the execute_code call must still leave stdout carrying a JSON error
+    envelope, not a bare traceback -- the process still exits non-zero
+    since this is a genuine CLI-level failure, not a job outcome."""
+    mock_common_state.json_output = True
+    mock_common_state.resolve_session.return_value = "s1"
+    mock_runtime = mock_runtime_class.return_value
+    mock_runtime.execute_code.side_effect = [
+        None,  # the /content chdir preflight call
+        TimeoutError("no output for 30s"),
+    ]
+
+    result = runner.invoke(app, ["exec", "-s", "s1"], input="print('hi')")
+    assert result.exit_code != 0
+
+    envelope = json.loads(result.stdout)
+    assert envelope["status"] == "error"
+    assert envelope["reason"] == "execution_failed"
+    assert envelope["exit_code"] == 1
+
+
 def test_exec_json_empty_code_is_ok_with_no_blocks(mock_session, mock_common_state):
     mock_common_state.json_output = True
     mock_common_state.resolve_session.return_value = "s1"

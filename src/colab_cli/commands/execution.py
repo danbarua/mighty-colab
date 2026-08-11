@@ -394,6 +394,18 @@ def exec_command(
                         "cell_id": block.get("id"),
                     }
                 )
+    except Exception:
+        # Genuine transport-level failure (connection drop, TimeoutError --
+        # the default is 30s and this is the most common field failure).
+        # Cleanup still happens via the `finally` below; best-effort: give
+        # --json callers a JSON body instead of a bare traceback before it
+        # propagates.
+        if want_json:
+            _finish_json(
+                build_envelope("error", exit_code=1, reason="execution_failed"),
+                json_result_path,
+            )
+        raise
     finally:
         s.running = None
         state.store.add(s)
@@ -618,6 +630,17 @@ def exec_async(
     # race the write (same rule as `spawn_keep_alive`).
     s.exec_log_path = log_path
     state.store.add(s)
+
+    # A leftover sidecar from a previous run at this same log_path must not
+    # shadow this run's in-flight state: `log --tail --json` checks sidecar
+    # existence *before* pid liveness, so a stale "finished" sidecar would
+    # make a poller see the PREVIOUS run's terminal verdict while this one
+    # is still executing. Removed unconditionally (not gated on `--json`)
+    # -- a plain run reusing this path must not leave a stale result behind
+    # for a later `--json` poller either.
+    stale_sidecar = f"{log_path}.json"
+    if os.path.exists(stale_sidecar):
+        os.remove(stale_sidecar)
 
     # Only the sidecar path is propagated to the child, never `--json`
     # itself -- the child must keep rendering live to `log_path` exactly as
