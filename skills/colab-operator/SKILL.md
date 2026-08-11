@@ -88,6 +88,7 @@ by running `uv tool install mighty-colab` or `pip install mighty-colab`.
 - `mighty-colab status [-s <name>]` shows hardware, IDLE/BUSY, and last execution.
 - `mighty-colab log -s <name> [-n 20] [-t TYPE]` shows recent structured events; invaluable when a task fails (keep-alive errors carry the raw `response_body`).
 - `mighty-colab log -s <name> -f` tails a running `exec-async` job's raw stdout/stderr live, until it finishes — a different, real-time view from the structured event history the same command shows without `-f`. Errors if no `exec-async` job is tracked for that session.
+- `mighty-colab log -s <name> --tail [-n N]` prints that same raw output once and exits immediately — no waiting, whether the job is still running or already done. Prefer this over `-f` when calling through something that can't handle a call blocking for an unbounded time (e.g. an MCP client).
 - `mighty-colab log -s <name> -o summary.ipynb` exports the session as a notebook (also `.md`, `.txt`, `.jsonl` by suffix).
 - `mighty-colab url -s <name>` prints a browser URL that attaches the Colab web UI to your existing CLI session instead of allocating a new VM (add `--open` to launch it).
 - `mighty-colab skill` / `mighty-colab readme` print this skill and the README (handy for self-discovery).

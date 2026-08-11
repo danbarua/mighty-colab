@@ -190,7 +190,28 @@ if ! echo "$STATUS_OUTPUT" | grep -qF "Log: $CUSTOM_LOG_PATH"; then
     exit 1
 fi
 
-# Wait for this run to finish, then verify the custom path (not the default
+# ---------- Phase 6: --tail is a non-blocking peek at the still-running job -
+echo ""
+echo "[*] Phase 6a: --tail while the job is still running must return immediately"
+START=$(date +%s)
+TAIL_OUTPUT=$(timeout 5 uv run mighty-colab $AUTH_FLAGS --config "$SESSION_FILE" log -s "$SESSION_NAME" --tail 2>&1)
+RC=$?
+END=$(date +%s)
+ELAPSED=$((END - START))
+echo "$TAIL_OUTPUT"
+
+if [ $RC -ne 0 ]; then
+    echo "[FAILURE] --tail exited $RC (should never fail while the job is mid-run)."
+    exit 1
+fi
+if [ "$ELAPSED" -gt 3 ]; then
+    echo "[FAILURE] --tail took ${ELAPSED}s -- it must never poll or block,"
+    echo "          regardless of whether the job is still running."
+    exit 1
+fi
+echo "[SUCCESS] Phase 6a passed: --tail returned in ${ELAPSED}s without blocking."
+
+# Wait for the job to finish, then verify the custom path (not the default
 # ~/.config/colab-cli/history/<session>.exec.log) actually received the
 # output, including the nested directory that didn't exist beforehand.
 sleep 12
@@ -207,6 +228,30 @@ if [ "$(echo "$CUSTOM_LOG_CONTENT" | grep -E '^(step [0-4]|done)$')" != "$EXPECT
     exit 1
 fi
 echo "[SUCCESS] Phase 5 passed: --output-log redirected output to a custom, previously-nonexistent path."
+
+echo ""
+echo "[*] Phase 6b: --tail after completion must show the full output, -n must limit it"
+TAIL_OUTPUT=$(uv run mighty-colab $AUTH_FLAGS --config "$SESSION_FILE" log -s "$SESSION_NAME" --tail 2>&1)
+RC=$?
+echo "$TAIL_OUTPUT"
+if [ $RC -ne 0 ]; then
+    echo "[FAILURE] --tail after completion exited $RC"
+    exit 1
+fi
+if [ "$(echo "$TAIL_OUTPUT" | grep -E '^(step [0-4]|done)$')" != "$EXPECTED_ORDER" ]; then
+    echo "[FAILURE] --tail after completion did not show the full run output."
+    exit 1
+fi
+
+TAIL_LIMITED=$(uv run mighty-colab $AUTH_FLAGS --config "$SESSION_FILE" log -s "$SESSION_NAME" --tail -n 2 2>&1)
+echo "$TAIL_LIMITED"
+EXPECTED_LAST_TWO="step 4
+done"
+if [ "$(echo "$TAIL_LIMITED" | grep -E '^(step [0-4]|done)$')" != "$EXPECTED_LAST_TWO" ]; then
+    echo "[FAILURE] --tail -n 2 did not show just the last two lines."
+    exit 1
+fi
+echo "[SUCCESS] Phase 6b passed: --tail showed full output, -n limited it correctly."
 
 echo ""
 echo "[SUCCESS] All phases passed."

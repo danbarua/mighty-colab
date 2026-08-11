@@ -62,6 +62,28 @@ def _follow_log(path: str, pid: Optional[int]):
             time.sleep(FOLLOW_POLL_SECONDS)
 
 
+def _tail_log_once(path: str, lines: Optional[int]):
+    """Print `path`'s current content once and return -- no polling, no
+    liveness check. Unlike `_follow_log`, this never blocks: a still-running
+    job's partial output and a finished job's complete output are read the
+    same way. Safe to expose over MCP for exactly that reason.
+    """
+    if not os.path.exists(path):
+        typer.echo(f"[colab] Log file '{path}' not found.", err=True)
+        raise typer.Exit(1)
+
+    with open(path, "r") as f:
+        content = f.read()
+
+    if lines:
+        content = "\n".join(content.splitlines()[-lines:])
+        if content:
+            content += "\n"
+
+    sys.stdout.write(content)
+    sys.stdout.flush()
+
+
 def pay():
     """Open the Colab signup page to manage compute units"""
     import webbrowser
@@ -209,11 +231,24 @@ def log(
             ),
         ),
     ] = False,
+    tail: Annotated[
+        bool,
+        typer.Option(
+            "--tail",
+            help=(
+                "Print a running or finished `exec-async` job's current "
+                "stdout/stderr once and exit (requires -s) -- unlike "
+                "--follow, never blocks or polls. Combine with -n for the "
+                "last N lines only."
+            ),
+        ),
+    ] = False,
 ):
     """Manage and view session history logs"""
-    if follow:
+    if follow or tail:
         if not session:
-            typer.echo("[colab] --follow requires --session/-s.", err=True)
+            flag = "--follow" if follow else "--tail"
+            typer.echo(f"[colab] {flag} requires --session/-s.", err=True)
             raise typer.Exit(2)
         s = state.store.get(session)
         if not s or not s.exec_log_path:
@@ -223,7 +258,10 @@ def log(
                 err=True,
             )
             raise typer.Exit(1)
-        _follow_log(s.exec_log_path, s.exec_pid)
+        if follow:
+            _follow_log(s.exec_log_path, s.exec_pid)
+        else:
+            _tail_log_once(s.exec_log_path, lines)
         return
 
     if not session:

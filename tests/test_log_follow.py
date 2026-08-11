@@ -103,3 +103,123 @@ def test_log_follow_picks_up_appended_content(mocker, tmp_path, capsys):
     out = capsys.readouterr().out
     assert "first\n" in out
     assert "second\n" in out
+
+
+# --- --tail: one-shot, non-blocking peek (no polling, no pid check) --------
+
+
+def test_log_tail_requires_session():
+    from colab_cli.commands.utility import log
+
+    with pytest.raises(typer.Exit) as excinfo:
+        log(session=None, tail=True)
+    assert excinfo.value.exit_code == 2
+
+
+def test_log_tail_errors_when_no_async_job(mocker):
+    from colab_cli.commands.utility import log
+
+    mock_state = mocker.patch("colab_cli.commands.utility.state")
+    mock_state.store.get.return_value = SessionState(
+        name="s1", token="t", url="u", endpoint="e"
+    )
+
+    with pytest.raises(typer.Exit) as excinfo:
+        log(session="s1", tail=True)
+    assert excinfo.value.exit_code == 1
+
+
+def test_log_tail_prints_current_content_once_without_blocking(mocker, tmp_path, capsys):
+    """Unlike --follow, --tail must never poll or sleep -- it reads what's
+    on disk right now and returns immediately, regardless of whether the
+    job is still running."""
+    from colab_cli.commands.utility import log
+
+    log_file = tmp_path / "s1.exec.log"
+    log_file.write_text("step 0\nstep 1\n")
+
+    mock_state = mocker.patch("colab_cli.commands.utility.state")
+    mock_state.store.get.return_value = SessionState(
+        name="s1",
+        token="t",
+        url="u",
+        endpoint="e",
+        exec_pid=999,
+        exec_log_path=str(log_file),
+    )
+    mock_sleep = mocker.patch("time.sleep")
+    mock_pid_alive = mocker.patch("colab_cli.commands.utility.pid_alive")
+
+    log(session="s1", tail=True)
+
+    out = capsys.readouterr().out
+    assert out == "step 0\nstep 1\n"
+    mock_sleep.assert_not_called()
+    # --tail doesn't care whether the job is still running.
+    mock_pid_alive.assert_not_called()
+
+
+def test_log_tail_respects_lines_limit(mocker, tmp_path, capsys):
+    from colab_cli.commands.utility import log
+
+    log_file = tmp_path / "s1.exec.log"
+    log_file.write_text("step 0\nstep 1\nstep 2\nstep 3\n")
+
+    mock_state = mocker.patch("colab_cli.commands.utility.state")
+    mock_state.store.get.return_value = SessionState(
+        name="s1",
+        token="t",
+        url="u",
+        endpoint="e",
+        exec_pid=999,
+        exec_log_path=str(log_file),
+    )
+    mocker.patch("time.sleep")
+
+    log(session="s1", tail=True, lines=2)
+
+    out = capsys.readouterr().out
+    assert out == "step 2\nstep 3\n"
+
+
+def test_log_tail_errors_when_file_missing(mocker, tmp_path):
+    from colab_cli.commands.utility import log
+
+    missing_path = str(tmp_path / "never-written.log")
+    mock_state = mocker.patch("colab_cli.commands.utility.state")
+    mock_state.store.get.return_value = SessionState(
+        name="s1",
+        token="t",
+        url="u",
+        endpoint="e",
+        exec_pid=999,
+        exec_log_path=missing_path,
+    )
+
+    with pytest.raises(typer.Exit) as excinfo:
+        log(session="s1", tail=True)
+    assert excinfo.value.exit_code == 1
+
+
+def test_log_tail_works_after_job_has_finished(mocker, tmp_path, capsys):
+    """No pid liveness requirement -- a finished job's log is just as
+    readable as a running one's."""
+    from colab_cli.commands.utility import log
+
+    log_file = tmp_path / "s1.exec.log"
+    log_file.write_text("done\n")
+
+    mock_state = mocker.patch("colab_cli.commands.utility.state")
+    mock_state.store.get.return_value = SessionState(
+        name="s1",
+        token="t",
+        url="u",
+        endpoint="e",
+        exec_pid=None,  # worker already exited, pid no longer tracked as live
+        exec_log_path=str(log_file),
+    )
+
+    log(session="s1", tail=True)
+
+    out = capsys.readouterr().out
+    assert out == "done\n"

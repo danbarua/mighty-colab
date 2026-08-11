@@ -106,6 +106,16 @@ def test_log_follow_is_not_an_mcp_tool_parameter(tools_and_commands):
     assert "lines" in by_name["log"].input_schema["properties"]
 
 
+def test_log_tail_is_exposed_over_mcp(tools_and_commands):
+    """--tail is the MCP-safe replacement for --follow: a single bounded
+    synchronous file read, no polling, no liveness wait -- it needs no
+    entry in EXCLUDED_PARAMS at all, unlike --follow."""
+    tools, _ = tools_and_commands
+    by_name = {t.name: t for t in tools}
+    assert "tail" in by_name["log"].input_schema["properties"]
+    assert by_name["log"].input_schema["properties"]["tail"]["type"] == "boolean"
+
+
 def test_build_kwargs_ignores_follow_even_if_a_client_sends_it(click_group):
     """Defense in depth: even if some MCP client sends `follow` anyway
     (schemas aren't always strictly enforced), it must never reach the
