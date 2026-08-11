@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import datetime
+import json
 import nbformat
 import os
 import re
@@ -26,7 +27,13 @@ from rich.console import Console
 from typing import List, Optional
 from typing_extensions import Annotated
 
-from colab_cli.common import pid_alive
+from colab_cli.common import (
+    build_envelope,
+    emit_json,
+    json_safe_outputs,
+    pid_alive,
+)
+from colab_cli.common import _exit_code_from_outputs
 from colab_cli.runtime import ColabRuntime
 from colab_cli.utils import handle_image, is_terminal_error, render_display_data
 from colab_cli.console import connect_console
@@ -168,6 +175,17 @@ def display_output(out, output_image=None):
         pass
 
 
+def _finish_json(envelope: dict, json_result_path: Optional[str]) -> None:
+    """Deliver a `--json` envelope: to a sidecar file (`exec-async`'s child,
+    signaled by the hidden `--json-result-path` flag) or to stdout (a
+    foreground `exec --json`)."""
+    if json_result_path:
+        with open(json_result_path, "w", encoding="utf-8") as f:
+            json.dump(envelope, f)
+    else:
+        emit_json(envelope)
+
+
 def exec_command(
     session: Annotated[
         Optional[str], typer.Option("-s", "--session", help="Session name")
@@ -202,14 +220,33 @@ def exec_command(
             ),
         ),
     ] = None,
+    json_result_path: Annotated[
+        Optional[str],
+        typer.Option(
+            "--json-result-path",
+            hidden=True,
+            help=(
+                "Internal: used by `exec-async --json` to have its spawned "
+                "child write the final envelope to a sidecar file instead "
+                "of stdout, once the run finishes."
+            ),
+        ),
+    ] = None,
 ):
     """Execute code in a session"""
     from colab_cli.common import state
+
+    want_json = state.json_output or json_result_path is not None
 
     env_vars = _parse_env_vars(env)
     name = state.resolve_session(session)
     s = state.store.get(name)
     if not s:
+        if want_json:
+            _finish_json(
+                build_envelope("error", exit_code=1, reason="session_not_found"),
+                json_result_path,
+            )
         typer.echo(f"[colab] Session '{name}' not found.", err=True)
         raise typer.Exit(1)
 
@@ -233,6 +270,11 @@ def exec_command(
                 code_blocks.append({"code": f.read(), "id": None})
     else:
         if is_stdin_tty():
+            if want_json:
+                _finish_json(
+                    build_envelope("error", exit_code=1, reason="no_input"),
+                    json_result_path,
+                )
             typer.echo(
                 "[colab] Error: No input provided. Pipe code or provide a file.",
                 err=True,
@@ -241,6 +283,8 @@ def exec_command(
         code_blocks.append({"code": sys.stdin.read(), "id": None})
 
     if not any(b["code"].strip() for b in code_blocks):
+        if want_json:
+            _finish_json(build_envelope("ok", exit_code=0, blocks=[]), json_result_path)
         raise typer.Exit(0)
 
     def on_started(kid):
@@ -267,15 +311,26 @@ def exec_command(
     except Exception as e:
         runtime.stop()
         if is_terminal_error(e):
+            if want_json:
+                _finish_json(
+                    build_envelope("error", exit_code=1, reason="session_lost"),
+                    json_result_path,
+                )
             typer.echo(
                 f"[colab] Session '{name}' appears to be lost (404/401). Cleaning up.",
                 err=True,
             )
             state.prune_session(name)
             raise typer.Exit(1)
+        if want_json:
+            _finish_json(
+                build_envelope("error", exit_code=1, reason="preflight_failed"),
+                json_result_path,
+            )
         raise e
 
     had_error = False
+    blocks_json = []
     try:
         is_nb = file and file.endswith(".ipynb")
         s.running = f"exec({file or 'stdin'})"
@@ -309,7 +364,11 @@ def exec_command(
 
             outputs = runtime.execute_code(
                 code,
-                output_hook=lambda o: display_output(o, output_image),
+                output_hook=(
+                    None
+                    if state.json_output
+                    else lambda o: display_output(o, output_image)
+                ),
                 timeout=timeout,
             )
             if any(o.get("output_type") == "error" for o in outputs):
@@ -326,6 +385,15 @@ def exec_command(
                     "cell_id": block.get("id"),
                 },
             )
+            if want_json:
+                blocks_json.append(
+                    {
+                        "code": code,
+                        "outputs": json_safe_outputs(outputs),
+                        "cell_index": i if len(code_blocks) > 1 else None,
+                        "cell_id": block.get("id"),
+                    }
+                )
     finally:
         s.running = None
         state.store.add(s)
@@ -335,6 +403,20 @@ def exec_command(
             typer.echo(f"[colab] Saving notebook with outputs to '{output_file}'...")
             with open(output_file, "w", encoding="utf-8") as f:
                 nbformat.write(nb, f)
+
+    if want_json:
+        job_exit_code = _exit_code_from_outputs(
+            [o for block in blocks_json for o in block["outputs"]]
+        )
+        status = "ok" if job_exit_code == 0 else "job_raised"
+        reason = None if job_exit_code == 0 else "job_raised"
+        _finish_json(
+            build_envelope(
+                status, exit_code=job_exit_code, reason=reason, blocks=blocks_json
+            ),
+            json_result_path,
+        )
+        return
 
     # Raised after the `finally` above has run, so all blocks still execute
     # and (for notebooks) the output file is still saved even when a later

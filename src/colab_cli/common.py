@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import logging
 import os
 import re
@@ -110,6 +111,39 @@ def build_envelope(
         envelope["reason"] = reason
     envelope.update(extra)
     return envelope
+
+
+def emit_json(envelope: dict) -> None:
+    """Print a `--json` envelope to stdout.
+
+    Uses an explicit `file=` so it bypasses the `typer.echo` `--json`
+    redirect installed in `cli.py` (that redirect exists to keep
+    human-readable chatter off stdout while `--json` is active; this call
+    IS the stdout payload it's making room for).
+    """
+    typer.echo(json.dumps(envelope), file=sys.stdout)
+
+
+def json_safe_outputs(outputs):
+    """Return a copy of `outputs` with each error output's `traceback`
+    ANSI-stripped, original preserved as `traceback_raw`.
+
+    IPython ships `traceback` with embedded ANSI SGR escapes as a
+    convention, not incidental leakage -- under `--json` we strip by
+    default so the field is directly usable as clean text, while keeping
+    `traceback_raw` for anyone who wants to re-render it in a terminal.
+    Does not mutate `outputs` -- callers that also feed the same list to
+    `state.history.log_event`/notebook-output-saving need the untouched
+    original.
+    """
+    result = []
+    for out in outputs:
+        if out.get("output_type") == "error" and out.get("traceback"):
+            out = dict(out)
+            out["traceback_raw"] = out["traceback"]
+            out["traceback"] = [_strip_ansi(line) for line in out["traceback"]]
+        result.append(out)
+    return result
 
 
 class State:

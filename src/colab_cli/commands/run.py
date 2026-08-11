@@ -49,7 +49,13 @@ from colab_cli.commands.execution import (
     _build_script_prelude,
     _parse_env_vars,
 )
-from colab_cli.common import _exit_code_from_outputs, _is_systemexit
+from colab_cli.common import (
+    _exit_code_from_outputs,
+    _is_systemexit,
+    build_envelope,
+    emit_json,
+    json_safe_outputs,
+)
 from colab_cli.commands.session import (
     _is_scope_error,
     _scope_remediation_message,
@@ -262,6 +268,8 @@ def run_command(
     # AGENTS.md item 10: validate locally BEFORE allocating a VM. A typo'd
     # script path should not cost the user real compute.
     if not os.path.isfile(script):
+        if state.json_output:
+            emit_json(build_envelope("error", exit_code=2, reason="script_not_found"))
         typer.echo(f"[colab] Script not found: {script}", err=True)
         raise typer.Exit(2)
 
@@ -396,6 +404,7 @@ def run_command(
         )
         state.store.add(s)
 
+        outputs = None
         try:
             outputs = runtime.execute_code(
                 payload, output_hook=_make_run_output_hook(), timeout=timeout
@@ -405,6 +414,11 @@ def run_command(
             # outer finally; surface non-zero exit so callers/CI notice.
             exit_code = 1
             cleanup_reason = "run_failed"
+            if state.json_output:
+                # Best-effort: give --json callers a JSON body instead of a
+                # bare traceback, even though the transport exception below
+                # still propagates (teardown needs to run either way).
+                emit_json(build_envelope("error", exit_code=1, reason="run_failed"))
             raise
         else:
             exit_code = _exit_code_from_outputs(outputs)
@@ -426,6 +440,19 @@ def run_command(
 
         if not keep:
             _teardown(name, s, reason=cleanup_reason)
+
+    if state.json_output:
+        status = "ok" if exit_code == 0 else "job_raised"
+        reason = None if exit_code == 0 else "job_raised"
+        emit_json(
+            build_envelope(
+                status,
+                exit_code=exit_code,
+                reason=reason,
+                outputs=json_safe_outputs(outputs),
+            )
+        )
+        return
 
     if exit_code != 0:
         raise typer.Exit(exit_code)
