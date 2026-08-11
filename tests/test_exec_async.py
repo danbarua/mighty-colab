@@ -123,6 +123,74 @@ def test_exec_async_spawns_and_records_pid(mock_spawn, mock_store, mock_common_s
 
 
 @patch("colab_cli.commands.execution.spawn_exec_async")
+def test_exec_async_output_log_overrides_default_path(
+    mock_spawn, mock_store, mock_common_state, tmp_path
+):
+    """--output-log gives the caller (typically an autonomous agent) full
+    control of where this run's raw stdout/stderr lands -- e.g. a sandboxed
+    scratch dir it actually has write access to, instead of
+    ~/.config/colab-cli/history. The parent directory may not exist yet."""
+    mock_session = MagicMock()
+    mock_session.name = "s1"
+    mock_session.exec_pid = None
+    mock_store.get.return_value = mock_session
+    mock_store.list.return_value = {"s1": mock_session}
+    mock_common_state.resolve_session.return_value = "s1"
+    mock_spawn.return_value = 4321
+
+    custom_log = tmp_path / "nested" / "log1.txt"
+    assert not custom_log.parent.exists()
+
+    exec_async(session="s1", file="script.py", output_log=str(custom_log))
+
+    mock_spawn.assert_called_once()
+    assert mock_spawn.call_args.args[2] == str(custom_log)
+    assert mock_session.exec_log_path == str(custom_log)
+    assert custom_log.parent.is_dir()
+
+
+@patch("colab_cli.commands.execution.spawn_exec_async")
+def test_exec_async_output_log_expands_user(
+    mock_spawn, mock_store, mock_common_state, tmp_path, monkeypatch
+):
+    mock_session = MagicMock()
+    mock_session.name = "s1"
+    mock_session.exec_pid = None
+    mock_store.get.return_value = mock_session
+    mock_store.list.return_value = {"s1": mock_session}
+    mock_common_state.resolve_session.return_value = "s1"
+    mock_spawn.return_value = 111
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    exec_async(session="s1", file="script.py", output_log="~/mylog.txt")
+
+    expected = str(tmp_path / "mylog.txt")
+    assert mock_spawn.call_args.args[2] == expected
+    assert mock_session.exec_log_path == expected
+
+
+@patch("colab_cli.commands.execution.spawn_exec_async")
+def test_exec_async_without_output_log_uses_default_path(
+    mock_spawn, mock_store, mock_common_state
+):
+    """Regression guard: omitting --output-log must be byte-for-byte the
+    same default-path behavior as before it existed."""
+    mock_session = MagicMock()
+    mock_session.name = "s1"
+    mock_session.exec_pid = None
+    mock_store.get.return_value = mock_session
+    mock_store.list.return_value = {"s1": mock_session}
+    mock_common_state.resolve_session.return_value = "s1"
+    mock_common_state.history.log_dir = "/tmp/history"
+    mock_spawn.return_value = 222
+
+    exec_async(session="s1", file="script.py")
+
+    assert mock_spawn.call_args.args[2] == "/tmp/history/s1.exec.log"
+    assert mock_session.exec_log_path == "/tmp/history/s1.exec.log"
+
+
+@patch("colab_cli.commands.execution.spawn_exec_async")
 def test_exec_async_refuses_when_already_running(
     mock_spawn, mock_store, mock_common_state, mocker
 ):

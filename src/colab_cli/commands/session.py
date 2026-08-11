@@ -328,6 +328,8 @@ def _print_status_for(s: SessionState) -> None:
         exec_file, exec_cell, exec_time = s.last_execution
         cell_str = f" | Cell: {exec_cell}" if exec_cell else ""
         typer.echo(f"  Last Execution: {exec_file}{cell_str} at {exec_time}")
+    if s.exec_log_path:
+        typer.echo(f"  Log: {s.exec_log_path}")
 
 
 def status(

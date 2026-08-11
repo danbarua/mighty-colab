@@ -395,6 +395,9 @@ def exec_async(
     output_image: Annotated[
         Optional[str], typer.Option("--output-image", help="Path to save plot")
     ] = None,
+    output_log: Annotated[
+        Optional[str], typer.Option("--output-log", help="Path to save log file")
+    ] = None,
     timeout: Annotated[
         Optional[float],
         typer.Option("--timeout", help="Timeout in seconds for code execution"),
@@ -450,7 +453,13 @@ def exec_async(
         with os.fdopen(fd, "w") as f:
             f.write(code)
 
-    log_path = os.path.join(state.history.log_dir, f"{name}.exec.log")
+    if output_log:
+        log_path = os.path.expanduser(output_log)
+        parent = os.path.dirname(log_path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+    else:
+        log_path = os.path.join(state.history.log_dir, f"{name}.exec.log")
 
     # Defensive invariant check: log_path is derived from `name` alone, so
     # two different sessions should never compute the same path -- but if

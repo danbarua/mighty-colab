@@ -166,9 +166,47 @@ if [ $RC -ne 0 ]; then
 fi
 echo "[SUCCESS] Phase 4 passed: restart after completion allowed."
 
-# Let the second run finish before `stop` (in the cleanup trap) tears down
-# the kernel out from under it.
+# Let phase 4's run finish before phase 5 starts another (the "already
+# running" guard would otherwise refuse it).
 sleep 12
+
+# ---------- Phase 5: --output-log redirects the raw log to a custom path ---
+echo ""
+echo "[*] Phase 5: --output-log must redirect output to a caller-chosen path"
+CUSTOM_LOG_PATH="$TMP_DIR/custom/nested/agent.log"
+OUTPUT=$(uv run mighty-colab $AUTH_FLAGS --config "$SESSION_FILE" exec-async -s "$SESSION_NAME" -f "$SCRIPT_PATH" --output-log "$CUSTOM_LOG_PATH" 2>&1)
+RC=$?
+echo "$OUTPUT"
+
+if [ $RC -ne 0 ]; then
+    echo "[FAILURE] exec-async --output-log exited $RC"
+    exit 1
+fi
+
+STATUS_OUTPUT=$(uv run mighty-colab $AUTH_FLAGS --config "$SESSION_FILE" status -s "$SESSION_NAME" 2>&1)
+echo "$STATUS_OUTPUT"
+if ! echo "$STATUS_OUTPUT" | grep -qF "Log: $CUSTOM_LOG_PATH"; then
+    echo "[FAILURE] 'colab status' did not report the --output-log path."
+    exit 1
+fi
+
+# Wait for this run to finish, then verify the custom path (not the default
+# ~/.config/colab-cli/history/<session>.exec.log) actually received the
+# output, including the nested directory that didn't exist beforehand.
+sleep 12
+
+if [ ! -f "$CUSTOM_LOG_PATH" ]; then
+    echo "[FAILURE] --output-log path was never created: $CUSTOM_LOG_PATH"
+    exit 1
+fi
+
+CUSTOM_LOG_CONTENT=$(cat "$CUSTOM_LOG_PATH")
+echo "$CUSTOM_LOG_CONTENT"
+if [ "$(echo "$CUSTOM_LOG_CONTENT" | grep -E '^(step [0-4]|done)$')" != "$EXPECTED_ORDER" ]; then
+    echo "[FAILURE] --output-log file did not contain the expected run output."
+    exit 1
+fi
+echo "[SUCCESS] Phase 5 passed: --output-log redirected output to a custom, previously-nonexistent path."
 
 echo ""
 echo "[SUCCESS] All phases passed."

@@ -160,6 +160,7 @@ def test_cli_status(mock_store, mock_common_state):
         "cell_1",
         "2023-10-27 12:00:00",
     )
+    mock_session_state.exec_log_path = None
     mock_store.get.return_value = mock_session_state
 
     mock_common_state.sync_sessions.return_value = ({"s1": mock_session_state}, [])
@@ -202,6 +203,7 @@ def test_cli_status_running_shows_busy(mock_store, mock_common_state):
     mock_session_state.variant = "GPU"
     mock_session_state.running = "exec.py"
     mock_session_state.last_execution = None
+    mock_session_state.exec_log_path = None
     mock_store.get.return_value = mock_session_state
     mock_common_state.sync_sessions.return_value = ({"s1": mock_session_state}, [])
 
@@ -211,6 +213,44 @@ def test_cli_status_running_shows_busy(mock_store, mock_common_state):
         "[s1] e1 | Hardware: T4 | Variant: GPU | Status: BUSY (exec.py)"
         in result.output
     )
+
+
+def test_cli_status_shows_exec_log_path_when_set(mock_store, mock_common_state):
+    """A background exec-async job's log path (default or --output-log)
+    should be visible in `colab status`, the same way `last_execution` is --
+    it's the thing an agent polling a pid would want to find without
+    re-deriving the path themselves."""
+    mock_session_state = MagicMock()
+    mock_session_state.name = "s1"
+    mock_session_state.endpoint = "e1"
+    mock_session_state.accelerator = "NONE"
+    mock_session_state.variant = "DEFAULT"
+    mock_session_state.running = "exec-async(script.py)"
+    mock_session_state.last_execution = None
+    mock_session_state.exec_log_path = "/tmp/sandbox/log1.txt"
+    mock_store.get.return_value = mock_session_state
+    mock_common_state.sync_sessions.return_value = ({"s1": mock_session_state}, [])
+
+    result = runner.invoke(app, ["status", "-s", "s1"])
+    assert result.exit_code == 0
+    assert "Log: /tmp/sandbox/log1.txt" in result.output
+
+
+def test_cli_status_omits_log_line_when_no_exec_log_path(mock_store, mock_common_state):
+    mock_session_state = MagicMock()
+    mock_session_state.name = "s1"
+    mock_session_state.endpoint = "e1"
+    mock_session_state.accelerator = "NONE"
+    mock_session_state.variant = "DEFAULT"
+    mock_session_state.running = None
+    mock_session_state.last_execution = None
+    mock_session_state.exec_log_path = None
+    mock_store.get.return_value = mock_session_state
+    mock_common_state.sync_sessions.return_value = ({"s1": mock_session_state}, [])
+
+    result = runner.invoke(app, ["status", "-s", "s1"])
+    assert result.exit_code == 0
+    assert "Log:" not in result.output
 
 
 def test_cli_session_resolution(mock_store, mock_common_state):
