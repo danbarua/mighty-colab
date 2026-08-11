@@ -81,6 +81,29 @@ def test_spawn_exec_async_command_includes_auth_and_config(mocker):
     assert kwargs["stdin"] is not None
 
 
+def test_spawn_exec_async_always_invokes_exec_with_a_real_file(mocker):
+    """`exec-async` never introduces a second execution path -- its child
+    command is always `exec -f <file>`, a real file path, never piped
+    stdin. That's what lets it inherit `exec`'s *entire* file-backed
+    behavior for free, with zero duplicated logic, including the
+    `sys.argv`/`__name__`/`__file__` script prelude `_build_script_prelude`
+    adds to `exec_command`'s `if file and not is_nb:` branch (see
+    docs/02_execution_and_interactive.md, 2b). `exec_async()` itself
+    guarantees `file` is always populated by this point -- piped stdin is
+    materialized to a temp `.py` file before `spawn_exec_async` is ever
+    called -- so this invariant, not any exec-async-specific code, is the
+    entire reason the fix applies there too."""
+    mock_popen = mocker.patch("colab_cli.commands.execution.subprocess.Popen")
+    mock_popen.return_value.pid = 12345
+    mocker.patch("builtins.open", mocker.mock_open())
+
+    spawn_exec_async("driver.py", "sess1", "/tmp/sess1.exec.log")
+
+    cmd = mock_popen.call_args.args[0]
+    exec_idx = cmd.index("exec")
+    assert cmd[exec_idx + 1 : exec_idx + 5] == ["-s", "sess1", "-f", "driver.py"]
+
+
 def test_spawn_exec_async_redirects_stdout_to_log_file(mocker):
     mock_popen = mocker.patch("colab_cli.commands.execution.subprocess.Popen")
     mock_popen.return_value.pid = 999
