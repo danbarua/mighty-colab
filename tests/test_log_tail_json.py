@@ -168,6 +168,28 @@ def test_log_tail_json_no_job_found(mocker):
     assert excinfo.value.exit_code == 1
 
 
+def test_log_tail_json_fallback_path_no_job_found_is_distinct_from_worker_terminated(
+    mocker, tmp_path, capsys
+):
+    """After the session record is gone (or for a session name that never
+    ran anything), an absent log file means no job ever started at this
+    path -- `spawn_exec_async` creates the log file before `Popen`, so this
+    is NOT the same fact as `worker_terminated` (a job ran and ended
+    without writing a result). Must not guess "terminated" when there was
+    never a worker to terminate."""
+    mock_state = _mock_state(mocker)
+    mock_state.store.get.return_value = None  # session record gone/never existed
+    mock_state.history.log_dir = str(tmp_path)  # no log or sidecar written here
+
+    with pytest.raises(typer.Exit) as excinfo:
+        log(session="never-ran", tail=True)
+    assert excinfo.value.exit_code == 1
+
+    envelope = json.loads(capsys.readouterr().out)
+    assert envelope["status"] == "error"
+    assert envelope["reason"] == "no_job_found"
+
+
 def test_log_tail_json_requires_session(mocker):
     _mock_state(mocker)
 

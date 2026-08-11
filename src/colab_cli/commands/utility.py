@@ -89,7 +89,12 @@ def _tail_log_json(log_path: str, pid: Optional[int], since_offset: Optional[int
     """`--tail --json`: report an `exec-async` job's outcome plus any log
     bytes written since `since_offset`, without polling or blocking.
 
-    Three states, in priority order:
+    Four states, in priority order:
+      - Neither the log file nor a sidecar exists: no job ever ran at this
+        path (`spawn_exec_async` creates the log file before `Popen`, so its
+        absence isn't "the worker died", it's "there was never a worker") --
+        `status="error", reason="no_job_found"`, same as the sibling check
+        in `log()` for a session with no `exec_log_path` at all.
       - A sidecar (`<log_path>.json`) exists and parses: the job finished --
         return its envelope fields (status/exit_code/reason/...) as-is, with
         `content`/`next_offset` merged in. `done` is implied by `status`.
@@ -100,6 +105,11 @@ def _tail_log_json(log_path: str, pid: Optional[int], since_offset: Optional[int
         (killed, crashed, OOM, a caller's own `stop`), so it reports one
         honest code rather than guessing.
     """
+    sidecar_path = f"{log_path}.json"
+    if not os.path.exists(log_path) and not os.path.exists(sidecar_path):
+        emit_json(build_envelope("error", exit_code=1, reason="no_job_found"))
+        raise typer.Exit(1)
+
     offset = since_offset or 0
     content = ""
     next_offset = offset
@@ -110,7 +120,6 @@ def _tail_log_json(log_path: str, pid: Optional[int], since_offset: Optional[int
         content = new_bytes.decode("utf-8", errors="replace")
         next_offset = offset + len(new_bytes)
 
-    sidecar_path = f"{log_path}.json"
     if os.path.exists(sidecar_path):
         try:
             with open(sidecar_path, "r", encoding="utf-8") as f:
