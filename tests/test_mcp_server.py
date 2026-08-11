@@ -140,7 +140,10 @@ def test_version_description_returns_actual_version(click_group):
     # patch takes effect -- reading it here would just see whatever version
     # was installed the first time any test in this module touched the
     # fixture. Build tools fresh, inside the patched context, instead.
-    with patch("colab_cli.auto_update.installed_version") as mock_version:
+    with (
+        patch("colab_cli.auto_update._is_editable_install", return_value=False),
+        patch("colab_cli.auto_update.installed_version") as mock_version,
+    ):
         mock_version.return_value = "1.2.3"
         tools, _ = build_tools(click_group)
         by_name = {t.name: t for t in tools}

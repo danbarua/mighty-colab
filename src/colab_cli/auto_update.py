@@ -27,7 +27,11 @@ import platform
 import subprocess
 import urllib.request
 from datetime import datetime, timezone
-from importlib.metadata import PackageNotFoundError, version as installed_version
+from importlib.metadata import (
+    PackageNotFoundError,
+    distribution,
+    version as installed_version,
+)
 from packaging.version import InvalidVersion, Version
 from typing import Optional
 
@@ -54,12 +58,45 @@ def is_self_install_supported() -> bool:
     return platform.system() in ("Linux", "Darwin")
 
 
-def get_app_version() -> str:
-    """Return the installed package version, falling back to the git short hash."""
+def _is_editable_install(dist_name: str) -> bool:
+    """True if `dist_name` is installed in editable/develop mode.
+
+    Detected via PEP 610's `direct_url.json`, which pip/uv write next to
+    any install and mark with `dir_info.editable: true` for `pip install
+    -e .` / `uv sync`-style local installs. `Distribution.origin` is the
+    typed accessor for this file but isn't available until Python 3.13;
+    `read_text` on the raw metadata file works on the 3.12 floor this
+    project targets.
+    """
     try:
-        return installed_version("mighty-colab")
-    except (PackageNotFoundError, InvalidVersion):
-        pass
+        raw = distribution(dist_name).read_text("direct_url.json")
+    except PackageNotFoundError:
+        return False
+    if not raw:
+        return False
+    try:
+        return bool(json.loads(raw).get("dir_info", {}).get("editable"))
+    except (json.JSONDecodeError, AttributeError):
+        return False
+
+
+def get_app_version() -> str:
+    """Return the installed package version, falling back to the git short hash.
+
+    An editable/dev install's `importlib.metadata` version is a static
+    snapshot hatch-vcs wrote the last time `uv sync`/`pip install -e .`
+    ran -- it does not track HEAD on every invocation, so it silently goes
+    stale the moment you commit again without resyncing (e.g. still
+    reporting a pre-release tag after several dev commits land). Treat an
+    editable install the same as "package not found" and go straight to
+    the live git short hash, so `colab version` reflects what code is
+    actually running rather than a frozen install-time snapshot.
+    """
+    if not _is_editable_install("mighty-colab"):
+        try:
+            return installed_version("mighty-colab")
+        except (PackageNotFoundError, InvalidVersion):
+            pass
 
     try:
         return subprocess.check_output(
