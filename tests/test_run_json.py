@@ -110,6 +110,63 @@ def test_run_json_success_envelope_shape(
     assert envelope["outputs"] == [{"output_type": "stream", "text": "hi\n"}]
 
 
+def test_run_json_output_hook_suppressed_stdout_carries_json_only(
+    mock_client,
+    mock_store,
+    mock_runtime_class,
+    mock_spawn_keep_alive,
+    mock_common_state,
+    assign_response,
+    script_path,
+):
+    """Regression guard: `display_output` writes stream outputs straight to
+    sys.stdout, bypassing the typer.echo --json redirect entirely. If the
+    hook isn't suppressed, the script's own print() output lands on stdout
+    BEFORE the JSON envelope, breaking "stdout carries JSON only" for any
+    caller doing `json.loads($(mighty-colab --json run ...))`."""
+    mock_common_state.json_output = True
+    mock_client.assign.return_value = assign_response
+    mock_runtime = mock_runtime_class.return_value
+
+    def mock_execute_code(code, output_hook=None, **kwargs):
+        outputs = [{"output_type": "stream", "text": "hi\n"}]
+        if output_hook:
+            for o in outputs:
+                output_hook(o)
+        return outputs
+
+    mock_runtime.execute_code.side_effect = mock_execute_code
+
+    result = runner.invoke(app, ["run", str(script_path)])
+    assert result.exit_code == 0, result.output
+
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    assert len(lines) == 1, f"stdout must carry the JSON envelope only, got: {result.stdout!r}"
+    envelope = json.loads(lines[0])
+    assert envelope["status"] == "ok"
+
+
+def test_run_without_json_output_hook_unchanged(
+    mock_client,
+    mock_store,
+    mock_runtime_class,
+    mock_spawn_keep_alive,
+    mock_common_state,
+    assign_response,
+    script_path,
+):
+    """Regression guard: the default (non-`--json`) path must still pass
+    the human-display hook -- confirms the branch is additive."""
+    mock_common_state.json_output = False
+    mock_client.assign.return_value = assign_response
+    mock_runtime = mock_runtime_class.return_value
+    mock_runtime.execute_code.return_value = []
+
+    result = runner.invoke(app, ["run", str(script_path)])
+    assert result.exit_code == 0, result.output
+    assert mock_runtime.execute_code.call_args.kwargs["output_hook"] is not None
+
+
 def test_run_json_systemexit_zero_is_ok_not_job_raised(
     mock_client,
     mock_store,

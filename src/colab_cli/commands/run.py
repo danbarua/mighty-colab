@@ -407,7 +407,16 @@ def run_command(
         outputs = None
         try:
             outputs = runtime.execute_code(
-                payload, output_hook=_make_run_output_hook(), timeout=timeout
+                payload,
+                # display_output/`_make_run_output_hook` write straight to
+                # sys.stdout for stream outputs -- bypassing typer.echo, so
+                # the --json redirect wrapper can't catch them. Suppress the
+                # hook entirely under --json (same as exec_command) so
+                # stdout carries the JSON envelope only.
+                output_hook=(
+                    None if state.json_output else _make_run_output_hook()
+                ),
+                timeout=timeout,
             )
         except Exception:
             # Genuine transport-level failure. Cleanup still happens via the
