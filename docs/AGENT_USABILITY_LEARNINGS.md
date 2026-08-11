@@ -760,16 +760,33 @@ independently either.
 
 ### 2. A machine-readable execution result
 
-`--json` on `exec`/`run`: per-cell status, exception type and message, timing,
-and whether the script reached completion. A correct exit code still cannot
-distinguish "ran and passed" from "exited before reaching its verdict," which is
-why every recipe we have greps a sentinel the script prints itself. The parsing
-we do today is fragile by construction.
+**[✅ Done — `feature/structured-outputs`, 2026-08-12]** `--json` on
+`exec`/`run`/`exec-async`/`log --tail`. Each envelope carries
+`schema_version`/`cli_version`, a `status` (`"ok"` / `"job_raised"` /
+`"error"`) and `exit_code` for the *remote job*, separate from the CLI
+process's own exit code (which stays 0 under `--json` whenever the CLI
+itself completed its transaction, even if the remote job raised — see ask
+#6). `exec`/`run` reuse the outputs `runtime.execute_code` already returns
+(nbformat-shaped, per block for `exec`), with tracebacks ANSI-stripped by
+default (`traceback_raw` preserved). `exec-async --json` returns
+`{status:"started", pid, log_path}` immediately and writes its terminal
+result to a `<log_path>.json` sidecar file that survives session teardown;
+`log --tail --json --since-offset N` polls it incrementally. Designed
+against real feedback from the consumer agent behind this ask, plus a
+second review pass — see the design plan referenced in the
+`feature/structured-outputs` branch history for the full rationale,
+including the exact `SystemExit(0)` incident described below.
 
 *Traces to:* `679c0b6`; the sentinel pattern
 (`bonsai-2026/Makefile`, the `grep -q *_OK` lines);
 `test_ladder_missing_sentinel_fails_even_on_a_zero_exit` and
 `test_ladder_nonzero_exec_fails_the_target_even_when_the_sentinel_is_present`.
+
+Original ask, for context: per-cell status, exception type and message, timing,
+and whether the script reached completion. A correct exit code still cannot
+distinguish "ran and passed" from "exited before reaching its verdict," which is
+why every recipe we have greps a sentinel the script prints itself. The parsing
+we do today is fragile by construction.
 
 ### 3. Separate the wall-clock budget from the inactivity budget
 
@@ -819,6 +836,19 @@ mechanism.
 
 ### 6. A written, versioned exit-code and stream contract
 
+**[✅ Done, scoped to `--json` — `feature/structured-outputs`, 2026-08-12]**
+Under `--json` (`exec`/`run`/`exec-async`/`log --tail`), the contract is now
+explicit and versioned rather than something to derive by reading source:
+`schema_version`/`cli_version` in every envelope; the CLI process's own exit
+code stays 0 whenever it mechanically completed its transaction — even if
+the remote job raised — with the job's own outcome carried separately as
+`status`/`exit_code`/`reason` in the body; `[colab] ...` chatter always on
+stderr (a `typer.echo` redirect installed once, globally), JSON only on
+stdout. **Still open:** the broader case-by-case survey below (which
+*non*-`--json` commands treat "not found" as an error vs. an idempotent
+no-op) is unchanged — that's a wider audit across the whole CLI, not
+something `--json` alone resolves.
+
 Which commands treat "not found" as an error and which treat it as an idempotent
 no-op; which write to stdout and which to stderr; what changes count as
 breaking. We had to derive this by reading source and pin it in a test. And when
@@ -848,6 +878,15 @@ our fork; upstream's still emits a raw traceback.
 `test_a_distinct_absent_code_can_be_declared_without_rewriting_recipes`.
 
 ### 8. Non-TTY output hygiene, extended
+
+**[⏳ Partially addressed — `feature/structured-outputs`, 2026-08-12]** Under
+`--json` specifically: tracebacks are ANSI-stripped by default in the
+envelope (raw original preserved as `traceback_raw`, for anyone who wants
+to re-render it), and stdout carries the JSON only — kernel stdout/stderr
+stays inside `outputs` as nbformat blocks rather than being interleaved
+raw. **Still open:** `--help` and non-`--json` invocations still don't
+respect `NO_COLOR`/`FORCE_COLOR`, and there's still no general
+`--no-color` flag independent of `--json`.
 
 Google already suppresses inline terminal-image escapes when stdout isn't a TTY.
 Extend that to colored tracebacks and `--help` — or provide `--no-color` /

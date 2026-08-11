@@ -10,6 +10,23 @@ below corresponds to a tag of the same name.
 
 ## [Unreleased]
 
+### Added
+
+- **`--json`:** new global flag for `exec`/`run`/`exec-async`/`log --tail`,
+  emitting a versioned JSON envelope (`schema_version`/`cli_version`/
+  `status`/`exit_code`) instead of human-readable output. The CLI process's
+  own exit code stays 0 under `--json` whenever it mechanically completed
+  its transaction, even if the remote job raised -- the job's own outcome
+  (`status`: `"ok"`/`"job_raised"`/`"error"`, plus `reason` when not ok)
+  lives in the envelope body instead, so a `SystemExit(0)` at the end of a
+  successful script can no longer be misread as a failure. `exec-async
+  --json`'s spawned worker writes its terminal result to a
+  `<log_path>.json` sidecar file that survives the session being stopped;
+  `log --tail --json` is sidecar-aware and gains `--since-offset` for
+  incremental polling. Human-readable `[colab] ...` chatter moves to
+  stderr under `--json` (stdout carries the JSON only), and tracebacks are
+  ANSI-stripped by default (raw preserved as `traceback_raw`).
+
 ## [0.3.0] - 2026-08-11
 
 ### Added
