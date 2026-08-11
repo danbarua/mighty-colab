@@ -144,22 +144,30 @@ done" even when the PyPI publish silently failed.
     "Cloud Build not confirmed" outcome below — do not treat it as a script
     error, and do not retry indefinitely.
 
-15. **Poll until the build reaches a terminal status** (cap ~10 minutes;
-    real releases have taken ~60-90s historically, so this is a generous
-    ceiling, not an expected wait):
-    ```bash
-    STATUS="QUEUED"
-    for i in $(seq 1 40); do
-      STATUS=$(gcloud builds describe "$BUILD_ID" --project=mighty-colab \
-        --format="value(status)")
-      case "$STATUS" in
-        SUCCESS|FAILURE|INTERNAL_ERROR|TIMEOUT|CANCELLED|EXPIRED) break ;;
-      esac
-      sleep 15
-    done
-    ```
+15. **Poll until the build reaches a terminal status** using the `Monitor`
+    tool rather than a blocking foreground `sleep` loop — this is exactly
+    Monitor's "one per occurrence, until a known end" case (its own docs
+    give "emit each CI check as it lands, exit when the run completes" as
+    the worked example). Launch it and then stop: do not sleep, poll, or
+    proactively re-check status yourself — Monitor notifies on each status
+    *change*, and step 16 below runs when that notification lands, not in
+    the same turn as the launch.
 
-16. **Branch on the outcome:**
+    ```
+    Monitor({
+      description: "Cloud Build status for vX.Y.Z",
+      timeout_ms: 600000,
+      command: "prev=''; for i in $(seq 1 40); do s=$(gcloud builds describe \"$BUILD_ID\" --project=mighty-colab --format='value(status)'); if [ \"$s\" != \"$prev\" ]; then echo \"status: $s\"; prev=\"$s\"; fi; case \"$s\" in SUCCESS|FAILURE|INTERNAL_ERROR|TIMEOUT|CANCELLED|EXPIRED) exit 0 ;; esac; sleep 15; done; echo 'status: TIMED_OUT_WAITING'"
+    })
+    ```
+    (~10 minute cap; real releases have taken ~60-90s historically, so this
+    is a generous ceiling, not an expected wait.) Only status *changes* are
+    echoed, not every 15s poll, so the notification stream stays sparse
+    rather than spamming.
+
+16. **Branch on the outcome**, once the Monitor notification reports a
+    terminal status (or the monitor times out — treat that the same as
+    "status is anything other than SUCCESS" below):
     - **`STATUS = SUCCESS`**: publish the Release using the section you
       just wrote in `CHANGELOG.md` (step 7's renamed heading) as the
       release notes — not `--generate-notes`, which fabricates notes from
