@@ -21,6 +21,7 @@ End-to-end tests that run against a **live Colab backend** (unlike the mocked un
 | `repro_run_command/` | Live e2e: `mighty-colab run` allocates a CPU VM, runs a script with forwarded argv, releases it; `--keep` leaves the session alive for a manual `stop`. |
 | `repro_mcp_server/` | Live e2e: drives `mighty-colab mcp` through the `mcp` SDK's own stdio client (the real MCP client path) — `list_tools()` exclusions, `call_tool()` for `new`/`exec`/`status`/`stop` against a real CPU VM, and an `adopt` validation-error path. |
 | `repro_non_zero_exit/` | Live e2e: regression test for the fix in commit `679c0b6` — `mighty-colab exec` exits non-zero (not 0) when the remote code raises, for stdin-piped code, a raw `.py` file via `-f`, and a multi-cell notebook (where later cells still run and the output notebook still saves despite the mid-run error). |
+| `repro_exec_async/` | Live e2e (~35s): `mighty-colab exec-async` returns near-instantly for a ~10s script; `mighty-colab log -s <session> -f` streams its stdout live and in order; a concurrent `exec-async` on the same session is refused while the first is running; a fresh `exec-async` after completion is allowed (a stale pid doesn't block a restart). |
 
 
 ## Running
