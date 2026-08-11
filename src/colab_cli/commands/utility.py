@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import os
 import sys
 import time
@@ -22,7 +23,7 @@ from typing_extensions import Annotated
 
 from colab_cli import auto_update
 from colab_cli.auto_update import get_app_version
-from colab_cli.common import pid_alive, state
+from colab_cli.common import build_envelope, emit_json, pid_alive, state
 
 # Poll interval while `log -f` waits for more bytes to be appended to a
 # still-running exec-async job's log file.
@@ -82,6 +83,58 @@ def _tail_log_once(path: str, lines: Optional[int]):
 
     sys.stdout.write(content)
     sys.stdout.flush()
+
+
+def _tail_log_json(log_path: str, pid: Optional[int], since_offset: Optional[int]):
+    """`--tail --json`: report an `exec-async` job's outcome plus any log
+    bytes written since `since_offset`, without polling or blocking.
+
+    Three states, in priority order:
+      - A sidecar (`<log_path>.json`) exists and parses: the job finished --
+        return its envelope fields (status/exit_code/reason/...) as-is, with
+        `content`/`next_offset` merged in. `done` is implied by `status`.
+      - No sidecar, `pid` still alive: `status="running"`.
+      - No sidecar, `pid` not alive (or unknown, e.g. after the session
+        record itself is gone): `status="error", reason="worker_terminated"`
+        -- mighty-colab can't tell *why* the worker ended without a result
+        (killed, crashed, OOM, a caller's own `stop`), so it reports one
+        honest code rather than guessing.
+    """
+    offset = since_offset or 0
+    content = ""
+    next_offset = offset
+    if os.path.exists(log_path):
+        with open(log_path, "rb") as f:
+            f.seek(offset)
+            new_bytes = f.read()
+        content = new_bytes.decode("utf-8", errors="replace")
+        next_offset = offset + len(new_bytes)
+
+    sidecar_path = f"{log_path}.json"
+    if os.path.exists(sidecar_path):
+        try:
+            with open(sidecar_path, "r", encoding="utf-8") as f:
+                envelope = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            envelope = None
+        if envelope is not None:
+            envelope["content"] = content
+            envelope["next_offset"] = next_offset
+            emit_json(envelope)
+            return
+
+    if pid_alive(pid):
+        emit_json(build_envelope("running", content=content, next_offset=next_offset))
+    else:
+        emit_json(
+            build_envelope(
+                "error",
+                exit_code=1,
+                reason="worker_terminated",
+                content=content,
+                next_offset=next_offset,
+            )
+        )
 
 
 def pay():
@@ -243,14 +296,54 @@ def log(
             ),
         ),
     ] = False,
+    since_offset: Annotated[
+        Optional[int],
+        typer.Option(
+            "--since-offset",
+            help=(
+                "With --tail --json: only return log bytes written after "
+                "this byte offset (the previous response's `next_offset`), "
+                "instead of re-reading the whole file every poll."
+            ),
+        ),
+    ] = None,
 ):
     """Manage and view session history logs"""
     if follow or tail:
         if not session:
             flag = "--follow" if follow else "--tail"
+            if tail and state.json_output:
+                emit_json(
+                    build_envelope("error", exit_code=2, reason="missing_session")
+                )
             typer.echo(f"[colab] {flag} requires --session/-s.", err=True)
             raise typer.Exit(2)
+
         s = state.store.get(session)
+        if tail and state.json_output:
+            if s and s.exec_log_path:
+                log_path, pid = s.exec_log_path, s.exec_pid
+            elif not s:
+                # The session record is gone (e.g. after `stop`), but the
+                # default log path -- and its sidecar -- are derivable from
+                # the session name alone and outlive that record. A custom
+                # --output-log path is not recoverable here: only the
+                # session record knew it.
+                log_path = os.path.join(state.history.log_dir, f"{session}.exec.log")
+                pid = None
+            else:
+                emit_json(
+                    build_envelope("error", exit_code=1, reason="no_job_found")
+                )
+                typer.echo(
+                    f"[colab] No background exec-async job found for session "
+                    f"'{session}'. Start one with `mighty-colab exec-async`.",
+                    err=True,
+                )
+                raise typer.Exit(1)
+            _tail_log_json(log_path, pid, since_offset)
+            return
+
         if not s or not s.exec_log_path:
             typer.echo(
                 f"[colab] No background exec-async job found for session "

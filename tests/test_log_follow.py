@@ -30,6 +30,7 @@ def test_log_follow_errors_when_no_async_job(mocker):
     from colab_cli.commands.utility import log
 
     mock_state = mocker.patch("colab_cli.commands.utility.state")
+    mock_state.json_output = False
     mock_state.store.get.return_value = SessionState(
         name="s1", token="t", url="u", endpoint="e"
     )
@@ -46,6 +47,7 @@ def test_log_follow_streams_file_and_stops_when_process_exits(mocker, tmp_path, 
     log_file.write_text("hello\n")
 
     mock_state = mocker.patch("colab_cli.commands.utility.state")
+    mock_state.json_output = False
     mock_state.store.get.return_value = SessionState(
         name="s1",
         token="t",
@@ -76,6 +78,7 @@ def test_log_follow_picks_up_appended_content(mocker, tmp_path, capsys):
     log_file.write_text("first\n")
 
     mock_state = mocker.patch("colab_cli.commands.utility.state")
+    mock_state.json_output = False
     mock_state.store.get.return_value = SessionState(
         name="s1",
         token="t",
@@ -120,6 +123,7 @@ def test_log_tail_errors_when_no_async_job(mocker):
     from colab_cli.commands.utility import log
 
     mock_state = mocker.patch("colab_cli.commands.utility.state")
+    mock_state.json_output = False
     mock_state.store.get.return_value = SessionState(
         name="s1", token="t", url="u", endpoint="e"
     )
@@ -139,6 +143,7 @@ def test_log_tail_prints_current_content_once_without_blocking(mocker, tmp_path,
     log_file.write_text("step 0\nstep 1\n")
 
     mock_state = mocker.patch("colab_cli.commands.utility.state")
+    mock_state.json_output = False
     mock_state.store.get.return_value = SessionState(
         name="s1",
         token="t",
@@ -166,6 +171,7 @@ def test_log_tail_respects_lines_limit(mocker, tmp_path, capsys):
     log_file.write_text("step 0\nstep 1\nstep 2\nstep 3\n")
 
     mock_state = mocker.patch("colab_cli.commands.utility.state")
+    mock_state.json_output = False
     mock_state.store.get.return_value = SessionState(
         name="s1",
         token="t",
@@ -187,6 +193,7 @@ def test_log_tail_errors_when_file_missing(mocker, tmp_path):
 
     missing_path = str(tmp_path / "never-written.log")
     mock_state = mocker.patch("colab_cli.commands.utility.state")
+    mock_state.json_output = False
     mock_state.store.get.return_value = SessionState(
         name="s1",
         token="t",
@@ -210,6 +217,7 @@ def test_log_tail_works_after_job_has_finished(mocker, tmp_path, capsys):
     log_file.write_text("done\n")
 
     mock_state = mocker.patch("colab_cli.commands.utility.state")
+    mock_state.json_output = False
     mock_state.store.get.return_value = SessionState(
         name="s1",
         token="t",
