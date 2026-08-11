@@ -164,6 +164,59 @@ def test_exec_json_session_not_found_is_error_and_exits_nonzero(mock_common_stat
     assert "not found" in result.stderr
 
 
+def test_exec_json_no_input_is_error_and_exits_nonzero(mock_session, mock_common_state, mocker):
+    mock_common_state.json_output = True
+    mock_common_state.resolve_session.return_value = "s1"
+    mocker.patch("colab_cli.commands.execution.is_stdin_tty", return_value=True)
+
+    result = runner.invoke(app, ["exec", "-s", "s1"])
+    assert result.exit_code == 1
+
+    envelope = json.loads(result.stdout)
+    assert envelope["status"] == "error"
+    assert envelope["reason"] == "no_input"
+
+
+def test_exec_json_preflight_session_lost_emits_error_envelope(
+    mock_session, mock_runtime_class, mock_common_state
+):
+    """A 404/401 during the `/content` preflight call must still leave
+    stdout carrying a JSON error envelope (reason=session_lost), not a
+    bare traceback -- and must still prune local state."""
+    mock_common_state.json_output = True
+    mock_common_state.resolve_session.return_value = "s1"
+    mock_runtime = mock_runtime_class.return_value
+    mock_runtime.execute_code.side_effect = Exception("404 Not Found")
+
+    result = runner.invoke(app, ["exec", "-s", "s1"], input="print(1)")
+    assert result.exit_code == 1
+
+    envelope = json.loads(result.stdout)
+    assert envelope["status"] == "error"
+    assert envelope["reason"] == "session_lost"
+    mock_common_state.prune_session.assert_called_once_with("s1")
+
+
+def test_exec_json_preflight_nonterminal_failure_emits_error_envelope(
+    mock_session, mock_runtime_class, mock_common_state
+):
+    """A non-terminal transport failure during the `/content` preflight
+    call (distinct from the main-execution-loop failure, reason=
+    execution_failed) must emit its own error envelope before the
+    exception propagates."""
+    mock_common_state.json_output = True
+    mock_common_state.resolve_session.return_value = "s1"
+    mock_runtime = mock_runtime_class.return_value
+    mock_runtime.execute_code.side_effect = RuntimeError("connection reset")
+
+    result = runner.invoke(app, ["exec", "-s", "s1"], input="print(1)")
+    assert result.exit_code != 0
+
+    envelope = json.loads(result.stdout)
+    assert envelope["status"] == "error"
+    assert envelope["reason"] == "preflight_failed"
+
+
 def test_exec_json_output_hook_suppressed(
     mock_session, mock_runtime_class, mock_common_state
 ):

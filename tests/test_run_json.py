@@ -275,6 +275,33 @@ def test_run_json_preflight_transport_failure_emits_error_envelope(
     assert envelope["exit_code"] == 1
 
 
+def test_run_json_main_execution_transport_failure_emits_error_envelope(
+    mock_client,
+    mock_store,
+    mock_runtime_class,
+    mock_spawn_keep_alive,
+    mock_common_state,
+    assign_response,
+    script_path,
+):
+    """Distinct from the preflight-call failure above: a transport failure
+    on the SECOND execute_code call (the actual script payload, after the
+    preflight succeeded) must emit its own error envelope
+    (reason=run_failed) before propagating."""
+    mock_common_state.json_output = True
+    mock_client.assign.return_value = assign_response
+    mock_runtime = mock_runtime_class.return_value
+    mock_runtime.execute_code.side_effect = [None, RuntimeError("websocket closed")]
+
+    result = runner.invoke(app, ["run", str(script_path)])
+    assert result.exit_code != 0
+
+    envelope = json.loads(result.stdout)
+    assert envelope["status"] == "error"
+    assert envelope["reason"] == "run_failed"
+    assert envelope["exit_code"] == 1
+
+
 def test_run_json_preflight_session_lost_emits_error_envelope(
     mock_client,
     mock_store,

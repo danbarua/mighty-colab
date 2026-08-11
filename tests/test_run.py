@@ -427,8 +427,13 @@ def test_run_unassign_called_on_exception_during_execute(
     assign_response,
     script_path,
 ):
-    """Even if `runtime.execute_code` raises (e.g. websocket dies), the VM
-    must be released."""
+    """Even if `runtime.execute_code` raises (e.g. websocket dies) during
+    the `/content` preflight call -- the first of the two execute_code
+    calls, and thus the one a single `side_effect` exception always hits --
+    the VM must still be released and the kernel client/websocket
+    connection closed. Parity with
+    `test_cli_exec_preflight_nonterminal_error_still_stops_runtime` in
+    test_exec.py."""
     mock_client.assign.return_value = assign_response
     mock_runtime = mock_runtime_class.return_value
     mock_runtime.execute_code.side_effect = RuntimeError("websocket closed")
@@ -439,7 +444,40 @@ def test_run_unassign_called_on_exception_during_execute(
 
     result = runner.invoke(app, ["run", str(script_path)])
     assert result.exit_code != 0
+    # Called at least once from run_command's own finally (kernel
+    # cleanup) -- and again from _teardown's separate ColabRuntime()
+    # instance (shutdown_kernel=True), which resolves to the same mock
+    # here since ColabRuntime is class-patched.
+    mock_runtime.stop.assert_called()
     mock_client.unassign.assert_called_once_with("ep-123")
+
+
+def test_run_preflight_lost_session_prunes(
+    mock_client,
+    mock_store,
+    mock_runtime_class,
+    mock_spawn_keep_alive,
+    assign_response,
+    script_path,
+    mock_common_state,
+):
+    """A 404/401 during the `/content` preflight call means the session is
+    gone server-side -- `run` must prune local state and exit 1 with a
+    clean message, not a raw traceback. Parity with
+    `test_cli_exec_lost_session_prunes` in test_exec.py (untested for `run`
+    until now)."""
+    mock_client.assign.return_value = assign_response
+    mock_runtime = mock_runtime_class.return_value
+    mock_runtime.execute_code.side_effect = Exception("404 Not Found")
+
+    persisted = {}
+    mock_store.add.side_effect = lambda s: persisted.setdefault("s", s)
+    mock_store.get.side_effect = lambda name: persisted.get("s")
+
+    result = runner.invoke(app, ["run", str(script_path)])
+    assert result.exit_code == 1
+    assert "appears to be lost" in result.stderr
+    mock_common_state.prune_session.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

@@ -143,6 +143,50 @@ def test_exec_async_json_session_not_found_error_envelope(
     assert envelope["reason"] == "session_not_found"
 
 
+def test_exec_async_json_no_input_error_envelope(mock_store, mock_common_state, capsys, mocker):
+    mock_session = MagicMock()
+    mock_session.name = "s1"
+    mock_session.exec_pid = None
+    mock_store.get.return_value = mock_session
+    mock_common_state.resolve_session.return_value = "s1"
+    mock_common_state.json_output = True
+    mocker.patch("colab_cli.commands.execution.is_stdin_tty", return_value=True)
+
+    with pytest.raises(typer.Exit):
+        exec_async(session="s1", file=None)
+
+    captured = capsys.readouterr()
+    envelope = json.loads(captured.out)
+    assert envelope["status"] == "error"
+    assert envelope["reason"] == "no_input"
+
+
+def test_exec_async_json_log_path_collision_error_envelope(
+    mock_store, mock_common_state, capsys
+):
+    mock_session = MagicMock()
+    mock_session.name = "s1"
+    mock_session.exec_pid = None
+    mock_store.get.return_value = mock_session
+    mock_common_state.resolve_session.return_value = "s1"
+    mock_common_state.history.log_dir = "/tmp/history"
+    mock_common_state.json_output = True
+
+    other_session = MagicMock()
+    other_session.exec_log_path = "/tmp/history/s1.exec.log"
+    other_session.exec_pid = 222
+    mock_store.list.return_value = {"s1": mock_session, "s2": other_session}
+
+    with patch("colab_cli.commands.execution.pid_alive", return_value=True):
+        with pytest.raises(typer.Exit):
+            exec_async(session="s1", file="script.py")
+
+    captured = capsys.readouterr()
+    envelope = json.loads(captured.out)
+    assert envelope["status"] == "error"
+    assert envelope["reason"] == "log_path_collision"
+
+
 def test_spawn_exec_async_appends_json_result_path_flag(mocker):
     mock_popen = mocker.patch("colab_cli.commands.execution.subprocess.Popen")
     mock_popen.return_value.pid = 12345
