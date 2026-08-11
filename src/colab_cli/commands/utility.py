@@ -12,6 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+import sys
+import time
 from typing import Optional
 
 import typer
@@ -19,7 +22,44 @@ from typing_extensions import Annotated
 
 from colab_cli import auto_update
 from colab_cli.auto_update import get_app_version
-from colab_cli.common import state
+from colab_cli.common import pid_alive, state
+
+# Poll interval while `log -f` waits for more bytes to be appended to a
+# still-running exec-async job's log file.
+FOLLOW_POLL_SECONDS = 0.3
+
+
+def _follow_log(path: str, pid: Optional[int]):
+    """Tail `path` (a raw exec-async stdout/stderr log) until `pid` exits.
+
+    Unlike `mighty-colab log`'s JSONL history (written once, after the
+    whole `exec` call returns), this file is written -- and flushed -- in
+    real time by the background worker's own stdout/stderr, since it's
+    just the redirected file descriptors of the running `exec` process.
+    """
+    while not os.path.exists(path) and pid_alive(pid):
+        time.sleep(FOLLOW_POLL_SECONDS)
+
+    if not os.path.exists(path):
+        typer.echo(f"[colab] Log file '{path}' not found.", err=True)
+        raise typer.Exit(1)
+
+    with open(path, "r") as f:
+        while True:
+            chunk = f.read()
+            if chunk:
+                sys.stdout.write(chunk)
+                sys.stdout.flush()
+                continue
+            if not pid_alive(pid):
+                # One last read in case the process wrote and exited
+                # between our last read and the liveness check above.
+                chunk = f.read()
+                if chunk:
+                    sys.stdout.write(chunk)
+                    sys.stdout.flush()
+                return
+            time.sleep(FOLLOW_POLL_SECONDS)
 
 
 def pay():
@@ -157,8 +197,35 @@ def log(
             help="Output file path (suffix determines format: .ipynb, .md, .txt, .jsonl)",
         ),
     ] = None,
+    follow: Annotated[
+        bool,
+        typer.Option(
+            "-f",
+            "--follow",
+            help=(
+                "Follow the live stdout/stderr of a running `exec-async` "
+                "background job (requires -s). Unlike the history view "
+                "below, this streams in real time."
+            ),
+        ),
+    ] = False,
 ):
     """Manage and view session history logs"""
+    if follow:
+        if not session:
+            typer.echo("[colab] --follow requires --session/-s.", err=True)
+            raise typer.Exit(2)
+        s = state.store.get(session)
+        if not s or not s.exec_log_path:
+            typer.echo(
+                f"[colab] No background exec-async job found for session "
+                f"'{session}'. Start one with `mighty-colab exec-async`.",
+                err=True,
+            )
+            raise typer.Exit(1)
+        _follow_log(s.exec_log_path, s.exec_pid)
+        return
+
     if not session:
         sessions_with_logs = state.history.list_sessions()
         if not sessions_with_logs:

@@ -147,6 +147,17 @@ class State:
 state = State()
 
 
+def pid_alive(pid: Optional[int]) -> bool:
+    """True if `pid` names a process we can still signal."""
+    if not pid:
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
 def kill_process(pid: int):
     """Safely terminates a process by PID."""
     if not pid:

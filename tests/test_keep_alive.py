@@ -222,6 +222,20 @@ def test_stop_kills_keep_alive(mock_kill, mock_common_state):
     mock_kill.assert_called_once_with(9999)
 
 
+@patch("colab_cli.common.kill_process")
+def test_stop_kills_background_exec(mock_kill, mock_common_state):
+    """A running `exec-async` worker must not be left orphaned, talking to
+    a kernel that `stop` is about to shut down."""
+    mock_common_state.resolve_session.return_value = "test-sess"
+    mock_common_state.store.get.return_value = SessionState(
+        name="test-sess", token="t1", url="u1", endpoint="e1", exec_pid=8888
+    )
+
+    stop(session="test-sess")
+
+    mock_kill.assert_called_once_with(8888)
+
+
 def test_keep_alive_loop_basic(mock_common_state):
     mock_common_state.store.get.return_value = SessionState(
         name="test", token="t", url="u", endpoint="e1"

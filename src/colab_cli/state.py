@@ -34,6 +34,8 @@ class SessionState(BaseModel):
     last_execution: Optional[Tuple[str, Optional[str], str]] = None
     running: Optional[str] = None
     keep_alive_pid: Optional[int] = None
+    exec_pid: Optional[int] = None
+    exec_log_path: Optional[str] = None
 
 
 class Settings(BaseModel):

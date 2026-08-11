@@ -16,7 +16,9 @@ import datetime
 import nbformat
 import os
 import re
+import subprocess
 import sys
+import tempfile
 import typer
 import uuid
 from nbformat.v4 import new_output
@@ -24,6 +26,7 @@ from rich.console import Console
 from typing import List, Optional
 from typing_extensions import Annotated
 
+from colab_cli.common import pid_alive
 from colab_cli.runtime import ColabRuntime
 from colab_cli.utils import handle_image, is_terminal_error, render_display_data
 from colab_cli.console import connect_console
@@ -310,6 +313,186 @@ def exec_command(
         raise typer.Exit(1)
 
 
+def _exec_async_dir() -> str:
+    return os.path.expanduser("~/.config/colab-cli/exec-async")
+
+
+def spawn_exec_async(
+    file: str,
+    session_name: str,
+    log_path: str,
+    timeout: Optional[float] = None,
+    env: Optional[List[str]] = None,
+    output_image: Optional[str] = None,
+    auth_provider=None,
+    config_path=None,
+) -> int:
+    """Spawns a detached `exec` process with stdio redirected to a log file.
+
+    Reuses the real (synchronous) `exec` command as the child rather than a
+    bespoke worker, so all of its existing state bookkeeping (`running`,
+    `last_execution`, history `execution` events, notebook output saving)
+    keeps working unmodified. The only difference from a foreground `exec`
+    is where stdout/stderr land -- a file instead of this process's
+    terminal -- which lets the caller return immediately.
+
+    Both `auth_provider` and `config_path` are propagated as global flags
+    for the same reason as `spawn_keep_alive`: the detached child re-parses
+    argv from scratch and does not inherit the parent's parsed Typer flags.
+    """
+    cmd = [sys.executable, "-m", "colab_cli.cli"]
+    if auth_provider is not None:
+        cmd.append(f"--auth={auth_provider.value}")
+    if config_path is not None:
+        cmd.extend(["--config", config_path])
+    cmd.extend(["exec", "-s", session_name, "-f", file])
+    if timeout is not None:
+        cmd.extend(["--timeout", str(timeout)])
+    if output_image:
+        cmd.extend(["--output-image", output_image])
+    for item in env or []:
+        cmd.extend(["--env", item])
+
+    kwargs = {}
+    if sys.platform != "win32":
+        kwargs["start_new_session"] = True
+    else:
+        CREATE_NEW_PROCESS_GROUP = 0x00000200
+        DETACHED_PROCESS = 0x00000008
+        kwargs["creationflags"] = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+
+    log_fp = open(log_path, "wb")
+    try:
+        p = subprocess.Popen(
+            cmd,
+            stdout=log_fp,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            **kwargs,
+        )
+    finally:
+        log_fp.close()
+    return p.pid
+
+
+def exec_async(
+    session: Annotated[
+        Optional[str], typer.Option("-s", "--session", help="Session name")
+    ] = None,
+    file: Annotated[
+        Optional[str],
+        typer.Option(
+            "-f",
+            "--file",
+            help=(
+                "Local file path (.py or .ipynb) to read and execute on the "
+                "remote kernel in the background. Required unless code is "
+                "piped via stdin (a live terminal can't be forwarded to a "
+                "detached process)."
+            ),
+        ),
+    ] = None,
+    output_image: Annotated[
+        Optional[str], typer.Option("--output-image", help="Path to save plot")
+    ] = None,
+    timeout: Annotated[
+        Optional[float],
+        typer.Option("--timeout", help="Timeout in seconds for code execution"),
+    ] = 30.0,
+    env: Annotated[
+        Optional[List[str]],
+        typer.Option(
+            "--env",
+            help=(
+                "Set an environment variable in the remote kernel as KEY=VALUE. "
+                "Repeat for multiple variables."
+            ),
+        ),
+    ] = None,
+):
+    """Execute code in a session in the background"""
+    from colab_cli.common import state
+
+    # Validate --env up front so we fail fast, before spawning anything.
+    _parse_env_vars(env)
+
+    name = state.resolve_session(session)
+    s = state.store.get(name)
+    if not s:
+        typer.echo(f"[colab] Session '{name}' not found.", err=True)
+        raise typer.Exit(1)
+
+    if s.exec_pid and pid_alive(s.exec_pid):
+        typer.echo(
+            f"[colab] Session '{name}' already has a background exec running "
+            f"(pid={s.exec_pid}). Follow it with `mighty-colab log -s {name} -f`, "
+            "or wait for it to finish before starting another.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    if not file:
+        if is_stdin_tty():
+            typer.echo(
+                "[colab] Error: exec-async requires -f/--file, or piped code. "
+                "A live terminal can't be forwarded to a background process.",
+                err=True,
+            )
+            raise typer.Exit(1)
+        code = sys.stdin.read()
+        if not code.strip():
+            raise typer.Exit(0)
+        exec_async_dir = _exec_async_dir()
+        os.makedirs(exec_async_dir, exist_ok=True)
+        fd, file = tempfile.mkstemp(
+            prefix=f"{name}-", suffix=".py", dir=exec_async_dir
+        )
+        with os.fdopen(fd, "w") as f:
+            f.write(code)
+
+    log_path = os.path.join(state.history.log_dir, f"{name}.exec.log")
+
+    # Defensive invariant check: log_path is derived from `name` alone, so
+    # two different sessions should never compute the same path -- but if
+    # local state ever ends up otherwise (hand-edited sessions.json, a
+    # future rename flow, a case-insensitive filesystem), the alternative
+    # is `spawn_exec_async` silently truncating (`open(log_path, "wb")`) a
+    # file a live worker belonging to that other session is still writing.
+    # Fail loudly here, before that call, instead.
+    for other_name, other in state.store.list().items():
+        if other_name == name:
+            continue
+        if other.exec_log_path == log_path and pid_alive(other.exec_pid):
+            typer.echo(
+                f"[colab] Refusing to start: '{log_path}' is currently "
+                f"being written by session '{other_name}' "
+                f"(pid={other.exec_pid}).",
+                err=True,
+            )
+            raise typer.Exit(1)
+
+    # Persist BEFORE spawning so the daemon's own `state.store.get` doesn't
+    # race the write (same rule as `spawn_keep_alive`).
+    s.exec_log_path = log_path
+    state.store.add(s)
+
+    pid = spawn_exec_async(
+        file,
+        name,
+        log_path,
+        timeout=timeout,
+        env=env,
+        output_image=output_image,
+        auth_provider=state.auth_provider,
+        config_path=state.config_path,
+    )
+    s.exec_pid = pid
+    state.store.add(s)
+
+    typer.echo(f"[colab] Started background exec (pid={pid}).")
+    typer.echo(f"[colab] Follow output with: mighty-colab log -s {name} -f")
+
+
 def repl(
     session: Annotated[
         Optional[str], typer.Option("-s", "--session", help="Session name")
@@ -440,5 +623,6 @@ def console(
 
 def register(app: typer.Typer):
     app.command(name="exec")(exec_command)
+    app.command(name="exec-async")(exec_async)
     app.command()(repl)
     app.command()(console)

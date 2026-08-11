@@ -378,6 +378,10 @@ def stop(
         from colab_cli.common import kill_process
 
         kill_process(s.keep_alive_pid)
+    if s.exec_pid:
+        from colab_cli.common import kill_process
+
+        kill_process(s.exec_pid)
 
     try:
         runtime = ColabRuntime(s.url, s.token, kernel_id=s.kernel_id)
