@@ -387,12 +387,25 @@ def run_command(
             )
         except Exception as e:
             if is_terminal_error(e):
+                if state.json_output:
+                    emit_json(
+                        build_envelope("error", exit_code=1, reason="session_lost")
+                    )
                 typer.echo(
                     f"[colab] Session '{name}' appears to be lost (404/401).",
                     err=True,
                 )
                 state.prune_session(name)
                 raise typer.Exit(1)
+            # Genuine transport-level failure during the preflight call
+            # (e.g. a just-created kernel dropping its websocket before the
+            # reply arrives -- observed live). Best-effort: give --json
+            # callers a JSON body instead of a bare traceback before it
+            # propagates; cleanup still happens via the outer `finally`.
+            if state.json_output:
+                emit_json(
+                    build_envelope("error", exit_code=1, reason="preflight_failed")
+                )
             raise
 
         payload = _build_script_payload(script, script_args, env_vars)

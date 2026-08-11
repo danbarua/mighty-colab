@@ -247,6 +247,57 @@ def test_run_without_json_still_exits_nonzero_on_job_raised(
     assert result.exit_code == 1
 
 
+def test_run_json_preflight_transport_failure_emits_error_envelope(
+    mock_client,
+    mock_store,
+    mock_runtime_class,
+    mock_spawn_keep_alive,
+    mock_common_state,
+    assign_response,
+    script_path,
+):
+    """A genuine transport failure during the `/content` preflight call
+    (observed live: a just-created kernel's websocket dropping before the
+    reply arrives) must still leave stdout carrying a JSON error envelope,
+    not a bare traceback -- this preflight step is separate from the main
+    script-execution call and needs its own --json coverage."""
+    mock_common_state.json_output = True
+    mock_client.assign.return_value = assign_response
+    mock_runtime = mock_runtime_class.return_value
+    mock_runtime.execute_code.side_effect = RuntimeError("Connection was lost.")
+
+    result = runner.invoke(app, ["run", str(script_path)])
+    assert result.exit_code != 0
+
+    envelope = json.loads(result.stdout)
+    assert envelope["status"] == "error"
+    assert envelope["reason"] == "preflight_failed"
+    assert envelope["exit_code"] == 1
+
+
+def test_run_json_preflight_session_lost_emits_error_envelope(
+    mock_client,
+    mock_store,
+    mock_runtime_class,
+    mock_spawn_keep_alive,
+    mock_common_state,
+    assign_response,
+    script_path,
+):
+    mock_common_state.json_output = True
+    mock_client.assign.return_value = assign_response
+    mock_runtime = mock_runtime_class.return_value
+    mock_runtime.execute_code.side_effect = Exception("404 Not Found")
+
+    result = runner.invoke(app, ["run", str(script_path)])
+    assert result.exit_code != 0
+
+    envelope = json.loads(result.stdout)
+    assert envelope["status"] == "error"
+    assert envelope["reason"] == "session_lost"
+    assert envelope["exit_code"] == 1
+
+
 def test_run_json_script_not_found(mock_common_state, tmp_path):
     mock_common_state.json_output = True
     missing = tmp_path / "nope.py"
