@@ -72,10 +72,25 @@ def _is_exposable(name: str, cmd: click.Command) -> bool:
     return name not in EXCLUDED_COMMANDS and not cmd.hidden
 
 
+# Parameters excluded from specific, otherwise-exposed commands -- unlike
+# EXCLUDED_COMMANDS, the rest of the command is still a perfectly good tool.
+# `log --follow` is the motivating case: it blocks the single MCP call for
+# the entire (potentially unbounded) duration of a background exec-async
+# job and only returns output once, at the very end, not incrementally.
+# That's not "streaming" so much as "one call that might never return" --
+# and MCP's plain request/response tool-call model (which Claude Desktop
+# expects) has no way to represent it. `exec-async` itself stays exposed;
+# it's the non-blocking way to kick off exactly this kind of long job.
+EXCLUDED_PARAMS: Dict[str, set] = {
+    "log": {"follow"},
+}
+
+
 def _command_params(cmd: click.Command) -> List[click.Parameter]:
     # Click auto-adds an eager `--help`/`-h` option to every command; it's
     # not a real tool argument.
-    return [p for p in cmd.params if p.name and p.name != "help"]
+    excluded = EXCLUDED_PARAMS.get(cmd.name or "", ())
+    return [p for p in cmd.params if p.name and p.name != "help" and p.name not in excluded]
 
 
 def _is_array_param(param: click.Parameter) -> bool:

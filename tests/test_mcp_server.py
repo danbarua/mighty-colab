@@ -79,6 +79,47 @@ def test_includes_ordinary_scriptable_commands(tools_and_commands):
         assert scriptable in names
 
 
+def test_exec_async_is_exposed(tools_and_commands):
+    """exec-async returns almost instantly regardless of the submitted
+    script's runtime -- it's the right shape for MCP's single request/
+    response model (unlike log -f, which wants genuinely incremental
+    updates). Must stay a tool."""
+    tools, _ = tools_and_commands
+    names = {t.name for t in tools}
+    assert "exec-async" in names
+
+
+def test_log_follow_is_not_an_mcp_tool_parameter(tools_and_commands):
+    """log -f blocks a single MCP call for the entire duration of a
+    background job (potentially unbounded) and only returns output once,
+    at the very end -- not incrementally. Claude Desktop (and MCP's plain
+    request/response tool-call model generally) doesn't support that. The
+    rest of `log` (session listing, structured history, -n/-t/-o) is fast
+    and bounded, so only the `follow` parameter is excluded, not the whole
+    command."""
+    tools, _ = tools_and_commands
+    by_name = {t.name: t for t in tools}
+    assert "log" in by_name
+    assert "follow" not in by_name["log"].input_schema["properties"]
+    # The rest of `log` must still work over MCP.
+    assert "session" in by_name["log"].input_schema["properties"]
+    assert "lines" in by_name["log"].input_schema["properties"]
+
+
+def test_build_kwargs_ignores_follow_even_if_a_client_sends_it(click_group):
+    """Defense in depth: even if some MCP client sends `follow` anyway
+    (schemas aren't always strictly enforced), it must never reach the
+    `log` command's callback -- it must fall back to the callback's own
+    `False` default rather than blocking the MCP call indefinitely."""
+    from colab_cli.mcp_server import _build_kwargs
+
+    log_cmd = click_group.commands["log"]
+    with click.Context(log_cmd, info_name="log") as ctx:
+        kwargs = _build_kwargs(log_cmd, {"session": "s1", "follow": True}, ctx)
+
+    assert "follow" not in kwargs
+
+
 def test_every_tool_has_a_description(tools_and_commands):
     tools, _ = tools_and_commands
     for tool in tools:

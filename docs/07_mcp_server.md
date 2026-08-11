@@ -1,6 +1,7 @@
 ---
 log:
 2026-08-02: Initial design and implementation of `colab mcp`, a stdio MCP (Model Context Protocol) server exposing the CLI's own Click command tree as tools. Hand-rolled scanner/dispatcher (`mcp_server.py`) rather than the `click-mcp` package the user had added as a dependency: `click-mcp==0.6.1` calls `Server.list_tools()`/`.call_tool()` as decorator methods, which don't exist on the installed `mcp==2.0.0` SDK's `Server` (rewritten around constructor-based `on_list_tools=`/`on_call_tool=` handlers), and its command-exclusion registry is dead code (`register_mcp_metadata` is never called by any public decorator). It would also have had a correctness bug even working: it dispatches by round-tripping a synthesized argv through `cli_group.main(args=[...], standalone_mode=False)`, re-running the whole group's `main()` -- with no global flags in that argv, `--auth`/`--config` would silently reset to their Typer defaults on every tool call. `mcp_server.py` instead scans `click_group.commands` once at startup and dispatches by invoking `Command.invoke(ctx)` directly in-process, so the root `@app.callback()` runs exactly once, at server startup, and never again per tool call. `ssh`/`repl`/`console`/`edit`/`drivemount` are excluded by name (interactive/TTY-blocking) union with anything `hidden=True` (`auth`, `keep-alive`, `whoami`, the `README`/`SKILL` aliases). Also fixed two bugs found via testing: Typer builds its commands from a *vendored* copy of Click's parameter-type classes (`typer._click.types.*`), so an `isinstance` check against the real `click` module silently mis-typed every bool/int/float param as `"string"` in the generated JSON Schema -- fixed by keying off `param.type.name` instead; and dispatch initially captured only stdout, silently dropping `typer.echo(..., err=True)` error messages sent before `raise typer.Exit(N)`. Removed the `click-mcp` dependency from `pyproject.toml`; added `mcp>=2.0.0,<3.0.0` directly (was already present transitively) with an upper bound, given how much the SDK's public API has moved across major versions. Added `tests/test_mcp_server.py` (14 tests). Verified end-to-end with the `mcp` SDK's own client (`mcp.client.stdio`) against a real `python -m colab_cli.cli mcp` subprocess.
+2026-08-11: Added `EXCLUDED_PARAMS`, a per-command parameter-exclusion map alongside the existing whole-command `EXCLUDED_COMMANDS`, and used it to strip `log`'s `--follow` from its MCP tool schema. Motivation: `log -f` (added earlier today alongside `exec-async`) blocks a single MCP tool call for the entire, potentially unbounded duration of a background job and only returns output once, at the very end -- not incrementally -- which Claude Desktop's plain request/response tool-call model can't represent. The rest of `log` stays exposed (fast, bounded, single-shot); `exec-async` itself was already correctly exposed and unaffected -- it returns in ~1s regardless of the submitted script's runtime, making it (not `log -f`) the right way to kick off a long job from MCP. Enforced in `_command_params`, which both `build_tools` (schema generation) and `_build_kwargs` (dispatch) already shared, so excluding a param there is defense in depth: even a client that sends `follow` anyway never reaches the callback with it set. 4 new tests in `tests/test_mcp_server.py`.
 2026-08-02: Replaced the stray `integration/repro_mcp_server/test.sh` (an accidental byte-for-byte copy of `repro_run_command/test.sh`, left over from scaffolding) with a real live end-to-end MCP smoke test. Drives `mighty-colab mcp` through the `mcp` SDK's own stdio client -- the same path a real MCP client takes -- across `list_tools()` (exclusion/inclusion), `call_tool("new"/"exec"/"status"/"stop")` against a real CPU VM, an orphan check via `call_tool("sessions", {})` cross-verified with a direct CLI call, and a validation-error path (`call_tool("adopt", {})`) asserting `is_error: True` carries the actual message rather than a bare exit code. Ran live end-to-end; all six phases passed and no orphan VM was left behind.
 ---
 
@@ -52,10 +53,25 @@ re-parsed per tool call (see Behavior #4).
    `Tool.description` is the command's docstring; `Tool.inputSchema` is a JSON Schema
    object derived from the command's `click.Parameter`s.
 2. **Exclude**: A command is exposed only if its name is not in `EXCLUDED_COMMANDS =
-   {ssh, repl, console, edit, drivemount, mcp, help}` AND it isn't `hidden=True`
+   {ssh, repl, console, edit, drivemount, mcp, help, pay}` AND it isn't `hidden=True`
    (`auth`, `keep-alive`, `whoami`, the `README`/`SKILL` aliases). The `--help` option
    Click auto-adds to every command is stripped from the parameter list — it isn't a
-   real tool argument.
+   real tool argument. A second, finer-grained map, `EXCLUDED_PARAMS: {command_name:
+   {param_names}}`, strips individual parameters from an otherwise-exposed command --
+   currently just `log`'s `follow` (`-f`). Unlike a fully-excluded command, `log`'s
+   session listing, structured history, and `-n`/`-t`/`-o` export are all fast, bounded,
+   single-shot calls and stay exposed; only `--follow` is unsuitable, since it blocks
+   the single MCP call for the entire (potentially unbounded) duration of a background
+   `exec-async` job and only returns output once, at the very end, not incrementally.
+   That's not "streaming" so much as "a call that might never return" -- and MCP's
+   plain request/response tool-call model (which Claude Desktop expects) has no way to
+   represent it. `exec-async` itself stays fully exposed, `--timeout` and all: it
+   returns in around a second regardless of the submitted script's runtime, which is
+   exactly the shape an MCP tool call needs -- it's the *right* way to kick off a long
+   job from MCP, `log -f` is not. The exclusion is enforced in the parameter list itself
+   (`_command_params`), not just the generated schema, so even a client that sends
+   `follow` anyway gets it silently dropped before dispatch rather than reaching the
+   callback -- defense in depth against exactly the hang this exists to prevent.
 3. **Schema generation**: Each parameter maps to a JSON Schema property keyed by
    `param.type.name` (Click's own stable identifier — `"boolean"` / `"integer"` /
    `"float"` / `"text"`), since Typer builds its commands from a vendored copy of
