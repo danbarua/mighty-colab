@@ -15,7 +15,7 @@
   - `StateStore` persists session metadata in `~/.config/colab-cli/sessions.json`.
   - Persistent settings are in `~/.config/colab-cli/settings.json`.
 - **History**: `HistoryLogger` records structured events in `~/.config/colab-cli/history/*.jsonl`.
-- **Structured output (`--json`)**: `exec`/`run`/`exec-async`/`log --tail`/`new`/`stop`/`sessions`/`status` support a global `--json` flag, emitting a Pydantic-validated envelope (`src/colab_cli/envelopes.py`) instead of human-readable output. See `docs/01_session_management.md` and `docs/02_execution_and_interactive.md`'s 2026-08-12 changelog entries for the full design; not yet wired into the MCP server (`mcp_server.py` still returns unstructured text — a known, deliberately deferred gap).
+- **Structured output (`--json`)**: `exec`/`run`/`exec-async`/`log --tail`/`new`/`stop`/`sessions`/`status` support a global `--json` flag, emitting a Pydantic-validated envelope (`src/colab_cli/envelopes.py`) instead of human-readable output. `cli.py:main()` wraps the whole `app()` invocation in a catch-all (`_handle_uncaught_exception`) so *any* exception that escapes a command body — not just ones a command explicitly handles — still renders as an envelope (or a plain `[colab] Error: ...` line) instead of a raw Python traceback; `--debug` bypasses it and re-raises the real traceback. See `docs/01_session_management.md` and `docs/02_execution_and_interactive.md`'s 2026-08-12 changelog entries for the full design; not yet wired into the MCP server (`mcp_server.py` still returns unstructured text — a known, deliberately deferred gap).
 
 ## Core Mandates
 - **Minimalism**: Favor standard library where possible (e.g., `urllib`) while utilizing `Typer` for CLI ergonomics.
