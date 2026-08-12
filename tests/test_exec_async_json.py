@@ -100,6 +100,7 @@ def test_exec_async_json_submission_envelope(
     assert envelope == {
         "schema_version": "1",
         "cli_version": "9.9.9",
+        "command": "exec-async",
         "status": "started",
         "exit_code": 0,
         "pid": 5555,

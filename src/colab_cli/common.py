@@ -89,13 +89,20 @@ def _exit_code_from_outputs(outputs) -> int:
 
 
 def build_envelope(
-    status: str, exit_code: int = 0, reason: Optional[str] = None, **extra
+    status: str,
+    command: str,
+    exit_code: int = 0,
+    reason: Optional[str] = None,
+    **extra,
 ) -> dict:
     """Build a `--json` response envelope.
 
     Every JSON emitter (exec, run, exec-async, log --tail) funnels its
     response through this, so the envelope shape can't drift between
-    commands.
+    commands. `command` (e.g. "exec", "run", "exec-async", "log") names
+    which one produced this envelope -- for field debugging/tracing,
+    since a caller polling `log --tail` may be looking at a sidecar an
+    entirely different process wrote.
     """
     # Imported lazily: auto_update.py imports `state` from this module at
     # its own top level, so a top-level import here would be circular.
@@ -104,6 +111,7 @@ def build_envelope(
     envelope = {
         "schema_version": SCHEMA_VERSION,
         "cli_version": get_app_version(),
+        "command": command,
         "status": status,
         "exit_code": exit_code,
     }
@@ -113,14 +121,26 @@ def build_envelope(
     return envelope
 
 
-def emit_json(envelope: dict) -> None:
+def emit_json(envelope: dict, model: Optional[type] = None) -> None:
     """Print a `--json` envelope to stdout.
+
+    Validates `envelope` against `model` (an `envelopes.py` Pydantic
+    model; defaults to `EnvelopeBase`) before printing -- a shape mismatch
+    raises `pydantic.ValidationError` immediately rather than shipping a
+    silently-wrong field. That's what makes the model an enforced
+    invariant instead of just documentation.
 
     Uses an explicit `file=` so it bypasses the `typer.echo` `--json`
     redirect installed in `cli.py` (that redirect exists to keep
     human-readable chatter off stdout while `--json` is active; this call
     IS the stdout payload it's making room for).
     """
+    # Imported lazily: envelopes.py has no reason to import common.py, but
+    # keeping the import here (rather than at module top) matches this
+    # file's existing pattern for avoiding import-order surprises.
+    from colab_cli.envelopes import EnvelopeBase
+
+    (model or EnvelopeBase).model_validate(envelope)
     typer.echo(json.dumps(envelope), file=sys.stdout)
 
 

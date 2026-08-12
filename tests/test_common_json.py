@@ -28,10 +28,11 @@ from colab_cli.common import (
 
 def test_build_envelope_shape(mocker):
     mocker.patch("colab_cli.auto_update.get_app_version", return_value="1.2.3")
-    envelope = build_envelope("ok", exit_code=0)
+    envelope = build_envelope("ok", "exec", exit_code=0)
     assert envelope == {
         "schema_version": SCHEMA_VERSION,
         "cli_version": "1.2.3",
+        "command": "exec",
         "status": "ok",
         "exit_code": 0,
     }
@@ -39,16 +40,20 @@ def test_build_envelope_shape(mocker):
 
 def test_build_envelope_includes_reason_only_when_set(mocker):
     mocker.patch("colab_cli.auto_update.get_app_version", return_value="1.2.3")
-    ok_envelope = build_envelope("ok")
+    ok_envelope = build_envelope("ok", "exec")
     assert "reason" not in ok_envelope
 
-    error_envelope = build_envelope("error", exit_code=1, reason="session_not_found")
+    error_envelope = build_envelope(
+        "error", "exec", exit_code=1, reason="session_not_found"
+    )
     assert error_envelope["reason"] == "session_not_found"
 
 
 def test_build_envelope_passes_through_extra_fields(mocker):
     mocker.patch("colab_cli.auto_update.get_app_version", return_value="1.2.3")
-    envelope = build_envelope("started", pid=123, log_path="/tmp/log")
+    envelope = build_envelope(
+        "started", "exec-async", pid=123, log_path="/tmp/log"
+    )
     assert envelope["pid"] == 123
     assert envelope["log_path"] == "/tmp/log"
 

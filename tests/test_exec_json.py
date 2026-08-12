@@ -312,6 +312,7 @@ def test_exec_json_empty_code_is_ok_with_no_blocks(mock_session, mock_common_sta
     assert envelope == {
         "schema_version": envelope["schema_version"],
         "cli_version": envelope["cli_version"],
+        "command": "exec",
         "status": "ok",
         "exit_code": 0,
         "blocks": [],

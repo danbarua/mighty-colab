@@ -90,6 +90,7 @@ def test_log_tail_json_sidecar_present_returns_its_fields(mocker, tmp_path, caps
             {
                 "schema_version": "1",
                 "cli_version": "9.9.9",
+                "command": "exec",
                 "status": "ok",
                 "exit_code": 0,
                 "blocks": [],
@@ -144,7 +145,18 @@ def test_log_tail_json_resolves_default_path_after_session_removed(
     log_file = log_dir / "s1.exec.log"
     log_file.write_text("done\n")
     sidecar = log_dir / "s1.exec.log.json"
-    sidecar.write_text(json.dumps({"status": "ok", "exit_code": 0}))
+    sidecar.write_text(
+        json.dumps(
+            {
+                "schema_version": "1",
+                "cli_version": "9.9.9",
+                "command": "exec",
+                "status": "ok",
+                "exit_code": 0,
+                "blocks": [],
+            }
+        )
+    )
 
     mock_state = _mock_state(mocker)
     mock_state.store.get.return_value = None  # session record gone

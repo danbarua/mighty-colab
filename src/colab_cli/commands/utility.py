@@ -24,6 +24,7 @@ from typing_extensions import Annotated
 from colab_cli import auto_update
 from colab_cli.auto_update import get_app_version
 from colab_cli.common import build_envelope, emit_json, pid_alive, state
+from colab_cli.envelopes import EnvelopeBase, ExecEnvelope
 
 # Poll interval while `log -f` waits for more bytes to be appended to a
 # still-running exec-async job's log file.
@@ -107,7 +108,7 @@ def _tail_log_json(log_path: str, pid: Optional[int], since_offset: Optional[int
     """
     sidecar_path = f"{log_path}.json"
     if not os.path.exists(log_path) and not os.path.exists(sidecar_path):
-        emit_json(build_envelope("error", exit_code=1, reason="no_job_found"))
+        emit_json(build_envelope("error", "log", exit_code=1, reason="no_job_found"))
         raise typer.Exit(1)
 
     offset = since_offset or 0
@@ -129,15 +130,24 @@ def _tail_log_json(log_path: str, pid: Optional[int], since_offset: Optional[int
         if envelope is not None:
             envelope["content"] = content
             envelope["next_offset"] = next_offset
-            emit_json(envelope)
+            # The sidecar's own "command" field is left as-is (it names
+            # whichever command wrote it -- always "exec", since sidecars
+            # are only ever produced by exec-async's spawned child, never
+            # by `log` itself). It's error-shaped if the async child's own
+            # preflight/execution failed before producing any blocks.
+            model = EnvelopeBase if envelope.get("status") == "error" else ExecEnvelope
+            emit_json(envelope, model=model)
             return
 
     if pid_alive(pid):
-        emit_json(build_envelope("running", content=content, next_offset=next_offset))
+        emit_json(
+            build_envelope("running", "log", content=content, next_offset=next_offset)
+        )
     else:
         emit_json(
             build_envelope(
                 "error",
+                "log",
                 exit_code=1,
                 reason="worker_terminated",
                 content=content,
@@ -323,7 +333,9 @@ def log(
             flag = "--follow" if follow else "--tail"
             if tail and state.json_output:
                 emit_json(
-                    build_envelope("error", exit_code=2, reason="missing_session")
+                    build_envelope(
+                        "error", "log", exit_code=2, reason="missing_session"
+                    )
                 )
             typer.echo(f"[colab] {flag} requires --session/-s.", err=True)
             raise typer.Exit(2)
@@ -342,7 +354,7 @@ def log(
                 pid = None
             else:
                 emit_json(
-                    build_envelope("error", exit_code=1, reason="no_job_found")
+                    build_envelope("error", "log", exit_code=1, reason="no_job_found")
                 )
                 typer.echo(
                     f"[colab] No background exec-async job found for session "

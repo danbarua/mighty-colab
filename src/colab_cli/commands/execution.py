@@ -34,6 +34,7 @@ from colab_cli.common import (
     pid_alive,
 )
 from colab_cli.common import _exit_code_from_outputs
+from colab_cli.envelopes import EnvelopeBase, ExecAsyncStarted, ExecEnvelope
 from colab_cli.runtime import ColabRuntime
 from colab_cli.utils import handle_image, is_terminal_error, render_display_data
 from colab_cli.console import connect_console
@@ -175,15 +176,28 @@ def display_output(out, output_image=None):
         pass
 
 
-def _finish_json(envelope: dict, json_result_path: Optional[str]) -> None:
+def _finish_json(
+    envelope: dict,
+    json_result_path: Optional[str],
+    model: Optional[type] = None,
+) -> None:
     """Deliver a `--json` envelope: to a sidecar file (`exec-async`'s child,
     signaled by the hidden `--json-result-path` flag) or to stdout (a
-    foreground `exec --json`)."""
+    foreground `exec --json`).
+
+    Validates once here regardless of destination -- the sidecar write
+    bypasses `emit_json`'s own gate entirely, so this is the one place
+    that has to catch both. Writes directly rather than delegating to
+    `emit_json` for the stdout branch, since that would re-validate
+    against `emit_json`'s own default (`EnvelopeBase`), which would
+    reject a richer shape like `ExecEnvelope`'s `blocks` field.
+    """
+    (model or EnvelopeBase).model_validate(envelope)
     if json_result_path:
         with open(json_result_path, "w", encoding="utf-8") as f:
             json.dump(envelope, f)
     else:
-        emit_json(envelope)
+        typer.echo(json.dumps(envelope), file=sys.stdout)
 
 
 def exec_command(
@@ -244,7 +258,9 @@ def exec_command(
     if not s:
         if want_json:
             _finish_json(
-                build_envelope("error", exit_code=1, reason="session_not_found"),
+                build_envelope(
+                    "error", "exec", exit_code=1, reason="session_not_found"
+                ),
                 json_result_path,
             )
         typer.echo(f"[colab] Session '{name}' not found.", err=True)
@@ -272,7 +288,7 @@ def exec_command(
         if is_stdin_tty():
             if want_json:
                 _finish_json(
-                    build_envelope("error", exit_code=1, reason="no_input"),
+                    build_envelope("error", "exec", exit_code=1, reason="no_input"),
                     json_result_path,
                 )
             typer.echo(
@@ -284,7 +300,11 @@ def exec_command(
 
     if not any(b["code"].strip() for b in code_blocks):
         if want_json:
-            _finish_json(build_envelope("ok", exit_code=0, blocks=[]), json_result_path)
+            _finish_json(
+                build_envelope("ok", "exec", exit_code=0, blocks=[]),
+                json_result_path,
+                model=ExecEnvelope,
+            )
         raise typer.Exit(0)
 
     def on_started(kid):
@@ -313,7 +333,7 @@ def exec_command(
         if is_terminal_error(e):
             if want_json:
                 _finish_json(
-                    build_envelope("error", exit_code=1, reason="session_lost"),
+                    build_envelope("error", "exec", exit_code=1, reason="session_lost"),
                     json_result_path,
                 )
             typer.echo(
@@ -324,7 +344,9 @@ def exec_command(
             raise typer.Exit(1)
         if want_json:
             _finish_json(
-                build_envelope("error", exit_code=1, reason="preflight_failed"),
+                build_envelope(
+                    "error", "exec", exit_code=1, reason="preflight_failed"
+                ),
                 json_result_path,
             )
         raise e
@@ -402,7 +424,9 @@ def exec_command(
         # propagates.
         if want_json:
             _finish_json(
-                build_envelope("error", exit_code=1, reason="execution_failed"),
+                build_envelope(
+                    "error", "exec", exit_code=1, reason="execution_failed"
+                ),
                 json_result_path,
             )
         raise
@@ -424,9 +448,14 @@ def exec_command(
         reason = None if job_exit_code == 0 else "job_raised"
         _finish_json(
             build_envelope(
-                status, exit_code=job_exit_code, reason=reason, blocks=blocks_json
+                status,
+                "exec",
+                exit_code=job_exit_code,
+                reason=reason,
+                blocks=blocks_json,
             ),
             json_result_path,
+            model=ExecEnvelope,
         )
         return
 
@@ -557,13 +586,21 @@ def exec_async(
     s = state.store.get(name)
     if not s:
         if state.json_output:
-            emit_json(build_envelope("error", exit_code=1, reason="session_not_found"))
+            emit_json(
+                build_envelope(
+                    "error", "exec-async", exit_code=1, reason="session_not_found"
+                )
+            )
         typer.echo(f"[colab] Session '{name}' not found.", err=True)
         raise typer.Exit(1)
 
     if s.exec_pid and pid_alive(s.exec_pid):
         if state.json_output:
-            emit_json(build_envelope("error", exit_code=1, reason="already_running"))
+            emit_json(
+                build_envelope(
+                    "error", "exec-async", exit_code=1, reason="already_running"
+                )
+            )
         typer.echo(
             f"[colab] Session '{name}' already has a background exec running "
             f"(pid={s.exec_pid}). Follow it with `mighty-colab log -s {name} -f`, "
@@ -575,7 +612,11 @@ def exec_async(
     if not file:
         if is_stdin_tty():
             if state.json_output:
-                emit_json(build_envelope("error", exit_code=1, reason="no_input"))
+                emit_json(
+                    build_envelope(
+                        "error", "exec-async", exit_code=1, reason="no_input"
+                    )
+                )
             typer.echo(
                 "[colab] Error: exec-async requires -f/--file, or piped code. "
                 "A live terminal can't be forwarded to a background process.",
@@ -615,7 +656,10 @@ def exec_async(
             if state.json_output:
                 emit_json(
                     build_envelope(
-                        "error", exit_code=1, reason="log_path_collision"
+                        "error",
+                        "exec-async",
+                        exit_code=1,
+                        reason="log_path_collision",
                     )
                 )
             typer.echo(
@@ -662,7 +706,10 @@ def exec_async(
     state.store.add(s)
 
     if state.json_output:
-        emit_json(build_envelope("started", pid=pid, log_path=log_path))
+        emit_json(
+            build_envelope("started", "exec-async", pid=pid, log_path=log_path),
+            model=ExecAsyncStarted,
+        )
     typer.echo(f"[colab] Started background exec (pid={pid}).")
     typer.echo(f"[colab] Follow output with: mighty-colab log -s {name} -f")
 

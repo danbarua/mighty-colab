@@ -56,6 +56,7 @@ from colab_cli.common import (
     emit_json,
     json_safe_outputs,
 )
+from colab_cli.envelopes import RunEnvelope
 from colab_cli.commands.session import (
     _is_scope_error,
     _scope_remediation_message,
@@ -269,7 +270,11 @@ def run_command(
     # script path should not cost the user real compute.
     if not os.path.isfile(script):
         if state.json_output:
-            emit_json(build_envelope("error", exit_code=2, reason="script_not_found"))
+            emit_json(
+                build_envelope(
+                    "error", "run", exit_code=2, reason="script_not_found"
+                )
+            )
         typer.echo(f"[colab] Script not found: {script}", err=True)
         raise typer.Exit(2)
 
@@ -389,7 +394,9 @@ def run_command(
             if is_terminal_error(e):
                 if state.json_output:
                     emit_json(
-                        build_envelope("error", exit_code=1, reason="session_lost")
+                        build_envelope(
+                            "error", "run", exit_code=1, reason="session_lost"
+                        )
                     )
                 typer.echo(
                     f"[colab] Session '{name}' appears to be lost (404/401).",
@@ -404,7 +411,9 @@ def run_command(
             # propagates; cleanup still happens via the outer `finally`.
             if state.json_output:
                 emit_json(
-                    build_envelope("error", exit_code=1, reason="preflight_failed")
+                    build_envelope(
+                        "error", "run", exit_code=1, reason="preflight_failed"
+                    )
                 )
             raise
 
@@ -440,7 +449,9 @@ def run_command(
                 # Best-effort: give --json callers a JSON body instead of a
                 # bare traceback, even though the transport exception below
                 # still propagates (teardown needs to run either way).
-                emit_json(build_envelope("error", exit_code=1, reason="run_failed"))
+                emit_json(
+                    build_envelope("error", "run", exit_code=1, reason="run_failed")
+                )
             raise
         else:
             exit_code = _exit_code_from_outputs(outputs)
@@ -469,10 +480,12 @@ def run_command(
         emit_json(
             build_envelope(
                 status,
+                "run",
                 exit_code=exit_code,
                 reason=reason,
                 outputs=json_safe_outputs(outputs),
-            )
+            ),
+            model=RunEnvelope,
         )
         return
 
