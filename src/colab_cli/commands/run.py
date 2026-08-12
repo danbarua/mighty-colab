@@ -593,6 +593,7 @@ def run_command(
                         "keep": keep,
                         "timeout": timeout,
                         "env": env_vars,
+                        "no_preflight_check": no_preflight_check,
                     },
                 },
             )

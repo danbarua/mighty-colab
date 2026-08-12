@@ -164,6 +164,7 @@ def test_run_logs_invocation_provenance(
     assert invocation["keep"] is True
     assert invocation["timeout"] == 45.0
     assert invocation["env"] == {"RUN_ID": "abc123"}
+    assert invocation["no_preflight_check"] is False
 
 
 def test_run_teardown_warns_and_preserves_state_when_unassign_fails(
