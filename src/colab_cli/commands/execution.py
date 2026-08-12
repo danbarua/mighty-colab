@@ -692,10 +692,18 @@ def exec_async(
             f.write(code)
 
     if output_log:
-        log_path = os.path.expanduser(output_log)
-        parent = os.path.dirname(log_path)
-        if parent:
-            os.makedirs(parent, exist_ok=True)
+        output_log = os.path.expanduser(output_log)
+        if output_log.endswith(os.sep) or os.path.isdir(output_log):
+            os.makedirs(output_log, exist_ok=True)
+            timestamp = datetime.datetime.now(datetime.timezone.utc).strftime(
+                "%Y%m%dT%H%M%S%fZ"
+            )
+            log_path = os.path.join(output_log, f"{name}_{timestamp}.log")
+        else:
+            log_path = output_log
+            parent = os.path.dirname(log_path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
     else:
         log_path = os.path.join(state.history.log_dir, f"{name}.exec.log")
 
@@ -705,7 +713,9 @@ def exec_async(
     # future rename flow, a case-insensitive filesystem), the alternative
     # is `spawn_exec_async` silently truncating (`open(log_path, "wb")`) a
     # file a live worker belonging to that other session is still writing.
-    # Fail loudly here, before that call, instead.
+    # Fail loudly here, before that call, instead. Structurally unreachable
+    # in directory mode (timestamped filenames can't collide) -- still
+    # correct for the default-path case, which this doesn't change.
     for other_name, other in state.store.list().items():
         if other_name == name:
             continue
