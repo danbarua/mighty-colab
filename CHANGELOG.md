@@ -10,6 +10,14 @@ below corresponds to a tag of the same name.
 
 ## [Unreleased]
 
+### Added
+
+- **`sessions`/`status --json`:** now report `keep_alive_pid` (only when
+  currently confirmed alive) and `last_keep_alive_ping` (ISO8601 UTC) per
+  session -- both omitted, not `null`, when unset. Deliberately no
+  estimated time-until-idle-timeout: only what's actually been measured
+  is surfaced. Plain-text output is unchanged.
+
 ### Fixed
 
 - **`log`:** `--tail`/`--follow` now ANSI-strip by default, matching

@@ -376,6 +376,10 @@ def run_command(
                 pass
             raise typer.Exit(code=1)
         # Other failures: don't block — the daemon will retry.
+    else:
+        # `else`, not just falling through past `except` -- must only run
+        # when the ping genuinely succeeded, not on a tolerated failure.
+        s.last_keep_alive_ping = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
     # AGENTS.md item 17: persist BEFORE spawning the daemon so the daemon's
     # initial state.store.get(name) doesn't race the parent.

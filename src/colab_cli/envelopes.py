@@ -121,6 +121,14 @@ class SessionInfo(BaseModel):
     last_execution_cell: Optional[str] = None
     last_execution_time: Optional[str] = None
     exec_log_path: Optional[str] = None
+    # Both None when there's no local record of a keep-alive daemon for
+    # this session at all, or the recorded one is confirmed dead
+    # (`pid_alive()`). `keep_alive_pid` set + `last_keep_alive_ping` still
+    # None means "daemon is alive, hasn't completed a ping cycle yet".
+    # Deliberately not an estimated time-until-idle-timeout -- nothing in
+    # this codebase has ever measured Colab's actual idle-reap threshold.
+    keep_alive_pid: Optional[int] = None
+    last_keep_alive_ping: Optional[str] = None
 
 
 class SessionListEnvelope(EnvelopeBase):

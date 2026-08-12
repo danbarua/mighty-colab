@@ -242,6 +242,8 @@ def test_session_info_valid_construction_minimal():
     assert info.status is None
     assert info.last_execution_file is None
     assert info.exec_log_path is None
+    assert info.keep_alive_pid is None
+    assert info.last_keep_alive_ping is None
 
 
 def test_session_info_valid_construction_full():
@@ -255,9 +257,13 @@ def test_session_info_valid_construction_full():
         last_execution_cell=None,
         last_execution_time="2026-08-12 01:00:00",
         exec_log_path="/tmp/s1.exec.log",
+        keep_alive_pid=12345,
+        last_keep_alive_ping="2026-08-12T01:00:00+00:00",
     )
     assert info.status == "BUSY (exec.py)"
     assert info.last_execution_file == "script.py"
+    assert info.keep_alive_pid == 12345
+    assert info.last_keep_alive_ping == "2026-08-12T01:00:00+00:00"
 
 
 def test_session_info_rejects_unexpected_field():

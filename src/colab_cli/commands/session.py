@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import datetime
 import os
 import subprocess
 import sys
@@ -266,6 +267,11 @@ def new(
             raise typer.Exit(code=1)
         # Other failures: don't block session creation — the daemon will
         # retry and log via the existing keep_alive_error event path.
+    else:
+        # `else`, not just falling through past `except` -- must only run
+        # when the ping genuinely succeeded, not on a tolerated non-scope
+        # failure above.
+        s.last_keep_alive_ping = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
     # Persist the session BEFORE spawning the daemon so the daemon's
     # initial `state.store.get(session_name)` check doesn't race and
@@ -343,7 +349,7 @@ def restart_kernel(
 
 def sessions_command():
     """List all active sessions"""
-    from colab_cli.common import build_envelope, emit_json, state
+    from colab_cli.common import build_envelope, emit_json, pid_alive, state
     from colab_cli.envelopes import SessionListEnvelope
 
     sessions, assignments = state.sync_sessions()
@@ -356,11 +362,16 @@ def sessions_command():
         typer.echo("[colab] No active sessions found on server.")
         return
 
-    # Build endpoint -> local-name lookup so we can lead with the friendly name.
-    name_by_endpoint = {s.endpoint: s.name for s in sessions.values()}
+    # Build endpoint -> local SessionState lookup so we can lead with the
+    # friendly name and, for --json, surface keep-alive info -- both are
+    # only knowable for sessions this local store actually tracks; an
+    # assignment with no match here is genuinely unknown (e.g. adopted or
+    # created by a different machine/process), not "no keep-alive".
+    state_by_endpoint = {s.endpoint: s for s in sessions.values()}
     session_infos = []
     for a in assignments:
-        name = name_by_endpoint.get(a.endpoint, "?")
+        local = state_by_endpoint.get(a.endpoint)
+        name = local.name if local else "?"
         # `a.variant` is an int-valued AssignmentVariant (DEFAULT=0/GPU=1/TPU=2);
         # its `.name` matches the user-facing string Variant enum, which is what
         # `status` shows for locally-tracked sessions.
@@ -372,14 +383,22 @@ def sessions_command():
                 variant=a.variant.name,
             )
         )
-        session_infos.append(
-            {
-                "name": name,
-                "endpoint": a.endpoint,
-                "accelerator": a.accelerator.value,
-                "variant": a.variant.name,
-            }
+        info = {
+            "name": name,
+            "endpoint": a.endpoint,
+            "accelerator": a.accelerator.value,
+            "variant": a.variant.name,
+        }
+        # Omitted (not null) when unset -- same convention as
+        # `_print_status_for` and every other optional envelope field.
+        alive_pid = (
+            local.keep_alive_pid if local and pid_alive(local.keep_alive_pid) else None
         )
+        if alive_pid is not None:
+            info["keep_alive_pid"] = alive_pid
+        if local and local.last_keep_alive_ping is not None:
+            info["last_keep_alive_ping"] = local.last_keep_alive_ping
+        session_infos.append(info)
 
     if state.json_output:
         emit_json(
@@ -405,6 +424,8 @@ def _print_status_for(s: SessionState) -> dict:
             status=status_str,
         )
     )
+    from colab_cli.common import pid_alive
+
     info = {
         "name": s.name,
         "endpoint": s.endpoint,
@@ -412,6 +433,14 @@ def _print_status_for(s: SessionState) -> dict:
         "variant": s.variant,
         "status": status_str,
     }
+    # Omitted (not null) when unset, matching every other optional field
+    # here (last_execution_*/exec_log_path below, "reason" on error
+    # envelopes elsewhere) -- this codebase's established convention.
+    alive_pid = s.keep_alive_pid if pid_alive(s.keep_alive_pid) else None
+    if alive_pid is not None:
+        info["keep_alive_pid"] = alive_pid
+    if s.last_keep_alive_ping is not None:
+        info["last_keep_alive_ping"] = s.last_keep_alive_ping
     if s.last_execution:
         exec_file, exec_cell, exec_time = s.last_execution
         cell_str = f" | Cell: {exec_cell}" if exec_cell else ""
@@ -640,6 +669,10 @@ def keep_alive(
             state.client.keep_alive_assignment(endpoint)
             consecutive_4xx = 0
             last_error = None
+            s.last_keep_alive_ping = datetime.datetime.now(
+                datetime.timezone.utc
+            ).isoformat()
+            state.store.add(s)
         except Exception as e:
             code = get_status_code(e)
             response_body = getattr(e, "response_body", None)

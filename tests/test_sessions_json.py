@@ -38,11 +38,14 @@ def test_sessions_json_list_shape(mock_common_state, mocker):
     mock_session_state = MagicMock()
     mock_session_state.name = "s1"
     mock_session_state.endpoint = "e1"
+    mock_session_state.keep_alive_pid = 4242
+    mock_session_state.last_keep_alive_ping = "2026-08-12T01:00:00+00:00"
 
     mock_common_state.sync_sessions.return_value = (
         {"s1": mock_session_state},
         [mock_assignment],
     )
+    mocker.patch("colab_cli.common.pid_alive", return_value=True)
 
     result = runner.invoke(app, ["sessions"])
     assert result.exit_code == 0, result.output
@@ -58,8 +61,36 @@ def test_sessions_json_list_shape(mock_common_state, mocker):
     # -- matching this codebase's existing convention (e.g. "reason" is
     # likewise omitted, not null, when not set).
     assert envelope["sessions"] == [
-        {"name": "s1", "endpoint": "e1", "accelerator": "T4", "variant": "GPU"}
+        {
+            "name": "s1",
+            "endpoint": "e1",
+            "accelerator": "T4",
+            "variant": "GPU",
+            "keep_alive_pid": 4242,
+            "last_keep_alive_ping": "2026-08-12T01:00:00+00:00",
+        }
     ]
+
+
+def test_sessions_json_keep_alive_none_for_orphaned_assignment(mock_common_state):
+    """An assignment with no matching local `SessionState` (adopted, or
+    created by a different machine/process) has genuinely unknown
+    keep-alive status -- must not be conflated with "no keep-alive"."""
+    mock_common_state.json_output = True
+
+    mock_assignment = MagicMock()
+    mock_assignment.endpoint = "orphan-ep"
+    mock_assignment.variant.name = "DEFAULT"
+    mock_assignment.accelerator.value = "NONE"
+
+    mock_common_state.sync_sessions.return_value = ({}, [mock_assignment])
+
+    result = runner.invoke(app, ["sessions"])
+    assert result.exit_code == 0, result.output
+
+    envelope = json.loads(result.stdout)
+    assert "keep_alive_pid" not in envelope["sessions"][0]
+    assert "last_keep_alive_ping" not in envelope["sessions"][0]
 
 
 def test_sessions_json_orphaned_assignment_marked(mock_common_state):

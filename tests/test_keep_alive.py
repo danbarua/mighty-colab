@@ -140,6 +140,27 @@ def test_new_runs_keep_alive_preflight(mock_spawn, mock_common_state):
 
 
 @patch("colab_cli.commands.session.spawn_keep_alive")
+def test_new_preflight_success_records_last_keep_alive_ping(mock_spawn, mock_common_state):
+    """The synchronous pre-flight ping is the first chance to record
+    `last_keep_alive_ping` -- without this, an agent checking `status`
+    right after `new` returns would see `None` for up to 60s until the
+    daemon's own first tick, even though a ping demonstrably already
+    succeeded."""
+    mock_common_state.client.assign.return_value = MagicMock(
+        endpoint="e1", runtime_proxy_info=MagicMock(token="t1", url="u1")
+    )
+    mock_spawn.return_value = 9999
+
+    new(session="test-sess")
+
+    saved_states = [c.args[0] for c in mock_common_state.store.add.call_args_list]
+    assert saved_states[0].last_keep_alive_ping is not None
+    import datetime as dt
+
+    dt.datetime.fromisoformat(saved_states[0].last_keep_alive_ping)
+
+
+@patch("colab_cli.commands.session.spawn_keep_alive")
 def test_new_aborts_on_missing_scope(mock_spawn, mock_common_state):
     """A 403 SCOPE_NOT_PERMITTED on pre-flight should:
     - print actionable remediation,
@@ -208,6 +229,10 @@ def test_new_tolerates_non_scope_preflight_error(mock_spawn, mock_common_state):
     assert mock_common_state.store.add.call_count == 2
     final_state = mock_common_state.store.add.call_args.args[0]
     assert final_state.keep_alive_pid == 9999
+    # The pre-flight ping FAILED here (that's the whole point of this
+    # test) -- last_keep_alive_ping must stay None, not be set on the
+    # strength of a tolerated failure.
+    assert final_state.last_keep_alive_ping is None
 
 
 @patch("colab_cli.common.kill_process")
@@ -278,6 +303,50 @@ def test_keep_alive_exits_on_consecutive_4xx(mock_common_state):
             raise
 
         assert mock_common_state.client.keep_alive_assignment.call_count == 2
+
+
+def test_keep_alive_records_last_ping_on_success(mock_common_state):
+    """A successful ping must persist `last_keep_alive_ping` on the stored
+    `SessionState` -- previously a successful iteration only reset two
+    in-memory counters and left no trace anywhere that the daemon was
+    actually still working."""
+    s = SessionState(name="test", token="t", url="u", endpoint="e1")
+    mock_common_state.store.get.return_value = s
+    mock_common_state.client.keep_alive_assignment.return_value = None
+
+    with (
+        patch("time.sleep", side_effect=InterruptedError),
+        patch("time.time", side_effect=[0, 100]),
+    ):
+        with pytest.raises(InterruptedError):
+            keep_alive("e1", "test")
+
+    assert s.last_keep_alive_ping is not None
+    # Must be a real, parseable ISO8601 instant, not a placeholder.
+    import datetime as dt
+
+    dt.datetime.fromisoformat(s.last_keep_alive_ping)
+    saved = mock_common_state.store.add.call_args.args[0]
+    assert saved.last_keep_alive_ping == s.last_keep_alive_ping
+
+
+def test_keep_alive_does_not_record_last_ping_on_failure(mock_common_state):
+    mock_response = MagicMock()
+    mock_response.status_code = 503
+    error = ColabRequestError("Service Unavailable", MagicMock(), mock_response)
+
+    s = SessionState(name="test", token="t", url="u", endpoint="e1")
+    mock_common_state.store.get.return_value = s
+    mock_common_state.client.keep_alive_assignment.side_effect = error
+
+    with (
+        patch("time.sleep", side_effect=InterruptedError),
+        patch("time.time", side_effect=[0, 100]),
+    ):
+        with pytest.raises(InterruptedError):
+            keep_alive("e1", "test")
+
+    assert s.last_keep_alive_ping is None
 
 
 def test_keep_alive_resets_on_success(mock_common_state):

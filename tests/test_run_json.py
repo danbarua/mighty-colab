@@ -495,6 +495,32 @@ def test_run_json_auth_scope_missing(
     mock_client.unassign.assert_called_once_with("ep-123")
 
 
+def test_run_records_last_keep_alive_ping_on_preflight_success(
+    mock_client,
+    mock_runtime_class,
+    mock_spawn_keep_alive,
+    mock_common_state,
+    assign_response,
+    script_path,
+    _persisted_store,
+):
+    """Mirrors `new`'s pre-flight ping recording -- `run` allocates its own
+    session the same way and shares the same keep-alive preflight call."""
+    mock_common_state.json_output = False
+    mock_client.assign.return_value = assign_response
+    mock_runtime = mock_runtime_class.return_value
+    mock_runtime.execute_code.return_value = [{"output_type": "stream", "text": "hi\n"}]
+
+    result = runner.invoke(app, ["run", str(script_path)])
+    assert result.exit_code == 0, result.output
+
+    saved = _persisted_store["s"]
+    assert saved.last_keep_alive_ping is not None
+    import datetime as dt
+
+    dt.datetime.fromisoformat(saved.last_keep_alive_ping)
+
+
 def test_run_json_malformed_env(mock_common_state, script_path):
     """`_parse_env_vars` is shared with exec/exec-async and predates
     --json -- validated up front, before any VM is allocated."""

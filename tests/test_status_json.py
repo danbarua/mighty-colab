@@ -39,8 +39,11 @@ def test_status_json_single_session_found(mock_common_state, mocker):
     mock_session_state.running = "exec.py"
     mock_session_state.last_execution = ("script.py", None, "2026-08-12 01:00:00")
     mock_session_state.exec_log_path = "/tmp/s1.exec.log"
+    mock_session_state.keep_alive_pid = 4242
+    mock_session_state.last_keep_alive_ping = "2026-08-12T01:00:00+00:00"
     mock_common_state.store.get.return_value = mock_session_state
     mock_common_state.sync_sessions.return_value = ({"s1": mock_session_state}, [])
+    mocker.patch("colab_cli.common.pid_alive", return_value=True)
 
     result = runner.invoke(app, ["status", "-s", "s1"])
     assert result.exit_code == 0, result.output
@@ -60,7 +63,40 @@ def test_status_json_single_session_found(mock_common_state, mocker):
         "last_execution_cell": None,
         "last_execution_time": "2026-08-12 01:00:00",
         "exec_log_path": "/tmp/s1.exec.log",
+        "keep_alive_pid": 4242,
+        "last_keep_alive_ping": "2026-08-12T01:00:00+00:00",
     }
+
+
+def test_status_json_keep_alive_pid_hidden_when_daemon_confirmed_dead(
+    mock_common_state, mocker
+):
+    """A stored `keep_alive_pid` for a daemon that's actually dead must not
+    be reported as though it were still running -- only what `pid_alive()`
+    can currently confirm is surfaced."""
+    mock_session_state = MagicMock()
+    mock_session_state.name = "s1"
+    mock_session_state.endpoint = "e1"
+    mock_session_state.accelerator = "NONE"
+    mock_session_state.variant = "DEFAULT"
+    mock_session_state.running = None
+    mock_session_state.last_execution = None
+    mock_session_state.exec_log_path = None
+    mock_session_state.keep_alive_pid = 4242
+    mock_session_state.last_keep_alive_ping = "2026-08-12T01:00:00+00:00"
+    mock_common_state.store.get.return_value = mock_session_state
+    mock_common_state.sync_sessions.return_value = ({"s1": mock_session_state}, [])
+    mock_common_state.json_output = True
+    mocker.patch("colab_cli.common.pid_alive", return_value=False)
+
+    result = runner.invoke(app, ["status", "-s", "s1"])
+    assert result.exit_code == 0, result.output
+
+    envelope = json.loads(result.stdout)
+    assert "keep_alive_pid" not in envelope["session"]
+    # The last-ping record itself is still an observed fact, independent
+    # of whether the daemon happens to be alive right now.
+    assert envelope["session"]["last_keep_alive_ping"] == "2026-08-12T01:00:00+00:00"
 
 
 def test_status_json_single_session_not_found_is_error_and_exits_nonzero(
@@ -94,6 +130,8 @@ def test_status_json_no_session_flag_lists_all(mock_common_state):
     mock_session_state.running = None
     mock_session_state.last_execution = None
     mock_session_state.exec_log_path = None
+    mock_session_state.keep_alive_pid = None
+    mock_session_state.last_keep_alive_ping = None
     mock_common_state.sync_sessions.return_value = ({"s1": mock_session_state}, [])
 
     result = runner.invoke(app, ["status"])

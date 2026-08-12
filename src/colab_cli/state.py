@@ -34,6 +34,13 @@ class SessionState(BaseModel):
     last_execution: Optional[Tuple[str, Optional[str], str]] = None
     running: Optional[str] = None
     keep_alive_pid: Optional[int] = None
+    # ISO8601 UTC timestamp of the last successful keep-alive ping (the
+    # synchronous pre-flight one, or a later tick of the daemon loop in
+    # session.py's keep_alive()). None until the first one succeeds --
+    # deliberately not an estimated "time until idle timeout": nothing in
+    # this codebase has ever measured Colab's actual idle-reap threshold,
+    # so this field only ever reports what's actually been observed.
+    last_keep_alive_ping: Optional[str] = None
     exec_pid: Optional[int] = None
     exec_log_path: Optional[str] = None
 
