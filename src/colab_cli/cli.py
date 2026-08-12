@@ -13,7 +13,8 @@
 # limitations under the License.
 
 import os
-from typing import Optional
+import sys
+from typing import List, Optional
 
 import click
 import typer
@@ -26,6 +27,34 @@ from colab_cli.auth import AuthProvider
 from colab_cli.common import state, setup_logging
 from colab_cli.commands import session, execution, files, automation, run, ssh, utility
 from colab_cli.commands import adopt, mcp
+
+# The only commands that emit a `--json` envelope. Kept as one literal set
+# (not derived from the Click tree) so both `callback()` (does this
+# invocation's subcommand actually support --json?) and `main()`'s
+# flag-position pre-check (does this look like a global-flag typo?) agree
+# on the exact same list without importing each other's internals.
+JSON_CAPABLE_COMMANDS = {"exec", "run", "exec-async", "log"}
+
+# Every option defined on the root `@app.callback()` below -- i.e. one that
+# must precede the subcommand name, not follow it. Click's per-subcommand
+# parser has no visibility into its parent's options, so one of these
+# appearing after the subcommand fails with a generic "No such option"
+# instead of a hint pointing at the actual mistake (see
+# `_check_global_option_position`).
+GLOBAL_OPTION_NAMES = {
+    "-c",
+    "--client-oauth-config",
+    "--config",
+    "--logtostderr",
+    "--json",
+    "--auth",
+}
+
+# The subset of GLOBAL_OPTION_NAMES that consume a following argv token as
+# their value (as opposed to `--json`/`--logtostderr`, which are boolean
+# flags). Needed so `_check_global_option_position` doesn't mistake e.g.
+# `--config`'s path argument for the subcommand name.
+GLOBAL_OPTIONS_WITH_VALUE = {"-c", "--client-oauth-config", "--config", "--auth"}
 
 _original_echo = typer.echo
 
@@ -128,6 +157,21 @@ def callback(
         # controls the stdlib `logging` module), but both belong on stderr
         # under --json for the same reason -- stdout must carry the JSON only.
         logtostderr = True
+        if ctx.invoked_subcommand not in JSON_CAPABLE_COMMANDS:
+            # `--json` positioned correctly (it parsed) but on a command
+            # that never builds an envelope. Without this, the command
+            # would run "successfully" with its entire normal stdout
+            # silently redirected to stderr by the typer.echo wrapper
+            # below (which only keys off `state.json_output`, not which
+            # command is running) -- indistinguishable from the command
+            # just producing no output. Restore normal stdout behavior and
+            # say so, rather than degrade silently.
+            state.json_output = False
+            typer.echo(
+                f"[colab] --json has no effect on '{ctx.invoked_subcommand}'; "
+                f"supported on: {', '.join(sorted(JSON_CAPABLE_COMMANDS))}.",
+                err=True,
+            )
     state.logtostderr = logtostderr
     state.auth_provider = auth
     setup_logging(logtostderr)
@@ -196,7 +240,52 @@ utility.register(app)
 mcp.register(app)
 
 
+def _check_global_option_position(argv: List[str]) -> None:
+    """Catch the common mistake of putting a global option (`--json`,
+    `--auth`, ...) after the subcommand instead of before it.
+
+    Click parses top-down: global options belong to the root group's own
+    parser, and once it hits the first non-option token (the subcommand
+    name) it hands the rest of `argv` to that subcommand's parser --  which
+    has no knowledge of its parent's options at all. `mighty-colab help
+    --json` therefore fails inside `help`'s own parser with a generic
+    "No such option: --json", which doesn't hint that `--json` is real,
+    just misplaced. Scanning `argv` ourselves, before Click ever sees it,
+    lets us catch exactly that shape of mistake and point at the fix.
+
+    Deliberately narrow: this only recognizes the option *names* this CLI
+    itself defines globally, appearing after the subcommand. It does not
+    attempt to parse `argv` in general -- it only needs to correctly find
+    *where* the subcommand token is (skipping past global options AND, for
+    value-taking ones like `--config PATH`, their value token too, so the
+    path itself is never mistaken for the subcommand name), then treat
+    everything after that as fair game to check. Confirmed no current
+    subcommand redefines any of `GLOBAL_OPTION_NAMES`.
+    """
+    i = 0
+    while i < len(argv) and argv[i].startswith("-"):
+        option_name = argv[i].split("=", 1)[0]
+        if option_name in GLOBAL_OPTIONS_WITH_VALUE and "=" not in argv[i]:
+            i += 2  # this option and its separate value token
+        else:
+            i += 1
+    i += 1  # skip the subcommand token itself, if there was one
+
+    for arg in argv[i:]:
+        if arg.startswith("-"):
+            option_name = arg.split("=", 1)[0]
+            if option_name in GLOBAL_OPTION_NAMES:
+                typer.echo(
+                    f"[colab] '{option_name}' is a global option and must "
+                    f"come before the subcommand, e.g.: "
+                    f"mighty-colab {option_name} <command> [args...]",
+                    err=True,
+                )
+                raise SystemExit(2)
+
+
 def main():
+    _check_global_option_position(sys.argv[1:])
     app()
 
 
