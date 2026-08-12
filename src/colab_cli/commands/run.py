@@ -57,6 +57,7 @@ from colab_cli.common import (
     json_safe_outputs,
 )
 from colab_cli.envelopes import RunEnvelope
+from colab_cli.import_check import check_imports
 from colab_cli.commands.session import (
     _is_scope_error,
     _scope_remediation_message,
@@ -249,6 +250,17 @@ def run_command(
             ),
         ),
     ] = None,
+    no_preflight_check: Annotated[
+        bool,
+        typer.Option(
+            "--no-preflight-check",
+            help=(
+                "Skip the local import check that normally runs before a VM "
+                "is provisioned. Use this if the check produces a false "
+                "positive for a use case it doesn't yet understand."
+            ),
+        ),
+    ] = False,
 ):
     """Run a Python script on a fresh Colab VM
 
@@ -277,6 +289,63 @@ def run_command(
             )
         typer.echo(f"[colab] Script not found: {script}", err=True)
         raise typer.Exit(2)
+
+    # AGENTS.md item 10, continued: `run` transmits only this file's text
+    # (see `_build_script_prelude`) -- a sibling import that only resolves
+    # because the real local repo structure is present would otherwise
+    # only surface as a `ModuleNotFoundError` after a VM is already paid
+    # for. `check_imports` reproduces the same __file__ substitution `run`
+    # performs remotely, so it catches this class of failure here instead.
+    if not no_preflight_check:
+        check_result = check_imports(script)
+        if not check_result.ok:
+            if check_result.new_sys_path_entries:
+                hint = (
+                    "This script adds "
+                    f"{check_result.new_sys_path_entries} to sys.path. "
+                    "`run` only transmits this one file's text -- anything "
+                    "imported from there won't exist on the remote VM, "
+                    "even though it resolved here. Bundle that code into "
+                    "this file, or fork a deployable subset with no "
+                    "repo-relative imports."
+                )
+            elif check_result.missing_module:
+                hint = (
+                    f"Make sure '{check_result.missing_module}' is "
+                    "installed on the remote (`colab install "
+                    f"{check_result.missing_module}`) before running this "
+                    "script."
+                )
+            else:
+                hint = None
+            if state.json_output:
+                emit_json(
+                    build_envelope(
+                        "error",
+                        "run",
+                        exit_code=2,
+                        reason="import_check_failed",
+                        message=check_result.error,
+                        hint=hint,
+                    )
+                )
+            typer.echo(
+                f"[colab] Import check failed: {check_result.error}", err=True
+            )
+            if hint:
+                typer.echo(f"[colab] {hint}", err=True)
+            raise typer.Exit(2)
+        elif check_result.new_sys_path_entries:
+            typer.echo(
+                "[colab] Warning: importing "
+                f"{script!r} added {check_result.new_sys_path_entries} to "
+                "sys.path. `run` only transmits this one file's text -- "
+                "anything imported from there won't exist on the remote "
+                "VM, even though it resolved here. Bundle that code into "
+                "this file, or fork a deployable subset with no "
+                "repo-relative imports.",
+                err=True,
+            )
 
     name = session or f"run-{uuid.uuid4().hex[:6]}"
     variant, accelerator = _resolve_accelerator(gpu, tpu)

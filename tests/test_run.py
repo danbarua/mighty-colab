@@ -16,6 +16,7 @@
 execution that bundles `colab new` + `colab exec` + `colab stop`.
 """
 
+import json
 from unittest.mock import MagicMock
 
 import pytest
@@ -612,6 +613,109 @@ def test_run_malformed_env_errors_before_assign(mock_client, script_path):
     assert result.exit_code != 0
     assert "Expected KEY=VALUE" in result.output
     mock_client.assign.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Import pre-flight -- catches sibling-import failures before a VM is
+# provisioned (see src/colab_cli/import_check.py for the mechanism).
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def sibling_import_script(tmp_path):
+    """Reproduces the real incident this feature exists to catch: a
+    sibling path resolved via __file__ that exists locally but wouldn't
+    exist on the remote VM, where `run` fakes __file__."""
+    sibling_dir = tmp_path / "sibling"
+    sibling_dir.mkdir()
+    (sibling_dir / "sibling_helper.py").write_text("value = 42\n")
+
+    script = tmp_path / "driver.py"
+    script.write_text(
+        "import os\n"
+        "import sys\n"
+        "sys.path.insert(\n"
+        "    0,\n"
+        "    os.path.join(os.path.dirname(os.path.abspath(__file__)), 'sibling'),\n"
+        ")\n"
+        "from sibling_helper import value\n"
+        "print(value)\n"
+    )
+    return script
+
+
+def test_run_import_check_failure_errors_before_assign(mock_client, sibling_import_script):
+    """The pre-flight runs unconditionally (no flag) and must stop `run`
+    before any VM is allocated."""
+    result = runner.invoke(app, ["run", str(sibling_import_script)])
+
+    assert result.exit_code != 0
+    assert "Import check failed" in result.output
+    mock_client.assign.assert_not_called()
+
+
+def test_run_import_check_failure_json_envelope(
+    mock_client, mock_common_state, sibling_import_script
+):
+    mock_common_state.json_output = True
+
+    result = runner.invoke(app, ["run", str(sibling_import_script)])
+
+    assert result.exit_code != 0
+    envelope = json.loads(result.stdout)
+    assert envelope["status"] == "error"
+    assert envelope["reason"] == "import_check_failed"
+    assert "sibling_helper" in envelope["message"]
+    assert "sys.path" in envelope["hint"]
+    mock_client.assign.assert_not_called()
+
+
+def test_run_no_preflight_check_bypasses_the_gate(
+    mock_client,
+    mock_store,
+    mock_runtime_class,
+    mock_spawn_keep_alive,
+    assign_response,
+    sibling_import_script,
+):
+    """The escape hatch must genuinely bypass the check -- `assign` IS
+    called -- not just suppress the error message."""
+    mock_client.assign.return_value = assign_response
+    mock_runtime = mock_runtime_class.return_value
+    mock_runtime.execute_code.return_value = []
+    persisted = {}
+    mock_store.add.side_effect = lambda s: persisted.__setitem__("s", s)
+    mock_store.get.side_effect = lambda name: persisted.get("s")
+
+    result = runner.invoke(
+        app, ["run", "--no-preflight-check", str(sibling_import_script)]
+    )
+
+    assert result.exit_code == 0, result.output
+    mock_client.assign.assert_called_once()
+
+
+def test_run_import_check_passes_for_clean_script(
+    mock_client,
+    mock_store,
+    mock_runtime_class,
+    mock_spawn_keep_alive,
+    assign_response,
+    script_path,
+):
+    """No false positives: a script with no problematic imports proceeds
+    exactly as before this feature existed."""
+    mock_client.assign.return_value = assign_response
+    mock_runtime = mock_runtime_class.return_value
+    mock_runtime.execute_code.return_value = []
+    persisted = {}
+    mock_store.add.side_effect = lambda s: persisted.__setitem__("s", s)
+    mock_store.get.side_effect = lambda name: persisted.get("s")
+
+    result = runner.invoke(app, ["run", str(script_path)])
+
+    assert result.exit_code == 0, result.output
+    mock_client.assign.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
