@@ -23,7 +23,7 @@ from typing import NoReturn, Optional
 
 import typer
 
-from colab_cli.auth import AuthProvider, get_credentials
+from colab_cli.auth import AuthenticationError, AuthProvider, get_credentials
 from colab_cli.client import Client, Prod
 from colab_cli.history import HistoryLogger
 from colab_cli.state import StateStore, SettingsStore
@@ -175,6 +175,7 @@ class State:
         self.client_oauth_config = os.path.expanduser("~/.colab-cli-oauth-config.json")
         self.config_path = None
         self.logtostderr = False
+        self.debug = False
         self.json_output = False
         self.no_strip_ansi = False
         self.auth_provider = AuthProvider.OAUTH2
@@ -236,8 +237,13 @@ class State:
             # But we only trigger client creation (and thus auth) if we have to.
             try:
                 assignments = self.client.list_assignments()
-            except SystemExit:
-                # If auth fails, we just return empty assignments
+            except (SystemExit, AuthenticationError):
+                # If auth fails, we just return empty assignments. Catches
+                # `AuthenticationError` (ADC creds missing/invalid) --
+                # `SystemExit` is kept too even though nothing currently
+                # raises it here, since it's cheap insurance against a
+                # future auth path reverting to the builtin `exit()` this
+                # one replaced.
                 assignments = []
             return self._sessions, assignments
 

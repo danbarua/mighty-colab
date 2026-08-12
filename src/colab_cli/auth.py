@@ -30,6 +30,44 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 logger = logging.getLogger(__name__)
 
 
+class AuthenticationError(RuntimeError):
+    """Raised when credential resolution fails for a reason the user can
+    fix (no valid ADC credentials found, refresh failed, ...).
+
+    Deliberately a plain ``Exception`` subclass, not `SystemExit`/the
+    builtin `exit()` this replaced -- callers (including `--json`'s
+    top-level catch-all in `cli.py` and `State.sync_sessions`'s
+    best-effort probe) need to catch it with ordinary `except` clauses.
+
+    `envelope_reason`/`envelope_hint` are read by `cli.py`'s catch-all to
+    populate a `--json` error envelope's `reason`/`hint` fields without an
+    isinstance ladder there -- any exception can carry them, not just this
+    class, but declaring them here as typed attributes (rather than
+    monkey-patching them onto builtin exception instances) keeps type
+    checking honest.
+    """
+
+    envelope_reason: str = "auth_adc_missing"
+    envelope_hint: Optional[str] = None
+
+
+class AuthConfigNotFoundError(FileNotFoundError):
+    """No OAuth client config at the given path, and no bundled fallback."""
+
+    envelope_reason: str = "auth_config_not_found"
+    envelope_hint: Optional[str] = (
+        "Provide a valid path via -c/--client-oauth-config, or omit it to use "
+        "the bundled default."
+    )
+
+
+class AuthConfigInvalidError(ValueError):
+    """The OAuth client config file exists but isn't valid JSON."""
+
+    envelope_reason: str = "auth_config_invalid"
+    envelope_hint: Optional[str] = None
+
+
 class AuthProvider(str, enum.Enum):
     """Authentication strategy for talking to the Colab backend.
 
@@ -101,7 +139,17 @@ def _get_google_auth_credentials(config_path: str) -> Credentials:
     client_config = None
     if os.path.exists(config_path):
         with open(config_path, "r") as f:
-            client_config = json.load(f)
+            try:
+                client_config = json.load(f)
+            except json.JSONDecodeError as e:
+                err = AuthConfigInvalidError(
+                    f"Client OAuth config at {config_path} is not valid JSON: {e}"
+                )
+                err.envelope_hint = (
+                    "Fix the file's JSON syntax, or provide a different path via "
+                    "-c/--client-oauth-config."
+                )
+                raise err from e
     else:
         # Last resort: try inlined config
         try:
@@ -112,7 +160,7 @@ def _get_google_auth_credentials(config_path: str) -> Credentials:
             logger.debug(f"Failed to load inlined config: {e}")
 
     if not client_config:
-        raise FileNotFoundError(
+        raise AuthConfigNotFoundError(
             f"Client OAuth config not found at {config_path} and no inlined config available. "
             "Please provide a valid path via -c/--client-oauth-config."
         )
@@ -203,16 +251,18 @@ def _get_adc_credentials() -> Credentials:
                 creds = None
 
     if not creds:
-        typer.echo(
-            "No valid default credentials found. To authenticate, run:\n\n"
-            "  gcloud auth application-default login \\\n"
-            "      --scopes=openid,"
+        gcloud_cmd = (
+            "gcloud auth application-default login "
+            "--scopes=openid,"
             "https://www.googleapis.com/auth/cloud-platform,"
             "https://www.googleapis.com/auth/userinfo.email,"
-            "https://www.googleapis.com/auth/colaboratory\n",
-            err=True,
+            "https://www.googleapis.com/auth/colaboratory"
         )
-        exit(1)
+        err = AuthenticationError(
+            f"No valid default credentials found. To authenticate, run:\n\n  {gcloud_cmd}\n"
+        )
+        err.envelope_hint = f"Run: {gcloud_cmd}"
+        raise err
 
     # Some credential subclasses ignore the `scopes=` kwarg in `default()`
     # (e.g. user creds), so re-apply via `with_scopes` when supported.

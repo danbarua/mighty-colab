@@ -27,7 +27,7 @@ import json
 from unittest.mock import MagicMock
 
 from colab_cli.auth import AuthProvider
-from colab_cli.cli import callback, state, _json_aware_echo
+from colab_cli.cli import callback, state, _json_aware_echo, _handle_uncaught_exception
 
 
 def _invoke_callback(invoked_subcommand="version", **overrides):
@@ -268,3 +268,131 @@ def test_check_global_option_position_still_catches_mistake_after_value_taking_o
     # --config's value token correctly.
     envelope = json.loads(capsys.readouterr().out)
     assert envelope["command"] == "log"
+
+
+# ---------------------------------------------------------------------------
+# _handle_uncaught_exception: the top-level catch-all in main() around
+# app(). Click's own Command.main() only catches ClickException/Abort/EPIPE
+# (verified against its source) -- anything else, like auth.py's credential
+# loading failures, escapes uncaught unless this catches it. Exercised
+# directly (not through CliRunner, which never reaches main()'s own
+# try/except -- it invokes commands through Click's main() itself).
+# ---------------------------------------------------------------------------
+
+
+def test_handle_uncaught_exception_reraises_under_debug():
+    state.debug = False
+    try:
+        state.debug = True
+        exc = RuntimeError("boom")
+        try:
+            _handle_uncaught_exception(exc, ["exec"])
+            assert False, "expected the original exception to propagate"
+        except RuntimeError as e:
+            assert e is exc
+    finally:
+        state.debug = False
+
+
+def test_handle_uncaught_exception_plain_text(capsys):
+    state.debug = False
+    state.json_output = False
+    try:
+        _handle_uncaught_exception(RuntimeError("boom"), ["exec"])
+        assert False, "expected SystemExit"
+    except SystemExit as e:
+        assert e.code == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "[colab] Error: boom" in captured.err
+
+
+def test_handle_uncaught_exception_plain_text_includes_hint(capsys):
+    state.debug = False
+    state.json_output = False
+    exc = RuntimeError("boom")
+    exc.envelope_hint = "Try again with --auth adc."
+    try:
+        _handle_uncaught_exception(exc, ["exec"])
+        assert False, "expected SystemExit"
+    except SystemExit:
+        pass
+    assert "[colab] Hint: Try again with --auth adc." in capsys.readouterr().err
+
+
+def test_handle_uncaught_exception_json_envelope(capsys):
+    state.debug = False
+    state.json_output = True
+    try:
+        exc = RuntimeError("boom")
+        exc.envelope_reason = "auth_adc_missing"
+        exc.envelope_hint = "Run: gcloud auth application-default login"
+        try:
+            _handle_uncaught_exception(exc, ["run", "--json"])
+            assert False, "expected SystemExit"
+        except SystemExit as e:
+            assert e.code == 1
+        captured = capsys.readouterr()
+        envelope = json.loads(captured.out)
+        assert envelope["status"] == "error"
+        assert envelope["command"] == "run"
+        assert envelope["exit_code"] == 1
+        assert envelope["reason"] == "auth_adc_missing"
+        assert envelope["message"] == "boom"
+        assert envelope["hint"] == "Run: gcloud auth application-default login"
+        # The envelope is the stdout payload; the supplementary echo must
+        # not corrupt it by sharing that stream.
+        assert "[colab] Error: boom" in captured.err
+    finally:
+        state.json_output = False
+
+
+def test_handle_uncaught_exception_json_from_argv_when_state_not_yet_set(capsys):
+    """`--json` present in raw argv is honored even if `state.json_output`
+    somehow isn't set yet -- same defensive check `_check_global_option_
+    position` uses, for the same reason: a `--json` caller piping into `jq`
+    must never get plain text back."""
+    state.debug = False
+    state.json_output = False
+    try:
+        exc = RuntimeError("boom")
+        try:
+            _handle_uncaught_exception(exc, ["run", "--json"])
+            assert False, "expected SystemExit"
+        except SystemExit:
+            pass
+        envelope = json.loads(capsys.readouterr().out)
+        assert envelope["reason"] == "unhandled_error"
+    finally:
+        state.json_output = False
+
+
+def test_handle_uncaught_exception_defaults_reason_when_exception_has_none(capsys):
+    state.debug = False
+    state.json_output = True
+    try:
+        try:
+            _handle_uncaught_exception(RuntimeError("boom"), ["exec"])
+        except SystemExit:
+            pass
+        envelope = json.loads(capsys.readouterr().out)
+        assert envelope["reason"] == "unhandled_error"
+        assert "hint" not in envelope
+    finally:
+        state.json_output = False
+
+
+def test_handle_uncaught_exception_resolves_command_name_from_argv(capsys):
+    state.debug = False
+    state.json_output = True
+    try:
+        try:
+            _handle_uncaught_exception(
+                RuntimeError("boom"), ["--auth", "adc", "stop", "--json"]
+            )
+        except SystemExit:
+            pass
+        envelope = json.loads(capsys.readouterr().out)
+        assert envelope["command"] == "stop"
+    finally:
+        state.json_output = False

@@ -17,7 +17,7 @@ import json
 from unittest.mock import MagicMock, patch
 import pytest
 import typer
-from colab_cli.auth import AuthProvider
+from colab_cli.auth import AuthenticationError, AuthProvider
 from colab_cli.common import State
 
 
@@ -140,6 +140,24 @@ def test_sync_sessions_avoids_client_if_no_local():
         state.sync_sessions()
         # My implementation DOES call it to return assignments.
         mock_client_prop.list_assignments.assert_called_once()
+
+
+def test_sync_sessions_swallows_authentication_error_when_no_local():
+    """`sync_sessions`'s best-effort probe (used by e.g. `sessions`/`status`
+    on a machine with no prior `colab new` ever run) must keep treating an
+    auth failure as "no remote assignments" rather than crashing -- this
+    was previously only guarded for `SystemExit` (the old builtin `exit()`
+    in `_get_adc_credentials`); now that path raises `AuthenticationError`
+    instead, so the same graceful behavior must extend to it."""
+    state = State()
+    state._store = MagicMock()
+    state._store.list.return_value = {}
+
+    with patch.object(State, "client", new_callable=MagicMock) as mock_client_prop:
+        mock_client_prop.list_assignments.side_effect = AuthenticationError("no adc")
+        sessions, assignments = state.sync_sessions()
+        assert sessions == {}
+        assert assignments == []
 
 
 def test_resolve_session_avoids_sync_if_no_local():

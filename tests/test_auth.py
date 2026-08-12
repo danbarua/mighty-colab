@@ -19,6 +19,8 @@ import pytest
 from colab_cli.auth import (
     REMOTE_REDIRECT_URI,
     TOKEN_CONFIG_PATH,
+    AuthConfigInvalidError,
+    AuthConfigNotFoundError,
     AuthProvider,
     get_credentials,
 )
@@ -55,6 +57,37 @@ def test_get_credentials_no_config(mock_deps):
         match="Client OAuth config not found.*and no inlined config available",
     ):
         get_credentials("missing_config.json", provider=AuthProvider.OAUTH2)
+
+
+def test_get_credentials_no_config_carries_envelope_metadata(mock_deps):
+    """`common.py`'s `client` property / `cli.py`'s top-level catch-all read
+    `envelope_reason`/`envelope_hint` off the exception to build a --json
+    error envelope without an isinstance ladder -- this is the contract
+    they rely on."""
+    try:
+        get_credentials("missing_config.json", provider=AuthProvider.OAUTH2)
+        assert False, "expected AuthConfigNotFoundError"
+    except AuthConfigNotFoundError as e:
+        assert e.envelope_reason == "auth_config_not_found"
+        assert "-c/--client-oauth-config" in e.envelope_hint
+
+
+def test_get_credentials_malformed_config(mock_deps):
+    """A config file that exists but isn't valid JSON must fail with a
+    clean, catchable error -- not an uncaught `json.JSONDecodeError`
+    propagating as a bare traceback under `--json`."""
+    mock_deps["exists"].side_effect = lambda path: path == "bad_config.json"
+
+    m_open = mock_open(read_data="not valid json{{{")
+    with patch("builtins.open", m_open):
+        try:
+            get_credentials("bad_config.json", provider=AuthProvider.OAUTH2)
+            assert False, "expected AuthConfigInvalidError"
+        except AuthConfigInvalidError as e:
+            assert "bad_config.json" in str(e)
+            assert "not valid JSON" in str(e)
+            assert e.envelope_reason == "auth_config_invalid"
+            assert "-c/--client-oauth-config" in e.envelope_hint
 
 
 def test_get_credentials_valid_token(mock_deps):

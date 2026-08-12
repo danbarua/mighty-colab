@@ -71,6 +71,22 @@ below corresponds to a tag of the same name.
   `exec-async` on empty piped stdin (no envelope at all before, now emits
   a bare `status="ok"`); `log --json` without `--tail` (previously sent
   all output to stderr silently, now warns and falls back to plain text).
+- **`--json`:** `auth.py`'s credential-loading errors -- a malformed or
+  missing `-c/--client-oauth-config` file, and missing/invalid ADC
+  credentials under `--auth=adc` -- previously escaped as a raw Python
+  traceback (the OAuth2 config path) or an untyped `exit(1)` (the ADC
+  path), neither of which any `--json`-gating logic ever saw. Both now
+  raise plain, catchable exceptions (`AuthConfigNotFoundError`,
+  `AuthConfigInvalidError`, `AuthenticationError`) carrying a `reason`
+  and, where actionable, a `hint` (e.g. the exact `gcloud auth
+  application-default login --scopes=...` command to run). Caught by a
+  new top-level handler in `cli.py:main()` around the whole `app()`
+  invocation -- the first genuinely central catch-all in this codebase,
+  since Click's own `Command.main()` only catches
+  `ClickException`/`Abort`/EPIPE, letting anything else (not just auth
+  failures) escape uncaught. Emits the same envelope/plain-text shape as
+  every other error path; `--debug` bypasses it and re-raises the full
+  traceback for anyone debugging the CLI itself.
 
 ### Changed
 

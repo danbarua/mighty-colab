@@ -14,7 +14,7 @@
 
 import os
 import sys
-from typing import List, Optional
+from typing import List, NoReturn, Optional
 
 import click
 import typer
@@ -274,6 +274,7 @@ def callback(
                 err=True,
             )
     state.logtostderr = logtostderr
+    state.debug = debug
     state.auth_provider = auth
     setup_logging(logtostderr, debug)
 
@@ -341,6 +342,26 @@ utility.register(app)
 mcp.register(app)
 
 
+def _command_name_from_argv(argv: List[str]) -> str:
+    """Best-effort subcommand name, scanning raw `argv` ourselves.
+
+    Skips past global options (and, for value-taking ones, their separate
+    value token) to find the first non-option token. Shared by
+    `_check_global_option_position` (which runs before Click ever touches
+    `argv`) and `main()`'s top-level catch-all (which runs *after* Click
+    has unwound its context on an exception, so `click.get_current_context()`
+    is no longer available there either).
+    """
+    i = 0
+    while i < len(argv) and argv[i].startswith("-"):
+        option_name = argv[i].split("=", 1)[0]
+        if option_name in GLOBAL_OPTIONS_WITH_VALUE and "=" not in argv[i]:
+            i += 2  # this option and its separate value token
+        else:
+            i += 1
+    return argv[i] if i < len(argv) else "cli"
+
+
 def _check_global_option_position(argv: List[str]) -> None:
     """Catch the common mistake of putting a global option (`--json`,
     `--auth`, ...) after the subcommand instead of before it.
@@ -363,6 +384,7 @@ def _check_global_option_position(argv: List[str]) -> None:
     everything after that as fair game to check. Confirmed no current
     subcommand redefines any of `GLOBAL_OPTION_NAMES`.
     """
+    command_name = _command_name_from_argv(argv)
     i = 0
     while i < len(argv) and argv[i].startswith("-"):
         option_name = argv[i].split("=", 1)[0]
@@ -370,7 +392,6 @@ def _check_global_option_position(argv: List[str]) -> None:
             i += 2  # this option and its separate value token
         else:
             i += 1
-    command_name = argv[i] if i < len(argv) else "cli"
     i += 1  # skip the subcommand token itself, if there was one
 
     for arg in argv[i:]:
@@ -405,9 +426,63 @@ def _check_global_option_position(argv: List[str]) -> None:
                 raise SystemExit(2)
 
 
+def _handle_uncaught_exception(exc: Exception, argv: List[str]) -> NoReturn:
+    """Convert an exception that escaped every command's own error handling
+    into the same `[colab] Error: ...` / JSON-envelope shape every other
+    failure mode in this CLI produces, instead of a raw Python traceback --
+    "like a normal software tool" (AGENT_USABILITY_LEARNINGS.md).
+
+    Click's own `Command.main()` (verified via its source) only catches
+    `ClickException`, `Abort`, and `OSError` with `errno == EPIPE` --
+    anything else (e.g. `auth.py`'s credential-loading failures) propagates
+    all the way out of `app()` uncaught. This is the last chance to catch
+    it before the interpreter does, hence living in `main()` around the
+    `app()` call rather than deeper in any one command.
+
+    By the time an exception reaches here, Click has already unwound its
+    context stack, so `click.get_current_context()` is unavailable --
+    `_command_name_from_argv` recovers the subcommand name from raw `argv`
+    the same way `_check_global_option_position` does, before Click ever
+    touches it.
+
+    `--debug` bypasses this entirely and re-raises, so the full traceback
+    still reaches whoever's diagnosing the CLI itself -- this handler is
+    for end users, not for developing the CLI.
+
+    Split out from `main()` as its own function so it's callable directly
+    from a test with a crafted exception and argv, since Typer's
+    `CliRunner` (used by nearly every other test in this codebase) invokes
+    commands through Click's own `main()` and never reaches this code --
+    only the real installed console script does.
+    """
+    if state.debug:
+        raise exc
+    command_name = _command_name_from_argv(argv)
+    message = str(exc) or type(exc).__name__
+    reason = getattr(exc, "envelope_reason", "unhandled_error")
+    hint = getattr(exc, "envelope_hint", None)
+    if state.json_output or "--json" in argv:
+        extra = {"hint": hint} if hint else {}
+        emit_json(
+            build_envelope(
+                "error", command_name, exit_code=1, reason=reason, message=message, **extra
+            )
+        )
+        typer.echo(f"[colab] Error: {message}", err=True)
+    else:
+        typer.echo(f"[colab] Error: {message}", err=True)
+        if hint:
+            typer.echo(f"[colab] Hint: {hint}", err=True)
+    raise SystemExit(1)
+
+
 def main():
-    _check_global_option_position(sys.argv[1:])
-    app()
+    argv = sys.argv[1:]
+    _check_global_option_position(argv)
+    try:
+        app()
+    except Exception as e:
+        _handle_uncaught_exception(e, argv)
 
 
 if __name__ == "__main__":

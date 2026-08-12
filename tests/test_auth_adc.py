@@ -18,7 +18,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from colab_cli.auth import AuthProvider, get_credentials
+from colab_cli.auth import AuthenticationError, AuthProvider, get_credentials
 
 
 def test_get_credentials_adc_success(mocker):
@@ -54,6 +54,28 @@ def test_get_credentials_adc_default_error_propagates(mocker):
 
     with pytest.raises(DefaultCredentialsError):
         get_credentials(provider=AuthProvider.ADC)
+
+
+def test_get_credentials_adc_missing_raises_authentication_error(mocker):
+    """No valid ADC credentials (and refresh fails/doesn't apply) must raise
+    a plain, catchable `AuthenticationError` -- not call the Python builtin
+    `exit()`, which raised an untyped, unannounced `SystemExit` that neither
+    `--json` nor any normal `except Exception` call site could handle."""
+    mock_creds = MagicMock()
+    mock_creds.valid = False
+    mock_creds.expired = False
+    mock_creds.refresh_token = None
+    mock_creds.refresh.side_effect = Exception("refresh failed")
+    mocker.patch("google.auth.default", return_value=(mock_creds, "proj"))
+    mocker.patch("colab_cli.auth.requests.AuthorizedSession")
+
+    try:
+        get_credentials(provider=AuthProvider.ADC)
+        assert False, "expected AuthenticationError"
+    except AuthenticationError as e:
+        assert "gcloud auth application-default login" in str(e)
+        assert e.envelope_reason == "auth_adc_missing"
+        assert "gcloud auth application-default login" in e.envelope_hint
 
 
 def test_get_credentials_adc_does_not_invoke_other_providers(mocker):

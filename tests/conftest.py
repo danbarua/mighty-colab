@@ -38,6 +38,10 @@ def mock_common_state(mocker):
     # (stripping ANSI) so tests not exercising `--no-strip-ansi` don't
     # silently get raw tracebacks.
     mock_state.no_strip_ansi = False
+    # Same hazard for `debug` -- pin it off so no test's uncaught-exception
+    # path silently re-raises instead of exercising the --json/plain-text
+    # error envelope `_handle_uncaught_exception` builds.
+    mock_state.debug = False
 
     # Global patch for ColabRuntime to prevent network calls
     # We patch it in the modules where it is imported and used
