@@ -916,14 +916,38 @@ billing.
 
 ### 7. Distinguish "already absent" from "could not stop" in `stop`'s exit code
 
-Today both are 0 — which is the right *default* (see above), but it means a
-caller cannot detect a genuine teardown failure without parsing text. We
-parameterised for it: `STOP_ABSENT_RC` names whichever code means absent, so a
-future CLI that separates them needs one variable changed rather than five
-recipes rewritten. `94f27a6` already made a genuine unassign failure exit 1 in
-our fork; upstream's still emits a raw traceback.
+**[✅ Done]** Originally written when both cases exited 0 and a caller could
+only tell them apart by parsing stderr text. That premise is now stale on
+two independent fronts, verified 2026-08-12:
 
-*Traces to:* the `check_teardown` macro;
+- **Plain text, no `--json`:** `94f27a6` (2026-08-05, predates this
+  fork's `--json` work entirely) already made this distinction with no new
+  flag needed — "already absent" still exits 0 (idempotent, unchanged),
+  but a genuine `unassign` failure now exits **1**, with a clean
+  `[colab] Failed to unassign '<name>' -- the VM may still be billing...`
+  message on stderr instead of a raw traceback, and local session state is
+  *kept* (not removed) so the caller can retry. Verified live in
+  `src/colab_cli/commands/session.py`'s `stop()`: the `except Exception as
+  e:` branch's `typer.echo(..., err=True); raise typer.Exit(1)` sits
+  **outside** the `if state.json_output:` guard, so it fires for both
+  modes identically.
+- **`--json`:** the same branch point additionally emits a
+  machine-readable envelope either side of that fork — `status="ok",
+  reason="already_stopped"` (exit 0) for the idempotent case,
+  `status="error", reason="unassign_failed", http_status=<raw backend
+  code>` (exit 1) for a genuine failure — so a caller distinguishes them
+  by `jq -r '.reason'`/`.status`/`.exit_code` with zero text parsing at
+  all, not even the stderr message the plain-text path relies on. Both
+  branches are pinned in `tests/test_stop_json.py`
+  (`test_stop_json_idempotent_not_found_is_ok`,
+  `test_stop_json_unassign_failure_emits_error_envelope`).
+
+`STOP_ABSENT_RC`'s indirection turned out not to be needed — the exit codes
+landed exactly where the variable already pointed (absent = 0, failure = 1),
+and `--json`'s `reason` field gives a stronger signal than a second exit
+code would have anyway.
+
+*Traces to:* `94f27a6`; `tests/test_stop_json.py`; the `check_teardown` macro;
 `test_ladder_absent_session_is_not_treated_as_a_leak` and
 `test_a_distinct_absent_code_can_be_declared_without_rewriting_recipes`.
 
