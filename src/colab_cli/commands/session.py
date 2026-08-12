@@ -343,15 +343,22 @@ def restart_kernel(
 
 def sessions_command():
     """List all active sessions"""
-    from colab_cli.common import state
+    from colab_cli.common import build_envelope, emit_json, state
+    from colab_cli.envelopes import SessionListEnvelope
 
     sessions, assignments = state.sync_sessions()
     if not assignments:
+        if state.json_output:
+            emit_json(
+                build_envelope("ok", "sessions", sessions=[]),
+                model=SessionListEnvelope,
+            )
         typer.echo("[colab] No active sessions found on server.")
         return
 
     # Build endpoint -> local-name lookup so we can lead with the friendly name.
     name_by_endpoint = {s.endpoint: s.name for s in sessions.values()}
+    session_infos = []
     for a in assignments:
         name = name_by_endpoint.get(a.endpoint, "?")
         # `a.variant` is an int-valued AssignmentVariant (DEFAULT=0/GPU=1/TPU=2);
@@ -365,26 +372,57 @@ def sessions_command():
                 variant=a.variant.name,
             )
         )
+        session_infos.append(
+            {
+                "name": name,
+                "endpoint": a.endpoint,
+                "accelerator": a.accelerator.value,
+                "variant": a.variant.name,
+            }
+        )
+
+    if state.json_output:
+        emit_json(
+            build_envelope("ok", "sessions", sessions=session_infos),
+            model=SessionListEnvelope,
+        )
 
 
-def _print_status_for(s: SessionState) -> None:
-    """Print one session's status line plus optional last-execution detail."""
-    status = f"BUSY ({s.running})" if s.running else "IDLE"
+def _print_status_for(s: SessionState) -> dict:
+    """Print one session's status line plus optional last-execution detail.
+
+    Returns the same data as a plain dict (a `SessionInfo`-shaped payload)
+    for `--json` callers, so the human-readable and machine-readable paths
+    can't drift apart from computing the busy/idle string twice.
+    """
+    status_str = f"BUSY ({s.running})" if s.running else "IDLE"
     typer.echo(
         _format_session_line(
             name=s.name,
             endpoint=s.endpoint,
             accelerator=s.accelerator,
             variant=s.variant,
-            status=status,
+            status=status_str,
         )
     )
+    info = {
+        "name": s.name,
+        "endpoint": s.endpoint,
+        "accelerator": s.accelerator,
+        "variant": s.variant,
+        "status": status_str,
+    }
     if s.last_execution:
         exec_file, exec_cell, exec_time = s.last_execution
         cell_str = f" | Cell: {exec_cell}" if exec_cell else ""
         typer.echo(f"  Last Execution: {exec_file}{cell_str} at {exec_time}")
+        info["last_execution_file"] = exec_file
+        info["last_execution_cell"] = exec_cell
+        info["last_execution_time"] = exec_time
     if s.exec_log_path:
         typer.echo(f"  Log: {s.exec_log_path}")
+        info["exec_log_path"] = s.exec_log_path
+    return info
 
 
 def status(
@@ -393,22 +431,53 @@ def status(
     ] = None,
 ):
     """Show session status"""
-    from colab_cli.common import state
+    from colab_cli.common import build_envelope, emit_json, state
+    from colab_cli.envelopes import SessionListEnvelope, StatusSingleEnvelope
 
     local_sessions, _ = state.sync_sessions()
     if session:
         s = state.store.get(session)
         if s:
-            _print_status_for(s)
+            info = _print_status_for(s)
+            if state.json_output:
+                emit_json(
+                    build_envelope("ok", "status", session=info),
+                    model=StatusSingleEnvelope,
+                )
         else:
+            if state.json_output:
+                # `status` is a query command -- per the design principle
+                # already recorded in docs/AGENT_USABILITY_LEARNINGS.md
+                # ("query commands should error on 'not found'; desired-
+                # state commands like `stop` should not"), --json opts
+                # into the correct behavior here, diverging from the
+                # plain-text path's exit-0 no-op below (kept unchanged,
+                # to avoid a breaking change for anything already parsing
+                # today's prose output).
+                emit_json(
+                    build_envelope(
+                        "error", "status", exit_code=1, reason="session_not_found"
+                    )
+                )
+                typer.echo(f"[colab] Session '{session}' not found.", err=True)
+                raise typer.Exit(1)
             typer.echo(f"[colab] Session '{session}' not found.")
         return
 
     if not local_sessions:
+        if state.json_output:
+            emit_json(
+                build_envelope("ok", "status", sessions=[]),
+                model=SessionListEnvelope,
+            )
         typer.echo("[colab] No active sessions.")
         return
-    for s in local_sessions.values():
-        _print_status_for(s)
+    infos = [_print_status_for(s) for s in local_sessions.values()]
+    if state.json_output:
+        emit_json(
+            build_envelope("ok", "status", sessions=infos),
+            model=SessionListEnvelope,
+        )
 
 
 def stop(
@@ -417,7 +486,8 @@ def stop(
     ] = None,
 ):
     """Stop a session"""
-    from colab_cli.common import state
+    from colab_cli.common import build_envelope, emit_json, state
+    from colab_cli.envelopes import StopEnvelope
 
     name = state.resolve_session(session)
     s = state.store.get(name)
@@ -426,7 +496,17 @@ def stop(
         # session) already holds, not that teardown failed. Callers doing
         # unconditional cleanup after a possibly-failed `new`/`exec` must be
         # able to call `stop` without it turning "nothing to clean up" into
-        # a false-positive failure/leak signal.
+        # a false-positive failure/leak signal. --json mirrors that: still
+        # status="ok", not an error -- exactly the example the consumer
+        # agent behind this design gave for what a desired-state command
+        # should report on an absent target.
+        if state.json_output:
+            emit_json(
+                build_envelope(
+                    "ok", "stop", session=name, reason="already_stopped"
+                ),
+                model=StopEnvelope,
+            )
         typer.echo(f"[colab] Session '{name}' not found.")
         return
 
@@ -448,11 +528,23 @@ def stop(
 
     try:
         state.client.unassign(s.endpoint)
-    except Exception:
+    except Exception as e:
         # Distinguish a genuine teardown failure from the idempotent
         # not-found case above: non-zero exit instead of an unhandled
         # traceback, and local state is kept (not removed) so the VM isn't
         # silently forgotten while it may still be billing.
+        if state.json_output:
+            emit_json(
+                build_envelope(
+                    "error",
+                    "stop",
+                    exit_code=1,
+                    reason="unassign_failed",
+                    http_status=get_status_code(e),
+                    session=name,
+                ),
+                model=StopEnvelope,
+            )
         typer.echo(
             f"[colab] Failed to unassign '{name}' -- the VM may still be "
             f"billing. Local tracking was kept so you can retry with "
@@ -464,6 +556,8 @@ def stop(
     state.store.remove(name)
     state.history.log_event(name, "session_terminated", {"reason": "user_requested"})
     typer.echo("[colab] Session terminated.")
+    if state.json_output:
+        emit_json(build_envelope("ok", "stop", session=name), model=StopEnvelope)
 
 
 def spawn_keep_alive(
