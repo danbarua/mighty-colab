@@ -25,9 +25,10 @@ below corresponds to a tag of the same name.
   `log --tail --json` is sidecar-aware and gains `--since-offset` for
   incremental polling. Human-readable `[colab] ...` chatter moves to
   stderr under `--json` (stdout carries the JSON only), and tracebacks are
-  ANSI-stripped by default (raw preserved as `traceback_raw`). Backed by a
-  Pydantic model family (`colab_cli.envelopes`), validated at emission time
-  so a shape mismatch is a loud error, not a silent drift.
+  ANSI-stripped by default (`--no-strip-ansi` keeps the raw escapes in
+  that same field instead -- no separate raw-copy field either way).
+  Backed by a Pydantic model family (`colab_cli.envelopes`), validated at
+  emission time so a shape mismatch is a loud error, not a silent drift.
 - **`--json`:** extended to `new`/`stop`/`sessions`/`status`. `new` returns
   the created session's name/endpoint/variant/accelerator, with reason
   codes for accelerator rejection, missing OAuth scope, and a generic
@@ -41,6 +42,11 @@ below corresponds to a tag of the same name.
 - **`--debug`:** new global flag to opt into `DEBUG`-level logging
   (including third-party library chatter from urllib3,
   `jupyter_kernel_client`, and websocket). Off by default.
+- **`--no-strip-ansi`:** new global flag to keep raw ANSI escapes in
+  traceback text under `--json` (`exec`/`exec-async`/`run`) instead of
+  the default stripped text. Controls the content of the single
+  `traceback` field -- there is no separate raw-copy field to save
+  bandwidth for callers who don't need it.
 - **`--json`:** Click/Typer parse errors (unknown option, missing/extra
   argument) now emit a JSON envelope on stdout instead of a Rich-boxed
   stderr display, so a `| jq` pipeline gets a parseable answer instead of

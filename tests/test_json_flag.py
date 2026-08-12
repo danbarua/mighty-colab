@@ -44,11 +44,24 @@ def _invoke_callback(invoked_subcommand="version", **overrides):
         config=None,
         logtostderr=False,
         debug=False,
+        no_strip_ansi=False,
         json_output=False,
         auth=AuthProvider.OAUTH2,
     )
     kwargs.update(overrides)
     return callback(**kwargs)
+
+
+def test_no_strip_ansi_flag_off_by_default(mocker):
+    mocker.patch("colab_cli.cli.setup_logging")
+    _invoke_callback()
+    assert state.no_strip_ansi is False
+
+
+def test_no_strip_ansi_flag_sets_state(mocker):
+    mocker.patch("colab_cli.cli.setup_logging")
+    _invoke_callback(no_strip_ansi=True)
+    assert state.no_strip_ansi is True
 
 
 def test_json_flag_off_by_default(mocker):

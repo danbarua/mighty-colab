@@ -119,6 +119,73 @@ def test_run_json_success_envelope_shape(
     assert envelope["outputs"] == [{"output_type": "stream", "text": "hi\n"}]
 
 
+def test_run_json_traceback_ansi_stripped_by_default_no_raw_field(
+    mock_client,
+    mock_store,
+    mock_runtime_class,
+    mock_spawn_keep_alive,
+    mock_common_state,
+    assign_response,
+    script_path,
+):
+    """`run` shares `json_safe_outputs` with `exec` but had zero prior
+    coverage of this field -- closing that gap alongside the opt-in flag."""
+    mock_common_state.json_output = True
+    mock_client.assign.return_value = assign_response
+    mock_runtime = mock_runtime_class.return_value
+    raw_tb = ["\x1b[0;31mValueError\x1b[0m\x1b[0;31m:\x1b[0m boom\n"]
+    mock_runtime.execute_code.return_value = [
+        {
+            "output_type": "error",
+            "ename": "ValueError",
+            "evalue": "boom",
+            "traceback": raw_tb,
+        }
+    ]
+
+    result = runner.invoke(app, ["run", str(script_path)])
+    assert result.exit_code == 0, result.output
+
+    envelope = json.loads(result.stdout)
+    assert envelope["status"] == "job_raised"
+    out = envelope["outputs"][0]
+    assert out["traceback"] == ["ValueError: boom\n"]
+    assert "traceback_raw" not in out
+
+
+def test_run_json_no_strip_ansi_keeps_raw_traceback_in_same_field(
+    mock_client,
+    mock_store,
+    mock_runtime_class,
+    mock_spawn_keep_alive,
+    mock_common_state,
+    assign_response,
+    script_path,
+):
+    mock_common_state.json_output = True
+    mock_common_state.no_strip_ansi = True
+    mock_client.assign.return_value = assign_response
+    mock_runtime = mock_runtime_class.return_value
+    raw_tb = ["\x1b[0;31mValueError\x1b[0m\x1b[0;31m:\x1b[0m boom\n"]
+    mock_runtime.execute_code.return_value = [
+        {
+            "output_type": "error",
+            "ename": "ValueError",
+            "evalue": "boom",
+            "traceback": raw_tb,
+        }
+    ]
+
+    result = runner.invoke(app, ["run", str(script_path)])
+    assert result.exit_code == 0, result.output
+
+    envelope = json.loads(result.stdout)
+    assert envelope["status"] == "job_raised"
+    out = envelope["outputs"][0]
+    assert out["traceback"] == raw_tb
+    assert "traceback_raw" not in out
+
+
 def test_run_json_output_hook_suppressed_stdout_carries_json_only(
     mock_client,
     mock_store,

@@ -437,7 +437,9 @@ def exec_command(
                 blocks_json.append(
                     {
                         "code": code,
-                        "outputs": json_safe_outputs(outputs),
+                        "outputs": json_safe_outputs(
+                            outputs, strip=not state.no_strip_ansi
+                        ),
                         "cell_index": i if len(code_blocks) > 1 else None,
                         "cell_id": block.get("id"),
                     }
@@ -506,6 +508,7 @@ def spawn_exec_async(
     auth_provider=None,
     config_path=None,
     json_result_path: Optional[str] = None,
+    no_strip_ansi: bool = False,
 ) -> int:
     """Spawns a detached `exec` process with stdio redirected to a log file.
 
@@ -516,9 +519,10 @@ def spawn_exec_async(
     is where stdout/stderr land -- a file instead of this process's
     terminal -- which lets the caller return immediately.
 
-    Both `auth_provider` and `config_path` are propagated as global flags
-    for the same reason as `spawn_keep_alive`: the detached child re-parses
-    argv from scratch and does not inherit the parent's parsed Typer flags.
+    `auth_provider`, `config_path`, and `no_strip_ansi` are all propagated
+    as global flags for the same reason as `spawn_keep_alive`: the
+    detached child re-parses argv from scratch and does not inherit the
+    parent's parsed Typer flags (AGENTS.md item 16).
 
     `json_result_path`, when set, is passed through as the child's own
     hidden `--json-result-path` -- it writes its `--json` envelope to that
@@ -532,6 +536,8 @@ def spawn_exec_async(
         cmd.append(f"--auth={auth_provider.value}")
     if config_path is not None:
         cmd.extend(["--config", config_path])
+    if no_strip_ansi:
+        cmd.append("--no-strip-ansi")
     cmd.extend(["exec", "-s", session_name, "-f", file])
     if timeout is not None:
         cmd.extend(["--timeout", str(timeout)])
@@ -729,6 +735,7 @@ def exec_async(
         auth_provider=state.auth_provider,
         config_path=state.config_path,
         json_result_path=json_result_path,
+        no_strip_ansi=state.no_strip_ansi,
     )
     s.exec_pid = pid
     state.store.add(s)

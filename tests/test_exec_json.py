@@ -277,7 +277,7 @@ def test_exec_without_json_output_hook_unchanged(
     assert mock_runtime.execute_code.call_args.kwargs["output_hook"] is not None
 
 
-def test_exec_json_traceback_ansi_stripped_with_raw_preserved(
+def test_exec_json_traceback_ansi_stripped_by_default_no_raw_field(
     mock_session, mock_runtime_class, mock_common_state
 ):
     mock_common_state.json_output = True
@@ -299,7 +299,35 @@ def test_exec_json_traceback_ansi_stripped_with_raw_preserved(
     envelope = json.loads(result.stdout)
     out = envelope["blocks"][0]["outputs"][0]
     assert out["traceback"] == ["ValueError: boom\n"]
-    assert out["traceback_raw"] == raw_tb
+    assert "traceback_raw" not in out
+
+
+def test_exec_json_no_strip_ansi_keeps_raw_traceback_in_same_field(
+    mock_session, mock_runtime_class, mock_common_state
+):
+    """`--no-strip-ansi` controls the ONE `traceback` field's content --
+    there is no separate raw-copy field in either mode."""
+    mock_common_state.json_output = True
+    mock_common_state.no_strip_ansi = True
+    mock_common_state.resolve_session.return_value = "s1"
+    mock_runtime = mock_runtime_class.return_value
+    raw_tb = ["\x1b[0;31mValueError\x1b[0m\x1b[0;31m:\x1b[0m boom\n"]
+    mock_runtime.execute_code.return_value = [
+        {
+            "output_type": "error",
+            "ename": "ValueError",
+            "evalue": "boom",
+            "traceback": raw_tb,
+        }
+    ]
+
+    result = runner.invoke(app, ["exec", "-s", "s1"], input="raise ValueError('boom')")
+    assert result.exit_code == 0, result.output
+
+    envelope = json.loads(result.stdout)
+    out = envelope["blocks"][0]["outputs"][0]
+    assert out["traceback"] == raw_tb
+    assert "traceback_raw" not in out
 
 
 def test_exec_json_transport_failure_mid_run_emits_error_envelope(

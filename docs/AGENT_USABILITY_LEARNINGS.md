@@ -768,7 +768,9 @@ process's own exit code (which stays 0 under `--json` whenever the CLI
 itself completed its transaction, even if the remote job raised — see ask
 #6). `exec`/`run` reuse the outputs `runtime.execute_code` already returns
 (nbformat-shaped, per block for `exec`), with tracebacks ANSI-stripped by
-default (`traceback_raw` preserved). `exec-async --json` returns
+default; `--no-strip-ansi` keeps the raw escapes in that same `traceback`
+field instead (no separate raw-copy field either way, to keep the payload
+lean). `exec-async --json` returns
 `{status:"started", pid, log_path}` immediately and writes its terminal
 result to a `<log_path>.json` sidecar file that survives session teardown;
 `log --tail --json --since-offset N` polls it incrementally. Designed
@@ -891,8 +893,9 @@ our fork; upstream's still emits a raw traceback.
 
 **[⏳ Partially addressed — `de060d2`..`896ed77` on `main`, 2026-08-12]** Under
 `--json` specifically: tracebacks are ANSI-stripped by default in the
-envelope (raw original preserved as `traceback_raw`, for anyone who wants
-to re-render it), and stdout carries the JSON only — kernel stdout/stderr
+envelope, with `--no-strip-ansi` available to keep the raw escapes for
+anyone who wants to re-render it (single `traceback` field either way, no
+separate raw-copy field), and stdout carries the JSON only — kernel stdout/stderr
 stays inside `outputs` as nbformat blocks rather than being interleaved
 raw. **Still open:** `--help` and non-`--json` invocations still don't
 respect `NO_COLOR`/`FORCE_COLOR`, and there's still no general

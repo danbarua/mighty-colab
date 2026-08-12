@@ -283,6 +283,62 @@ def test_spawn_exec_async_omits_flag_when_no_json_result_path(mocker):
     assert "--json-result-path" not in cmd
 
 
+def test_spawn_exec_async_forwards_no_strip_ansi(mocker):
+    """The child re-parses argv from scratch and inherits nothing (AGENTS.md
+    item 16) -- --no-strip-ansi needs the same explicit forwarding already
+    used for --auth/--config/--json-result-path."""
+    mock_popen = mocker.patch("colab_cli.commands.execution.subprocess.Popen")
+    mock_popen.return_value.pid = 12345
+    mocker.patch("builtins.open", mocker.mock_open())
+
+    spawn_exec_async(
+        "script.py",
+        "sess1",
+        "/tmp/sess1.exec.log",
+        json_result_path="/tmp/sess1.exec.log.json",
+        no_strip_ansi=True,
+    )
+
+    cmd = mock_popen.call_args.args[0]
+    assert "--no-strip-ansi" in cmd
+
+
+def test_spawn_exec_async_omits_no_strip_ansi_by_default(mocker):
+    mock_popen = mocker.patch("colab_cli.commands.execution.subprocess.Popen")
+    mock_popen.return_value.pid = 12345
+    mocker.patch("builtins.open", mocker.mock_open())
+
+    spawn_exec_async(
+        "script.py",
+        "sess1",
+        "/tmp/sess1.exec.log",
+        json_result_path="/tmp/sess1.exec.log.json",
+    )
+
+    cmd = mock_popen.call_args.args[0]
+    assert "--no-strip-ansi" not in cmd
+
+
+@patch("colab_cli.commands.execution.spawn_exec_async")
+def test_exec_async_propagates_no_strip_ansi_to_spawn(
+    mock_spawn, mock_store, mock_common_state
+):
+    mock_session = MagicMock()
+    mock_session.name = "s1"
+    mock_session.exec_pid = None
+    mock_store.get.return_value = mock_session
+    mock_store.list.return_value = {"s1": mock_session}
+    mock_common_state.resolve_session.return_value = "s1"
+    mock_common_state.history.log_dir = "/tmp/history"
+    mock_common_state.json_output = True
+    mock_common_state.no_strip_ansi = True
+    mock_spawn.return_value = 5555
+
+    exec_async(session="s1", file="script.py")
+
+    assert mock_spawn.call_args.kwargs["no_strip_ansi"] is True
+
+
 @patch("colab_cli.commands.execution.spawn_exec_async")
 def test_exec_async_removes_stale_sidecar_before_restart(
     mock_spawn, mock_store, mock_common_state, tmp_path

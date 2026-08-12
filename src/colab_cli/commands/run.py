@@ -524,7 +524,7 @@ def run_command(
                 "run",
                 exit_code=exit_code,
                 reason=reason,
-                outputs=json_safe_outputs(outputs),
+                outputs=json_safe_outputs(outputs, strip=not state.no_strip_ansi),
             ),
             model=RunEnvelope,
         )

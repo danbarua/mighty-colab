@@ -34,6 +34,10 @@ def mock_common_state(mocker):
     # Pin the real default here; tests that want `--json` behavior override
     # it explicitly.
     mock_state.json_output = False
+    # Same auto-vivify hazard for `no_strip_ansi` -- pin its real default
+    # (stripping ANSI) so tests not exercising `--no-strip-ansi` don't
+    # silently get raw tracebacks.
+    mock_state.no_strip_ansi = False
 
     # Global patch for ColabRuntime to prevent network calls
     # We patch it in the modules where it is imported and used

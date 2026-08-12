@@ -58,6 +58,7 @@ GLOBAL_OPTION_NAMES = {
     "--logtostderr",
     "--debug",
     "--json",
+    "--no-strip-ansi",
     "--auth",
 }
 
@@ -221,6 +222,17 @@ def callback(
             ),
         ),
     ] = False,
+    no_strip_ansi: Annotated[
+        bool,
+        typer.Option(
+            "--no-strip-ansi",
+            help=(
+                "Keep raw ANSI escapes in traceback text instead of "
+                "stripping them. Only applies with --json on "
+                "exec/exec-async/run; ignored otherwise. Off by default."
+            ),
+        ),
+    ] = False,
     auth: Annotated[
         AuthProvider,
         typer.Option(
@@ -239,6 +251,7 @@ def callback(
     state.client_oauth_config = client_oauth_config
     state.config_path = config
     state.json_output = json_output
+    state.no_strip_ansi = no_strip_ansi
     if json_output:
         # Free complementary flip: also route logging.* output to stderr.
         # Unrelated mechanism from the typer.echo redirect above (this one

@@ -144,23 +144,27 @@ def emit_json(envelope: dict, model: Optional[type] = None) -> None:
     typer.echo(json.dumps(envelope), file=sys.stdout)
 
 
-def json_safe_outputs(outputs):
+def json_safe_outputs(outputs, strip: bool = True):
     """Return a copy of `outputs` with each error output's `traceback`
-    ANSI-stripped, original preserved as `traceback_raw`.
+    ANSI-stripped by default -- a single field, not stripped-plus-raw.
 
     IPython ships `traceback` with embedded ANSI SGR escapes as a
     convention, not incidental leakage -- under `--json` we strip by
-    default so the field is directly usable as clean text, while keeping
-    `traceback_raw` for anyone who wants to re-render it in a terminal.
+    default so the field is directly usable as clean text. Pass
+    `strip=False` (wired to `--no-strip-ansi`) to keep the original ANSI
+    bytes in `traceback` instead, for a caller that wants to re-render it
+    in a terminal -- there is no separate raw-copy field either way, only
+    the one `traceback` key with its content controlled by `strip`.
     Does not mutate `outputs` -- callers that also feed the same list to
     `state.history.log_event`/notebook-output-saving need the untouched
     original.
     """
+    if not strip:
+        return outputs
     result = []
     for out in outputs:
         if out.get("output_type") == "error" and out.get("traceback"):
             out = dict(out)
-            out["traceback_raw"] = out["traceback"]
             out["traceback"] = [_strip_ansi(line) for line in out["traceback"]]
         result.append(out)
     return result
@@ -172,6 +176,7 @@ class State:
         self.config_path = None
         self.logtostderr = False
         self.json_output = False
+        self.no_strip_ansi = False
         self.auth_provider = AuthProvider.OAUTH2
         self._client = None
         self._store = None

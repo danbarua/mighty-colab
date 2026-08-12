@@ -23,6 +23,7 @@ from colab_cli.common import (
     _is_systemexit,
     _strip_ansi,
     build_envelope,
+    json_safe_outputs,
 )
 
 
@@ -126,3 +127,44 @@ def test_strip_ansi_removes_sgr_escapes():
 
 def test_strip_ansi_leaves_plain_text_untouched():
     assert _strip_ansi("plain text, no escapes") == "plain text, no escapes"
+
+
+def _error_output(traceback_lines):
+    return {
+        "output_type": "error",
+        "ename": "ValueError",
+        "evalue": "boom",
+        "traceback": traceback_lines,
+    }
+
+
+def test_json_safe_outputs_strips_by_default_and_drops_raw_field():
+    raw_line = "\x1b[0;31mValueError\x1b[0m\x1b[0;31m:\x1b[0m boom\n"
+    result = json_safe_outputs([_error_output([raw_line])])
+
+    out = result[0]
+    assert out["traceback"] == ["ValueError: boom\n"]
+    assert "traceback_raw" not in out
+
+
+def test_json_safe_outputs_strip_false_preserves_ansi_and_still_no_raw_field():
+    raw_line = "\x1b[0;31mValueError\x1b[0m\x1b[0;31m:\x1b[0m boom\n"
+    result = json_safe_outputs([_error_output([raw_line])], strip=False)
+
+    out = result[0]
+    assert out["traceback"] == [raw_line]
+    assert "traceback_raw" not in out
+
+
+def test_json_safe_outputs_does_not_mutate_input():
+    raw_line = "\x1b[0;31mboom\x1b[0m\n"
+    original = [_error_output([raw_line])]
+    json_safe_outputs(original)
+    assert original[0]["traceback"] == [raw_line]
+
+
+def test_json_safe_outputs_non_error_outputs_untouched():
+    stream_output = {"output_type": "stream", "name": "stdout", "text": "hi\n"}
+    result = json_safe_outputs([stream_output])
+    assert result[0] == stream_output
+    assert "traceback_raw" not in result[0]
