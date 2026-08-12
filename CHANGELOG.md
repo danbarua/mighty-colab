@@ -10,6 +10,16 @@ below corresponds to a tag of the same name.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Logging:** `~/.config/colab-cli/colab.log` now rotates (10MB x 5
+  backups, ~60MB max) instead of growing forever. Every CLI invocation
+  is a fresh process that re-opens the same file with a plain
+  `FileHandler` -- no cap, so it grew unbounded across the tool's
+  lifetime (observed: 192MB after about a week of normal use). Since
+  rotation is checked on write rather than at handler creation, an
+  existing oversized file self-heals on the very next invocation.
+
 ## [0.5.0] - 2026-08-12
 
 ### Added
