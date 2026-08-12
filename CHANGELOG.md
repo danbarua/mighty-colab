@@ -25,7 +25,19 @@ below corresponds to a tag of the same name.
   `log --tail --json` is sidecar-aware and gains `--since-offset` for
   incremental polling. Human-readable `[colab] ...` chatter moves to
   stderr under `--json` (stdout carries the JSON only), and tracebacks are
-  ANSI-stripped by default (raw preserved as `traceback_raw`).
+  ANSI-stripped by default (raw preserved as `traceback_raw`). Backed by a
+  Pydantic model family (`colab_cli.envelopes`), validated at emission time
+  so a shape mismatch is a loud error, not a silent drift.
+- **`--json`:** extended to `new`/`stop`/`sessions`/`status`. `new` returns
+  the created session's name/endpoint/variant/accelerator, with reason
+  codes for accelerator rejection, missing OAuth scope, and a generic
+  failure catch-all. `stop` on an absent session stays `status="ok",
+  reason="already_stopped"` (idempotent); `sessions`/`status` (no `-s`)
+  return a session list, empty is `ok` not an error. `status -s <missing>`
+  now errors under `--json` specifically (diverging from the plain-text
+  exit-0 no-op), matching the "query commands should error on not found"
+  principle. Every error envelope also carries `http_status`, the raw
+  backend HTTP status code alongside `reason`.
 
 ## [0.3.0] - 2026-08-11
 
