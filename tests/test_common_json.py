@@ -24,6 +24,7 @@ from colab_cli.common import (
     _strip_ansi,
     build_envelope,
     json_safe_outputs,
+    make_ansi_stream_stripper,
 )
 
 
@@ -127,6 +128,77 @@ def test_strip_ansi_removes_sgr_escapes():
 
 def test_strip_ansi_leaves_plain_text_untouched():
     assert _strip_ansi("plain text, no escapes") == "plain text, no escapes"
+
+
+# ---------------------------------------------------------------------------
+# make_ansi_stream_stripper: `_strip_ansi` applied chunk-by-chunk, for a live
+# stream (`log -f`) where a single escape sequence can be split across two
+# reads. Real captured data (a genuine IPython ValueError traceback from a
+# live mighty-colab exec-async run, 2026-08-12) is used for the whole-input
+# regression check, since it's the format this actually has to survive.
+# ---------------------------------------------------------------------------
+
+_REAL_ANSI_TRACEBACK = (
+    "\x1b[0;31m---------------------------------------------------------------------------"
+    "\x1b[0m\x1b[0;31mValueError\x1b[0m"
+    "                                Traceback (most recent call last)\n"
+    "\x1b[0;32m<mighty-colab-exec:ansi_demo.py>\x1b[0m in \x1b[0;36m<cell line: 0>\x1b[0;34m()\x1b[0m\n"
+    "\x1b[0;31mValueError\x1b[0m: deliberate failure to produce a colored IPython traceback\n"
+)
+
+_REAL_ANSI_TRACEBACK_STRIPPED = (
+    "---------------------------------------------------------------------------"
+    "ValueError"
+    "                                Traceback (most recent call last)\n"
+    "<mighty-colab-exec:ansi_demo.py> in <cell line: 0>()\n"
+    "ValueError: deliberate failure to produce a colored IPython traceback\n"
+)
+
+
+def test_ansi_stream_stripper_matches_strip_ansi_for_a_single_whole_chunk():
+    feed = make_ansi_stream_stripper()
+    assert feed(_REAL_ANSI_TRACEBACK) == _REAL_ANSI_TRACEBACK_STRIPPED
+
+
+def test_ansi_stream_stripper_handles_escape_split_across_chunk_boundary():
+    """The exact failure mode `_strip_ansi` alone can't handle: an escape
+    sequence's opening half arrives in one chunk, its closing letter in the
+    next -- `_strip_ansi` run separately on each half would leave the first
+    half's `\\x1b[0;3` unmatched (no terminating letter yet) and leak it."""
+    raw = "\x1b[0;31mValueError\x1b[0m"
+    split_point = raw.index(";31m") + 2  # inside the escape, before "1m"
+    first, second = raw[:split_point], raw[split_point:]
+    assert first.endswith("\x1b[0;3")  # sanity: genuinely mid-escape
+
+    feed = make_ansi_stream_stripper()
+    out1 = feed(first)
+    out2 = feed(second)
+    assert out1 + out2 == "ValueError"
+    # And no raw escape bytes leaked into either piece.
+    assert "\x1b" not in out1
+    assert "\x1b" not in out2
+
+
+def test_ansi_stream_stripper_handles_escape_split_one_byte_at_a_time():
+    feed = make_ansi_stream_stripper()
+    out = "".join(feed(ch) for ch in _REAL_ANSI_TRACEBACK)
+    assert out == _REAL_ANSI_TRACEBACK_STRIPPED
+
+
+def test_ansi_stream_stripper_flushes_a_genuinely_truncated_escape_at_eof():
+    """A stream that ends mid-escape (process killed mid-write) must not
+    silently swallow those bytes forever -- `final=True` flushes whatever's
+    pending as plain text instead of holding it."""
+    feed = make_ansi_stream_stripper()
+    out1 = feed("hello \x1b[0;3")
+    assert out1 == "hello "
+    out2 = feed("", final=True)
+    assert out2 == "\x1b[0;3"
+
+
+def test_ansi_stream_stripper_plain_text_across_chunks_is_untouched():
+    feed = make_ansi_stream_stripper()
+    assert feed("no ") + feed("escapes ") + feed("here") == "no escapes here"
 
 
 def _error_output(traceback_lines):

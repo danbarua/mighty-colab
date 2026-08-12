@@ -227,9 +227,10 @@ def callback(
         typer.Option(
             "--no-strip-ansi",
             help=(
-                "Keep raw ANSI escapes in traceback text instead of "
-                "stripping them. Only applies with --json on "
-                "exec/exec-async/run; ignored otherwise. Off by default."
+                "Keep raw ANSI escapes instead of stripping them: in "
+                "traceback text under --json on exec/exec-async/run, and "
+                "in log --tail/--follow's output (plain text or --json's "
+                "content field). Off by default."
             ),
         ),
     ] = False,

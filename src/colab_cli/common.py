@@ -45,6 +45,46 @@ def _strip_ansi(text: str) -> str:
     return _ANSI_RE.sub("", text)
 
 
+# Matches a truncated ANSI escape sitting at the very end of a string --
+# `\x1b`, or `\x1b[` optionally followed by digits/semicolons, with no
+# terminating letter yet. A complete sequence (which always ends in a
+# letter) never matches this, since the trailing `[0-9;]*` must reach the
+# end of the string with nothing after it.
+_ANSI_PARTIAL_TAIL_RE = re.compile(r"\x1b(\[[0-9;]*)?$")
+
+
+def make_ansi_stream_stripper():
+    """Return a `feed(chunk, final=False) -> str` closure for stripping
+    ANSI escapes from text arriving in arbitrary-sized pieces (e.g. `log
+    -f`'s live tail), where a single escape sequence can be split across
+    two reads.
+
+    `_strip_ansi` alone is only safe on a complete string: fed one chunk
+    at a time, a sequence like `\\x1b[0;31m` split as `...\\x1b[0;3` /
+    `1m...` would leave the first half's `\\x1b[0;3` unmatched (no
+    terminating letter in that chunk) and leak straight into the output.
+    This buffers any such trailing partial and prepends it to the next
+    chunk before stripping again; `final=True` (end of stream) flushes
+    whatever's buffered as plain text instead of holding it forever.
+    """
+    pending = ""
+
+    def feed(chunk: str, final: bool = False) -> str:
+        nonlocal pending
+        combined = pending + chunk
+        if final:
+            pending = ""
+            return _strip_ansi(combined)
+        m = _ANSI_PARTIAL_TAIL_RE.search(combined)
+        if m:
+            pending = combined[m.start() :]
+            return _strip_ansi(combined[: m.start()])
+        pending = ""
+        return _strip_ansi(combined)
+
+    return feed
+
+
 def _is_systemexit(out) -> bool:
     """True iff this output is a `raise SystemExit(...)` (a.k.a. `sys.exit`)."""
     return out.get("output_type") == "error" and out.get("ename") == "SystemExit"

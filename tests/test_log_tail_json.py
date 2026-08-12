@@ -135,6 +135,68 @@ def test_log_tail_json_since_offset_returns_only_new_bytes(mocker, tmp_path, cap
     assert envelope["next_offset"] == len("first\nsecond\n")
 
 
+# --- ANSI stripping in `content`: default on, --no-strip-ansi keeps raw ---
+
+_ANSI_TRACEBACK = "\x1b[0;31mValueError\x1b[0m: boom\n"
+_ANSI_TRACEBACK_STRIPPED = "ValueError: boom\n"
+
+
+def test_log_tail_json_content_strips_ansi_by_default(mocker, tmp_path, capsys):
+    log_file = tmp_path / "s1.exec.log"
+    log_file.write_text(_ANSI_TRACEBACK)
+
+    mock_state = _mock_state(mocker, no_strip_ansi=False)
+    mock_state.store.get.return_value = SessionState(
+        name="s1", token="t", url="u", endpoint="e", exec_pid=999,
+        exec_log_path=str(log_file),
+    )
+    mocker.patch("colab_cli.commands.utility.pid_alive", return_value=True)
+
+    log(session="s1", tail=True)
+
+    envelope = json.loads(capsys.readouterr().out)
+    assert envelope["content"] == _ANSI_TRACEBACK_STRIPPED
+
+
+def test_log_tail_json_content_no_strip_ansi_keeps_raw(mocker, tmp_path, capsys):
+    log_file = tmp_path / "s1.exec.log"
+    log_file.write_text(_ANSI_TRACEBACK)
+
+    mock_state = _mock_state(mocker, no_strip_ansi=True)
+    mock_state.store.get.return_value = SessionState(
+        name="s1", token="t", url="u", endpoint="e", exec_pid=999,
+        exec_log_path=str(log_file),
+    )
+    mocker.patch("colab_cli.commands.utility.pid_alive", return_value=True)
+
+    log(session="s1", tail=True)
+
+    envelope = json.loads(capsys.readouterr().out)
+    assert envelope["content"] == _ANSI_TRACEBACK
+
+
+def test_log_tail_json_next_offset_unaffected_by_ansi_stripping(mocker, tmp_path, capsys):
+    """`next_offset` is a byte position in the *raw* file for the next
+    poll's own seek -- it must reflect the unstripped byte count read, not
+    the (shorter) stripped text's length, or a caller's next
+    --since-offset poll would re-read bytes it already saw."""
+    log_file = tmp_path / "s1.exec.log"
+    log_file.write_text(_ANSI_TRACEBACK)
+
+    mock_state = _mock_state(mocker, no_strip_ansi=False)
+    mock_state.store.get.return_value = SessionState(
+        name="s1", token="t", url="u", endpoint="e", exec_pid=999,
+        exec_log_path=str(log_file),
+    )
+    mocker.patch("colab_cli.commands.utility.pid_alive", return_value=True)
+
+    log(session="s1", tail=True)
+
+    envelope = json.loads(capsys.readouterr().out)
+    assert envelope["content"] == _ANSI_TRACEBACK_STRIPPED
+    assert envelope["next_offset"] == len(_ANSI_TRACEBACK.encode("utf-8"))
+
+
 def test_log_tail_json_resolves_default_path_after_session_removed(
     mocker, tmp_path, capsys
 ):

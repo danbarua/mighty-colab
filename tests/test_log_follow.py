@@ -208,6 +208,143 @@ def test_log_tail_errors_when_file_missing(mocker, tmp_path):
     assert excinfo.value.exit_code == 1
 
 
+# --- ANSI stripping: default on, --no-strip-ansi keeps raw --------------
+
+
+_ANSI_TRACEBACK = "\x1b[0;31mValueError\x1b[0m: boom\n"
+_ANSI_TRACEBACK_STRIPPED = "ValueError: boom\n"
+
+
+def test_log_tail_strips_ansi_by_default(mocker, tmp_path, capsys):
+    from colab_cli.commands.utility import log
+
+    log_file = tmp_path / "s1.exec.log"
+    log_file.write_text(_ANSI_TRACEBACK)
+
+    mock_state = mocker.patch("colab_cli.commands.utility.state")
+    mock_state.json_output = False
+    mock_state.no_strip_ansi = False
+    mock_state.store.get.return_value = SessionState(
+        name="s1", token="t", url="u", endpoint="e", exec_pid=999,
+        exec_log_path=str(log_file),
+    )
+
+    log(session="s1", tail=True)
+
+    assert capsys.readouterr().out == _ANSI_TRACEBACK_STRIPPED
+
+
+def test_log_tail_no_strip_ansi_keeps_raw(mocker, tmp_path, capsys):
+    from colab_cli.commands.utility import log
+
+    log_file = tmp_path / "s1.exec.log"
+    log_file.write_text(_ANSI_TRACEBACK)
+
+    mock_state = mocker.patch("colab_cli.commands.utility.state")
+    mock_state.json_output = False
+    mock_state.no_strip_ansi = True
+    mock_state.store.get.return_value = SessionState(
+        name="s1", token="t", url="u", endpoint="e", exec_pid=999,
+        exec_log_path=str(log_file),
+    )
+
+    log(session="s1", tail=True)
+
+    assert capsys.readouterr().out == _ANSI_TRACEBACK
+
+
+def test_log_follow_strips_ansi_by_default(mocker, tmp_path, capsys):
+    from colab_cli.commands.utility import log
+
+    log_file = tmp_path / "s1.exec.log"
+    log_file.write_text(_ANSI_TRACEBACK)
+
+    mock_state = mocker.patch("colab_cli.commands.utility.state")
+    mock_state.json_output = False
+    mock_state.no_strip_ansi = False
+    mock_state.store.get.return_value = SessionState(
+        name="s1", token="t", url="u", endpoint="e", exec_pid=999,
+        exec_log_path=str(log_file),
+    )
+    mocker.patch(
+        "colab_cli.commands.utility.pid_alive", side_effect=[True, False, False]
+    )
+    mocker.patch("time.sleep")
+
+    log(session="s1", follow=True)
+
+    assert capsys.readouterr().out == _ANSI_TRACEBACK_STRIPPED
+
+
+def test_log_follow_no_strip_ansi_keeps_raw(mocker, tmp_path, capsys):
+    from colab_cli.commands.utility import log
+
+    log_file = tmp_path / "s1.exec.log"
+    log_file.write_text(_ANSI_TRACEBACK)
+
+    mock_state = mocker.patch("colab_cli.commands.utility.state")
+    mock_state.json_output = False
+    mock_state.no_strip_ansi = True
+    mock_state.store.get.return_value = SessionState(
+        name="s1", token="t", url="u", endpoint="e", exec_pid=999,
+        exec_log_path=str(log_file),
+    )
+    mocker.patch(
+        "colab_cli.commands.utility.pid_alive", side_effect=[True, False, False]
+    )
+    mocker.patch("time.sleep")
+
+    log(session="s1", follow=True)
+
+    assert capsys.readouterr().out == _ANSI_TRACEBACK
+
+
+def test_log_follow_strips_ansi_split_across_a_poll_boundary(mocker, tmp_path, capsys):
+    """Regression test for the exact failure mode plain `_strip_ansi` can't
+    handle: an escape sequence's opening half is on disk at the first
+    `f.read()`, its closing letter is appended before the second -- the
+    file handle's own position tracking means each poll's `read()` only
+    picks up what's newly available, same as `test_log_follow_picks_up_
+    appended_content`'s pattern, just split mid-escape instead of
+    mid-line."""
+    from colab_cli.commands.utility import log
+
+    log_file = tmp_path / "s1.exec.log"
+    split_point = _ANSI_TRACEBACK.index(";31m") + 2  # mid-escape
+    first_half, second_half = (
+        _ANSI_TRACEBACK[:split_point],
+        _ANSI_TRACEBACK[split_point:],
+    )
+    log_file.write_text(first_half)
+
+    mock_state = mocker.patch("colab_cli.commands.utility.state")
+    mock_state.json_output = False
+    mock_state.no_strip_ansi = False
+    mock_state.store.get.return_value = SessionState(
+        name="s1", token="t", url="u", endpoint="e", exec_pid=999,
+        exec_log_path=str(log_file),
+    )
+
+    calls = {"n": 0}
+
+    def fake_sleep(_):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            with open(log_file, "a") as f:
+                f.write(second_half)
+
+    mocker.patch(
+        "colab_cli.commands.utility.pid_alive", side_effect=[True, True, False, False]
+    )
+    mocker.patch("time.sleep", side_effect=fake_sleep)
+
+    log(session="s1", follow=True)
+
+    out = capsys.readouterr().out
+    assert out == _ANSI_TRACEBACK_STRIPPED
+    assert "\x1b" not in out
+
+
 def test_log_tail_works_after_job_has_finished(mocker, tmp_path, capsys):
     """No pid liveness requirement -- a finished job's log is just as
     readable as a running one's."""

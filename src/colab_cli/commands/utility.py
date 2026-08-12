@@ -23,7 +23,14 @@ from typing_extensions import Annotated
 
 from colab_cli import auto_update
 from colab_cli.auto_update import get_app_version
-from colab_cli.common import build_envelope, emit_json, pid_alive, state
+from colab_cli.common import (
+    build_envelope,
+    emit_json,
+    make_ansi_stream_stripper,
+    pid_alive,
+    state,
+)
+from colab_cli.common import _strip_ansi
 from colab_cli.envelopes import EnvelopeBase, ExecEnvelope
 
 # Poll interval while `log -f` waits for more bytes to be appended to a
@@ -38,7 +45,20 @@ def _follow_log(path: str, pid: Optional[int]):
     whole `exec` call returns), this file is written -- and flushed -- in
     real time by the background worker's own stdout/stderr, since it's
     just the redirected file descriptors of the running `exec` process.
+
+    IPython's colored traceback formatter embeds raw ANSI SGR escapes in
+    that stream -- stripped by default (`--no-strip-ansi` keeps them, same
+    flag `exec`/`run --json` already use) via a streaming stripper rather
+    than plain `_strip_ansi`, since a single escape sequence can land split
+    across two `f.read()` calls here and `_strip_ansi` alone is only
+    correct on a complete string.
     """
+    strip = make_ansi_stream_stripper() if not state.no_strip_ansi else None
+
+    def emit(chunk: str, final: bool = False):
+        sys.stdout.write(strip(chunk, final=final) if strip else chunk)
+        sys.stdout.flush()
+
     while not os.path.exists(path) and pid_alive(pid):
         time.sleep(FOLLOW_POLL_SECONDS)
 
@@ -50,16 +70,16 @@ def _follow_log(path: str, pid: Optional[int]):
         while True:
             chunk = f.read()
             if chunk:
-                sys.stdout.write(chunk)
-                sys.stdout.flush()
+                emit(chunk)
                 continue
             if not pid_alive(pid):
                 # One last read in case the process wrote and exited
                 # between our last read and the liveness check above.
                 chunk = f.read()
-                if chunk:
-                    sys.stdout.write(chunk)
-                    sys.stdout.flush()
+                if chunk or strip:
+                    # `final=True` flushes any escape left dangling from
+                    # the previous read even when this last read is empty.
+                    emit(chunk, final=True)
                 return
             time.sleep(FOLLOW_POLL_SECONDS)
 
@@ -69,6 +89,10 @@ def _tail_log_once(path: str, lines: Optional[int]):
     liveness check. Unlike `_follow_log`, this never blocks: a still-running
     job's partial output and a finished job's complete output are read the
     same way. Safe to expose over MCP for exactly that reason.
+
+    ANSI-stripped by default (`--no-strip-ansi` keeps them), matching
+    `_follow_log`. A single whole-file read has no chunk-boundary concern,
+    so plain `_strip_ansi` is enough here.
     """
     if not os.path.exists(path):
         typer.echo(f"[colab] Log file '{path}' not found.", err=True)
@@ -76,6 +100,9 @@ def _tail_log_once(path: str, lines: Optional[int]):
 
     with open(path, "r") as f:
         content = f.read()
+
+    if not state.no_strip_ansi:
+        content = _strip_ansi(content)
 
     if lines:
         content = "\n".join(content.splitlines()[-lines:])
@@ -105,6 +132,15 @@ def _tail_log_json(log_path: str, pid: Optional[int], since_offset: Optional[int
         -- mighty-colab can't tell *why* the worker ended without a result
         (killed, crashed, OOM, a caller's own `stop`), so it reports one
         honest code rather than guessing.
+
+    `content` is ANSI-stripped by default (`--no-strip-ansi` keeps it raw),
+    matching `_follow_log`/`_tail_log_once`. Unlike those, this can't use
+    `make_ansi_stream_stripper` -- each `--since-offset` poll is a separate
+    CLI invocation with no shared state to buffer a trailing partial escape
+    across calls. An escape sequence split exactly on an offset boundary
+    between two polls won't be cleanly stripped on either side. Narrow (a
+    handful of bytes, at an arbitrary poll cadence) and strictly better
+    than today's fully-raw baseline either way.
     """
     sidecar_path = f"{log_path}.json"
     if not os.path.exists(log_path) and not os.path.exists(sidecar_path):
@@ -119,7 +155,12 @@ def _tail_log_json(log_path: str, pid: Optional[int], since_offset: Optional[int
             f.seek(offset)
             new_bytes = f.read()
         content = new_bytes.decode("utf-8", errors="replace")
+        # `next_offset` is a byte position in the *raw* file for the next
+        # poll's own `f.seek(offset)` -- computed from `new_bytes` before
+        # any ANSI stripping below, which must never perturb it.
         next_offset = offset + len(new_bytes)
+        if not state.no_strip_ansi:
+            content = _strip_ansi(content)
 
     if os.path.exists(sidecar_path):
         try:

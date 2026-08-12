@@ -10,6 +10,17 @@ below corresponds to a tag of the same name.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`log`:** `--tail`/`--follow` now ANSI-strip by default, matching
+  `exec`/`run --json`'s existing convention (`--no-strip-ansi` keeps the
+  raw escapes). Previously the raw exec-async output log -- colored
+  IPython tracebacks included -- was written verbatim, forcing a manual
+  `sed 's/\x1b\[[0-9;]*m//g'` workaround to get readable text. `-f`'s live
+  streaming needed a new chunk-boundary-safe stripper (`common.py`'s
+  `make_ansi_stream_stripper`), since a single escape sequence can arrive
+  split across two reads.
+
 ## [0.4.1] - 2026-08-12
 
 ### Fixed
