@@ -760,7 +760,7 @@ independently either.
 
 ### 2. A machine-readable execution result
 
-**[✅ Done — `feature/structured-outputs`, 2026-08-12]** `--json` on
+**[✅ Done — `de060d2`..`896ed77` on `main`, 2026-08-12]** `--json` on
 `exec`/`run`/`exec-async`/`log --tail`. Each envelope carries
 `schema_version`/`cli_version`, a `status` (`"ok"` / `"job_raised"` /
 `"error"`) and `exit_code` for the *remote job*, separate from the CLI
@@ -773,15 +773,13 @@ default (`traceback_raw` preserved). `exec-async --json` returns
 result to a `<log_path>.json` sidecar file that survives session teardown;
 `log --tail --json --since-offset N` polls it incrementally. Designed
 against real feedback from the consumer agent behind this ask, plus a
-second review pass — see the design plan referenced in the
-`feature/structured-outputs` branch history for the full rationale,
-including the exact `SystemExit(0)` incident described below. Verified
-against extensive mocked unit tests and one offline real-wiring smoke test
-(`mighty-colab --json log -s no-such-session --tail`, no session/billing
-involved); the full live-backend integration script
-(`integration/repro_json_output/`) is written but **not yet run against a
-real Colab session** as of this entry — pending that run before this is
-fully confirmed end to end.
+second review pass — see the `de060d2`..`896ed77` commit history on `main`
+for the full rationale, including the exact `SystemExit(0)` incident
+described below. Verified against extensive mocked unit tests, and live
+against a real Colab session end to end: `integration/repro_json_output/`
+and `integration/repro_json_jq_lifecycle/` (a full new→exec→exec-async→
+log--tail→status→sessions→stop lifecycle composed entirely with `jq`
+against real `--json` output) both pass clean against a real backend.
 
 *Traces to:* `679c0b6`; the sentinel pattern
 (`bonsai-2026/Makefile`, the `grep -q *_OK` lines);
@@ -842,18 +840,24 @@ mechanism.
 
 ### 6. A written, versioned exit-code and stream contract
 
-**[✅ Done, scoped to `--json` — `feature/structured-outputs`, 2026-08-12]**
-Under `--json` (`exec`/`run`/`exec-async`/`log --tail`), the contract is now
-explicit and versioned rather than something to derive by reading source:
-`schema_version`/`cli_version` in every envelope; the CLI process's own exit
-code stays 0 whenever it mechanically completed its transaction — even if
-the remote job raised — with the job's own outcome carried separately as
-`status`/`exit_code`/`reason` in the body; `[colab] ...` chatter always on
-stderr (a `typer.echo` redirect installed once, globally), JSON only on
-stdout. **Still open:** the broader case-by-case survey below (which
-*non*-`--json` commands treat "not found" as an error vs. an idempotent
-no-op) is unchanged — that's a wider audit across the whole CLI, not
-something `--json` alone resolves.
+**[✅ Done, scoped to `--json` — `de060d2`..`896ed77` on `main`,
+2026-08-12]** Under `--json` (`exec`/`run`/`exec-async`/`log --tail`, plus
+`new`/`stop`/`sessions`/`status`), the contract is now explicit and
+versioned rather than something to derive by reading source:
+`schema_version`/`cli_version`/`command`/`http_status` in every envelope;
+the CLI process's own exit code stays 0 whenever it mechanically completed
+its transaction — even if the remote job raised — with the job's own
+outcome carried separately as `status`/`exit_code`/`reason` in the body;
+`[colab] ...` chatter always on stderr (a `typer.echo` redirect installed
+once, globally), JSON only on stdout. The envelope shape is also now
+Pydantic-backed (`src/colab_cli/envelopes.py`) and strictly validated at
+emission, not just documented convention. `status --json -s <missing>` is
+the one place this ask's "query commands should error on not found"
+position was actually applied under `--json` (diverges from the
+unconditional exit-0 plain-text path below it). **Still open:** the
+broader case-by-case survey below (which *non*-`--json` commands treat
+"not found" as an error vs. an idempotent no-op) is unchanged — that's a
+wider audit across the whole CLI, not something `--json` alone resolves.
 
 Which commands treat "not found" as an error and which treat it as an idempotent
 no-op; which write to stdout and which to stderr; what changes count as
@@ -885,7 +889,7 @@ our fork; upstream's still emits a raw traceback.
 
 ### 8. Non-TTY output hygiene, extended
 
-**[⏳ Partially addressed — `feature/structured-outputs`, 2026-08-12]** Under
+**[⏳ Partially addressed — `de060d2`..`896ed77` on `main`, 2026-08-12]** Under
 `--json` specifically: tracebacks are ANSI-stripped by default in the
 envelope (raw original preserved as `traceback_raw`, for anyone who wants
 to re-render it), and stdout carries the JSON only — kernel stdout/stderr
