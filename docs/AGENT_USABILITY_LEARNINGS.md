@@ -25,7 +25,7 @@ information *typographically* rather than *structurally* became a real failure
 with a real bill attached.
 
 We forked it and fixed sixteen defects in the upstream code — most of them
-agent-relevant in a way a human user would rarely notice — plus five in our own
+agent-relevant in a way a human user would rarely notice — plus seven in our own
 additions. Fourteen land as a commit literally named `test: reproduce <the bug>`
 followed by the fix. We added three commands the upstream doesn't have. And on
 the consumer side we ended up writing an executable specification of what an
@@ -436,6 +436,8 @@ touched other regions. Both halves are upstream's.
 | `adopt NAME` silently repointed a name already tracking a different endpoint; re-adopt didn't refresh the ~hourly proxy token | `39216ac` | — | ours |
 | MCP `version` tool description didn't match the CLI's own output format; test isolation | `2a380e0` | — | ours |
 | MCP tool output carried raw ANSI escape codes from IPython's colored traceback formatter | `6b125da` | — | our wrapper; the ANSI comes from IPython. Stripped only at the MCP boundary so a human running `exec` directly still gets colors. |
+| **[✅ Solved]** `auth.py`'s credential-loading errors had zero `--json` awareness — a malformed `-c/--client-oauth-config` file raised a bare, uncaught Python traceback; missing/invalid ADC credentials called the Python **builtin** `exit()`, an untyped `SystemExit` no `except Exception` call site could catch | `7421e7c` | `tests/test_auth.py`, `tests/test_auth_adc.py` | bug in our own `--json` feature's coverage, not in upstream's `auth.py` logic itself. Generalized into `cli.py:main()`'s new top-level catch-all — the first genuinely central exception handler in the codebase, since Click's own `Command.main()` only catches `ClickException`/`Abort`/EPIPE |
+| **[✅ Solved]** the daily update-check banner could leak onto `exec`'s stdout under `--json`/the hidden `--json-result-path` (used only by `exec-async`'s spawned child), corrupting a `jq` consumer's input | `406c6cb`, corrected `c4aa2c3` | `tests/test_json_flag.py`, `tests/test_exec_json.py` | the first fix detected the hidden flag by scanning the real process `sys.argv`, which works for a real invocation but not under `CliRunner` (or CI) — the fix silently did nothing under test, and the banner leaked into `v0.4.0`'s own CI run. Caught by CI itself; corrected by moving the check into `exec_command`'s own body, gated on tests that fail deterministically (mocking the check to raise) instead of depending on real network/cache state |
 
 ---
 
@@ -783,6 +785,31 @@ and `integration/repro_json_jq_lifecycle/` (a full new→exec→exec-async→
 log--tail→status→sessions→stop lifecycle composed entirely with `jq`
 against real `--json` output) both pass clean against a real backend.
 
+**[✅ Further hardened — `b4bc47a`..`c4aa2c3` on `main`, 2026-08-12,
+released `v0.3.0`→`v0.4.1`]** Extended to `new`/`stop`/`sessions`/`status`,
+each envelope now also carrying `http_status` (the raw backend HTTP status
+alongside `reason`). Click/Typer parse errors (unknown option, missing/
+extra argument) now emit a JSON envelope instead of a Rich-boxed stderr
+panel — applies to every subcommand, not just the `--json`-capable ones.
+A full audit closed five more shared-helper gaps that predated `--json`
+and had no gating logic of their own: `resolve_session`'s two failure
+paths, `_parse_env_vars`, `run`'s duplicated copies of `new`'s
+accelerator-rejection/scope-preflight handling, `exec-async` on empty
+piped stdin, and `log --json` without `--tail`. A follow-up audit
+specifically of `-c/--client-oauth-config` + `--json` found `auth.py`'s
+credential-loading errors had **zero** `--json` awareness at all — see
+the new row in "Defects in our own additions" below — fixed and
+generalized into a top-level uncaught-exception catch-all in `cli.py:
+main()`, so *any* exception escaping a command body, not just auth's,
+now renders as an envelope (or a plain `[colab] Error: ...` line) instead
+of a raw traceback; `--debug` bypasses it and re-raises the real one. Also
+caught and fixed our own regression where the daily update-check banner
+could leak onto `--json`/`--json-result-path` stdout (see the second new
+row below) — including a first fix that passed locally but not in CI, a
+concrete instance of the "downstream consumer's test suite as design
+authority" pattern from story 4, just turned inward on our own test
+suite instead of a consumer's.
+
 *Traces to:* `679c0b6`; the sentinel pattern
 (`bonsai-2026/Makefile`, the `grep -q *_OK` lines);
 `test_ladder_missing_sentinel_fails_even_on_a_zero_exit` and
@@ -856,10 +883,21 @@ Pydantic-backed (`src/colab_cli/envelopes.py`) and strictly validated at
 emission, not just documented convention. `status --json -s <missing>` is
 the one place this ask's "query commands should error on not found"
 position was actually applied under `--json` (diverges from the
-unconditional exit-0 plain-text path below it). **Still open:** the
-broader case-by-case survey below (which *non*-`--json` commands treat
-"not found" as an error vs. an idempotent no-op) is unchanged — that's a
-wider audit across the whole CLI, not something `--json` alone resolves.
+unconditional exit-0 plain-text path below it).
+
+**[✅ Further hardened — `7421e7c`..`c4aa2c3`, see ask #2's update above
+for the full account]** The "stdout carries JSON only" half of the
+contract is no longer something each command has to individually
+re-derive: a top-level catch-all in `cli.py:main()` now guarantees it for
+*any* exception, and a real regression where non-JSON banner text leaked
+onto `--json`/`--json-result-path` stdout was caught (twice — the first
+fix passed locally but not in CI) and fixed with a test that fails
+deterministically rather than depending on real network/cache state.
+
+**Still open:** the broader case-by-case survey below (which *non*-`--json`
+commands treat "not found" as an error vs. an idempotent no-op) is
+unchanged — that's a wider audit across the whole CLI, not something
+`--json` alone resolves.
 
 Which commands treat "not found" as an error and which treat it as an idempotent
 no-op; which write to stdout and which to stderr; what changes count as
@@ -945,6 +983,9 @@ lost-agent-session diagnosis recoverable instead of re-derivable.
 | `exec` prelude (env only) | `src/colab_cli/commands/execution.py:254` |
 | `run` prelude (`sys.argv`, `__main__`) | `src/colab_cli/commands/run.py:100-111` |
 | all fixes | `CHANGELOG.md`, `[0.1.20]`–`[0.2.2]` |
+| `--json` extended (`new`/`stop`/`sessions`/`status`, `http_status`, parse-error envelopes, five shared-helper gaps) | `CHANGELOG.md`, `[0.3.0]`; commits `b4bc47a`..`3b3ffcd` |
+| `auth.py` `--json` awareness + top-level uncaught-exception catch-all | `CHANGELOG.md`, `[Unreleased]`/`[0.4.0]`; `7421e7c` |
+| update-check banner leaking onto `--json` stdout, fix + correction | `CHANGELOG.md`, `[0.4.0]`/`[0.4.1]`; `406c6cb`, `c4aa2c3` |
 
 **In `bonsai-2026`:**
 
