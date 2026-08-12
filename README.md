@@ -1,49 +1,59 @@
-# Mighty-Colab: A Mightier Interface for Colab
+# Mighty-Colab
 
-A command-line interface for Google Colab with quality-of-life improvements for humans and AI agents.
-Provision high-performance CPU, GPU, and TPU runtimes, execute local code, manage remote files, and orchestrate automated cloud pipelines — directly from your terminal, or via embedded MCP server.
+A fork of Google's official [`colab` CLI](https://github.com/googlecolab/google-colab-cli),
+hardened for AI agents driving it end-to-end — provisioning GPU/TPU runtimes, executing
+code, and tearing sessions down — with no human watching the terminal.
 
-Designed to support seamless developer productivity, headless automation, and AI agent integrations.
-This CLI can co-exist with the official `colab` CLI.
+`mighty-colab` installs as a separate binary and coexists with the official `colab` CLI.
+Every base command (`new`, `exec`, `install`, `run`, `ssh`, …) takes the same flags and does
+the same thing as `colab`'s own docs describe (a handful of exit-code and stream-hygiene
+fixes noted below aside), so this README doesn't re-cover that ground — see the
+[official CLI](https://github.com/googlecolab/google-colab-cli) for those fundamentals, or
+[`googlecolab/colab-mcp`](https://github.com/googlecolab/colab-mcp) if you want in-notebook,
+interactive agent assistance rather than a terminal/automation workflow.
+
+This document is about what `mighty-colab` adds on top: **structured JSON output** for
+programmatic callers, **background execution** for long-running jobs, and a set of fixes
+and extensions that came out of running a real, multi-month, agent-driven research pipeline
+against the official CLI and hitting failures a human at a terminal would rarely notice.
 
 [Demo](https://github.com/user-attachments/assets/656226a9-af13-4fdb-8eda-d7de747336a2)
 
 > [!NOTE]
-> **Platform support:** the Colab CLI currently supports **Linux and macOS** only. Windows is not supported at this time.
-
-> [!TIP]
-> Looking for in-notebook, interactive agent-assisted coding instead of a terminal workflow? See the [Official Colab MCP Server](https://github.com/googlecolab/colab-mcp).
-
-> [!TIP]
-> This project embeds an MCP Server wrapper around automation-friendly CLI commands.
+> **Platform support:** Linux and macOS only. Windows is not supported at this time.
 
 ---
 
-> [!NOTE]
-> What problem does this project solve?
-> 1) `mighty-colab adopt ENDPOINT` brings a Colab runtime that was started outside the CLI (e.g. from the Colab web UI) under local session tracking, so `stop`/`status`/`exec` etc. can manage it.
-> 2) `mighty-colab adopt --orphanage` does the same for every such orphaned runtime at once.
-> 3) Embeds an MCP server (`mighty-colab mcp`) so AI agents can call these commands as tools directly, without shelling out.
+## Why this exists
 
----
+A CLI designed for a human conveys a lot of information *typographically* — a spinner, a
+color, a line of prose — that a program driving the same CLI can't see. Three examples that
+shaped this fork:
 
-## Key Features
+1. **A zero exit code isn't proof the work happened.** The official `colab exec` used to
+   exit `0` even when the remote script raised. Fixed upstream-side of this fork
+   (`679c0b6`) — but even a correct exit code can't distinguish "ran and passed" from
+   "exited before reaching its verdict," which is the problem `--json` solves properly (see
+   below).
+2. **`exec --timeout` bounds the gap between outputs, not the run.** A script that computes
+   silently for a while — model compilation, a slow download — looks identical to a hung
+   one. Nothing to do here except know it and pass a generous `--timeout` explicitly; see
+   `mighty-colab skill`.
+3. **A blocking CLI call doesn't fit a tool-call model.** `exec` ties up the caller for the
+   entire remote run. For an MCP client (or any request/response caller) that's a call that
+   might never return. `exec-async` exists so a background job returns in about a second
+   regardless of how long the work takes.
 
-* **Instant VM Provisioning:** Spin up CPU, GPU (T4, L4, G4, H100, A100), or TPU (v5e1, v6e1) runtimes in seconds.
-* **Robust Code Execution:** Run local Python scripts, Jupyter Notebooks (`.ipynb`), or piped `stdin` code; launch interactive REPLs or raw TTY console shells.
-* **Ephemeral Job Runner (`mighty-colab run`):** Provision a fresh VM, execute a local script with forwarded arguments, retrieve output files, and automatically tear down the runtime in a single command.
-* **Automatic Keep-Alive:** Built-in background daemon automatically prevents idle VM termination, keeping resource allocations active without requiring open browser tabs.
-* **Seamless Workspace Automation:** Mount Google Drive, authenticate Google Cloud Platform (GCP) credentials, and install dependencies with high-performance `uv` package management.
-* **State & Log Archival:** Inspect local session states or export interactive history logs to standard Jupyter Notebooks, Markdown, or structured JSONL.
-* **Orphan Recovery (`mighty-colab adopt`):** Bring a Colab runtime started outside the CLI (e.g. from the web UI) under local session tracking, one at a time or all at once with `--orphanage`.
-* **Embedded MCP Server (`mighty-colab mcp`):** Expose the CLI's own commands as MCP tools over stdio, so AI agents can call them directly instead of shelling out.
+The full list — sixteen upstream defects fixed, five in this fork's own additions, all with
+reproducing tests — is in
+[`docs/AGENT_USABILITY_LEARNINGS.md`](docs/AGENT_USABILITY_LEARNINGS.md).
 
 ---
 
 ## Installation
 
-`mighty-colab` is [published on PyPI](https://pypi.org/project/mighty-colab/). Install it using `uv`
-(recommended) or standard `pip`:
+`mighty-colab` is [published on PyPI](https://pypi.org/project/mighty-colab/). Install it
+using `uv` (recommended) or standard `pip`:
 
 ```bash
 # Using uv (recommended)
@@ -52,44 +62,149 @@ uv tool install mighty-colab
 pip install mighty-colab
 ```
 
+> [!NOTE]
+> `--json` (below) has landed on `main` but not yet in a tagged PyPI release — the latest
+> release is `v0.3.0`. Install from git (`uv tool install git+https://github.com/danbarua/mighty-colab`)
+> to get it before the next release. `exec-async` shipped in `v0.3.0` and is on PyPI today.
+
 ---
 
-## Quick Start
+## Structured output: `--json`
 
-Run a CPU-based VM runtime, execute some code, and clean up:
+Every command an agent actually drives in a loop — `exec`, `run`, `exec-async`,
+`log --tail`, `new`, `stop`, `sessions`, `status` — accepts a global `--json` flag that
+replaces human-readable output with a single, schema-validated JSON envelope on stdout.
+`[colab] ...` chatter moves to stderr, so a `| jq` pipeline sees JSON and nothing else. Even
+CLI-level parse errors (an unknown flag, a missing argument) emit an envelope instead of a
+Rich-boxed stderr display.
 
-```bash
-# 1. Provision a new session
-mighty-colab new
+```console
+$ mighty-colab --json sessions
+{"schema_version": "1", "cli_version": "3b3ffcd", "command": "sessions", "status": "ok", "exit_code": 0, "sessions": []}
 
-# 2. Execute code from stdin
-echo "print('Hello from Google Colab!')" | mighty-colab exec
-
-# 3. Stop and release the VM resource
-mighty-colab stop
+$ mighty-colab --json exec -s nonexistent-session <<< "print(1)"
+{"schema_version": "1", "cli_version": "3b3ffcd", "command": "exec", "status": "error", "exit_code": 1, "reason": "session_not_found"}
 ```
 
+Every envelope carries `schema_version`/`cli_version` (so a stale install is visible in the
+output itself, not just `--help`) plus a `status` of `"ok"` / `"job_raised"` / `"error"`, an
+`exit_code`, and a `reason` when something didn't succeed. The design detail that matters
+most for automation: **the CLI process's own exit code stays `0` under `--json` whenever it
+mechanically completed its transaction, even if the remote job raised.** The job's own
+outcome lives in the envelope body instead. This exists because of a real incident: a script
+that finished successfully and then called `sys.exit(0)` was misread by the old exit-code
+path as a failure (IPython reports `SystemExit` as an error-type kernel output), and a
+Makefile recipe tore the session down with its only result still on it. Under `--json`,
+`sys.exit(0)`/`None`/`False` always normalizes to `status: "ok"`.
+
+Query commands (`status`, `exec`, `run`, …) error on "not found"; desired-state commands
+don't — `stop --json` on an already-absent session reports `status: "ok", reason:
+"already_stopped"`, because that's the strongest available evidence nothing is still
+billing, and an unconditional teardown-on-every-path pattern depends on it staying that way.
+
+A worked example composing an entire session lifecycle with nothing but `--json` and `jq` —
+`new` → `exec` → `exec-async` → `log --tail --since-offset` → `stop` — is in
+[`integration/repro_json_jq_lifecycle/test.sh`](integration/repro_json_jq_lifecycle/test.sh).
+
 > [!NOTE]
-> When only one session is active, you can omit the `-s, --session` option;
-> the CLI automatically knows it.
+> `--json` is not yet wired into the embedded MCP server (below) — `mighty-colab mcp` tool
+> calls still return plain text. Structured MCP output is a known, deliberate gap; see
+> [`docs/07_mcp_server.md`](docs/07_mcp_server.md).
+
+---
+
+## Background execution: `exec-async`
+
+`exec` blocks the caller for the entire remote run. For anything long — training,
+data downloads, a multi-minute install — that's a held-open connection an agent's own
+context or an MCP request/response cycle may not survive.
+
+```bash
+mighty-colab --json exec-async -s trainer -f train.py --timeout 3600
+# -> returns almost immediately: {"status": "started", "pid": ..., "log_path": "..."}
+
+mighty-colab --json log -s trainer --tail --since-offset 0   # non-blocking peek, poll again with the previous next_offset
+mighty-colab log -s trainer -f                                # or block and stream live, if you can afford to wait
+```
+
+(`--json` is a global flag — it must come *before* the subcommand, not after.)
+
+Only one job runs at a time per session (a finished job never blocks a restart). Under
+`--json`, the background worker writes its terminal result to a `<log_path>.json` sidecar
+file that survives the session being stopped, so a caller that comes back later — even after
+`stop` — can still read the final outcome. `log --tail` is the piece purpose-built for MCP:
+`log -f`/`--follow` blocks a single tool call for the job's entire, potentially unbounded
+duration and returns only once, at the very end — which a request/response tool-call model
+can't represent. `--tail` is a bounded, non-blocking read instead, and `--since-offset`
+avoids re-reading the whole log on every poll.
+
+`--timeout` still fully applies to the underlying run — pass something generous (e.g.
+`3600`) for anything that goes quiet for a while; see [Why this exists](#why-this-exists).
+
+---
+
+## Agent essentials
+
+- **`--auth=adc` before the subcommand, always, for headless use**: the default,
+  `oauth2`, is an interactive browser consent flow. `--auth` is a *global* flag and must
+  precede the subcommand: `mighty-colab --auth=adc new -s x`.
+- **`mighty-colab skill`** prints a full agent operating manual (source:
+  [`skills/colab-operator/SKILL.md`](skills/colab-operator/SKILL.md)) — mental model,
+  authentication setup, every gotcha above with the exact remediation, and a recovery
+  section. **`mighty-colab readme`** prints this file. Point an agent at `skill` first; it's
+  written for exactly this purpose and stays current with the CLI's own command registry.
+- **`mighty-colab run`** is the ephemeral-job shape (`new` + `exec` + teardown in one
+  command, works as a shebang line) and already has correct native-Python semantics:
+  `sys.argv`, `__name__ == "__main__"`, and CPython `sys.exit()` conventions. `exec -f` gets
+  the same script prelude, including a synthetic `__file__` — see
+  [`docs/02_execution_and_interactive.md`](docs/02_execution_and_interactive.md) (§2) and
+  [`docs/05_run_command.md`](docs/05_run_command.md) for what does and doesn't exist on the
+  remote filesystem.
+
+---
+
+## Everything else this fork adds
+
+Commands and behavior the official `colab` CLI doesn't have. Base commands not listed here
+work exactly as upstream documents them — run `mighty-colab <command> --help` for options.
+
+| Command | Description |
+| --- | --- |
+| `mighty-colab exec-async [-s NAME] [-f FILE] [--output-log PATH]` | Run `exec` detached; returns immediately, tracked via `status`/`log` |
+| `mighty-colab log -s NAME [-f \| --tail [--since-offset N]]` | Follow (blocking) or peek (non-blocking) a background job's live output |
+| `mighty-colab reinstall [-s NAME] [-r FILE \| PKG...]` | `install`, then restart the kernel on success — so an already-imported package's new version actually takes effect |
+| `mighty-colab adopt ENDPOINT [-n NAME] [--keep-alive]` | Bring a runtime started outside the CLI (e.g. the Colab web UI, or a different agent process) under this process's local session tracking |
+| `mighty-colab adopt --orphanage [--keep-alive]` | Adopt every orphaned server-side assignment at once |
+| `mighty-colab mcp` | Start a stdio MCP server exposing these commands as tools for AI agents |
+| `--json` (global) | Structured JSON envelopes on `exec`/`run`/`exec-async`/`log --tail`/`new`/`stop`/`sessions`/`status` — see above |
+| `--debug` (global) | Opt into `DEBUG`-level logging, including third-party library chatter (default: `INFO`) |
+
+Sixteen upstream defects were also fixed in this fork (exit codes, leaked kernels, unlocked
+concurrent state, and more) — see [`CHANGELOG.md`](CHANGELOG.md) and
+[`docs/AGENT_USABILITY_LEARNINGS.md`](docs/AGENT_USABILITY_LEARNINGS.md) for the full list
+with attribution.
+
+`adopt` exists because `mighty-colab`'s commands have different scopes: `sessions`/`status`
+query the backend directly and see every assignment on the account, while `log`/`exec`
+operate through *this process's own* local tracking
+(`~/.config/colab-cli/sessions.json`). A session started by a different agent process is
+invisible to the second set even though `status` already shows it — `adopt` closes that gap,
+and it's also the recovery path for a stale runtime proxy token (they expire roughly
+hourly) without tearing down and reallocating a VM.
 
 ---
 
 ## MCP Server Configuration
 
-`mighty-colab` embeds an MCP (Model Context Protocol) server, exposing its commands as
-tools for AI agents like Claude. Since the package is on PyPI, `uvx` can run it directly
-without a separate install step:
+`mighty-colab` embeds an MCP server, scanned live from its own command registry, exposing
+non-interactive commands as tools. Since the package is on PyPI, `uvx` can run it directly:
 
 ```json
 {
   "mcpServers": {
     "mighty-colab": {
       "command": "uvx",
-      "args": [
-        "mighty-colab",
-        "mcp"
-      ],
+      "args": ["mighty-colab", "mcp"],
       "env": {
         "UV_WORKING_DIR": "/Optional/Path/To/Working_Dir"
       }
@@ -98,141 +213,44 @@ without a separate install step:
 }
 ```
 
-See [MCP Server Design](docs/07_mcp_server.md) for which commands are exposed as tools
-and how global flags (`--auth`, `--config`) can be added to `args`.
+See [`docs/07_mcp_server.md`](docs/07_mcp_server.md) for which commands are exposed, how
+global flags (`--auth`, `--config`) get added to `args`, and the current `--json`-over-MCP
+gap noted above.
 
 ---
 
-## Command Index
-
-Run `mighty-colab <command> --help` to view specific options, defaults, and detailed help.
-
-### Session Management
-| Command | Description |
-| --- | --- |
-| `mighty-colab new [-s NAME] [--gpu GPU] [--tpu TPU]` | Allocate a new CPU, GPU, or TPU VM runtime |
-| `mighty-colab sessions` | List all active sessions currently active on the backend |
-| `mighty-colab status [-s NAME]` | Display hardware, status, and local metadata for active sessions |
-| `mighty-colab restart-kernel [-s NAME]` | Restart the active session's Jupyter kernel |
-| `mighty-colab stop [-s NAME]` | Terminate a session VM and tear down its keep-alive daemon |
-| `mighty-colab url [-s NAME] [--open]` | Print or open a browser URL connecting to the active session |
-| `mighty-colab adopt ENDPOINT [-n NAME] [--keep-alive]` | Bring a runtime started outside the CLI under local session tracking (re-running refreshes its proxy token) |
-| `mighty-colab adopt --orphanage [--keep-alive]` | Adopt every orphaned server-side assignment at once |
-
-### Execution
-| Command | Description |
-| --- | --- |
-| `mighty-colab run [--gpu GPU] [--tpu TPU] [--keep] SCRIPT [ARGS...]` | Run a local script on a fresh VM, forwarding arguments, then release it |
-| `mighty-colab exec [-s NAME] [-f FILE] [--output-image PATH]` | Execute Python code from stdin, a local `.py` file, or a `.ipynb` notebook |
-| `mighty-colab repl [-s NAME] [--output-image PATH]` | Start an interactive Python REPL on the VM (exits cleanly on piped EOF) |
-| `mighty-colab console [-s NAME]` | Connect to a raw interactive TTY shell (tmux) on the remote VM |
-| `mighty-colab ssh [-s NAME] [--proxy-mode] [-i KEY]` | Open an SSH shell to the runtime over WebSocket, or act as an OpenSSH `ProxyCommand` bridge for IDE remote-dev |
-
-### File Operations
-| Command | Description |
-| --- | --- |
-| `mighty-colab ls [-s NAME] [PATH]` | List remote files on the VM |
-| `mighty-colab upload [-s NAME] LOCAL REMOTE` | Upload a local file to the VM filesystem |
-| `mighty-colab download [-s NAME] REMOTE LOCAL` | Download a remote file from the VM filesystem |
-| `mighty-colab rm [-s NAME] PATH` | Delete a remote file on the VM filesystem |
-| `mighty-colab edit [-s NAME] PATH` | Edit a remote file in-place using your local `$EDITOR` |
-
-### Automation & Utilities
-| Command | Description |
-| --- | --- |
-| `mighty-colab auth [-s NAME]` | Authenticate the VM for GCP services (BigQuery, GCS, etc.) |
-| `mighty-colab drivemount [-s NAME] [PATH]` | Mount Google Drive on the VM (default: `/content/drive`) |
-| `mighty-colab install [-s NAME] [-r FILE \| PKG...]` | Install packages on the VM using `uv` (falls back to `pip`) |
-| `mighty-colab reinstall [-s NAME] [-r FILE \| PKG...]` | Same as `install`, then restarts the kernel on success so an already-imported package's new version takes effect |
-| `mighty-colab log [-s NAME] [-n N] [-o FILE]` | View or export session history (`.ipynb`, `.md`, `.txt`, `.jsonl`) |
-| `mighty-colab pay` | Open the Colab subscription page to manage compute units |
-| `mighty-colab version` | Print the installed version of the CLI |
-| `mighty-colab update [--install]` | Check for a newer release (and optionally upgrade the CLI in place) |
-| `mighty-colab mcp` | Start a stdio MCP server exposing these commands as tools for AI agents |
-
-### Global Options
-* `--auth {oauth2,adc}` — Authentication strategy for the Colab API (default: `oauth2`, an interactive browser flow — agents/headless use should always pass `--auth=adc` explicitly).
-* `-c, --client-oauth-config PATH` — Path to public OAuth client credentials configuration (default: `~/.colab-cli-oauth-config.json`).
-* `--config PATH` — Path to local session metadata storage (default: `~/.config/colab-cli/sessions.json`).
-* `--logtostderr` — Direct debug logging output to stderr.
-
----
-
-## Practical Examples
-
-### Accelerator Training with Checkpoint Retrieval
-
-Provision an A100 GPU, install requirements, run a local training script, retrieve the resulting model weights, and terminate the VM:
+## Quick Start
 
 ```bash
-mighty-colab new -s trainer --gpu A100
-mighty-colab install -s trainer torch transformers
-mighty-colab exec -s trainer -f train.py
-mighty-colab download -s trainer checkpoints/model.bin ./model.bin
-mighty-colab stop -s trainer
+mighty-colab --auth=adc new
+echo "print('Hello from Google Colab!')" | mighty-colab --auth=adc exec
+mighty-colab --auth=adc stop
 ```
 
-### Workspace Notebook Execution with Drive Integration
-
-Mount Google Drive, run a local notebook against the VM kernel (outputs are written back into `report_output.ipynb`), export a Markdown log of the execution, and clean up:
-
-```bash
-mighty-colab new -s analysis
-mighty-colab drivemount -s analysis
-mighty-colab exec -s analysis -f report.ipynb
-mighty-colab log -s analysis -o execution_log.md
-mighty-colab stop -s analysis
-```
-
----
-
-## Usage Notes
-
-* **TTY Requirements:** The interactive commands `repl` and `console` require a local TTY. When running inside automated scripts or pipelines, make sure to pipe stdin (e.g., `echo "print(1)" | mighty-colab repl`) to trigger non-interactive execution modes.
-* **Transparent Code Execution:** When calling `mighty-colab exec -f file.py`, the CLI reads the file locally and transmits its content to the remote kernel. You do not need to manually upload files before execution.
-* **Storage & State Paths:** Session tokens and metadata are stored at `~/.config/colab-cli/sessions.json`. Global CLI settings are located at `~/.config/colab-cli/settings.json`. These can be customized or isolated via the global `--config` flag.
-
-### Ephemeral Accelerator Jobs
-
-Use `mighty-colab run` to run a local script on dedicated hardware without manual session lifecycle management. The CLI handles provisioning, script execution, and immediate VM teardown automatically:
-
-```bash
-# Run train.py on a T4 GPU and release the VM on completion
-mighty-colab run --gpu T4 train.py
-```
-
-### Shebang Execution Support
-
-To execute a local file directly on a remote accelerator, place the `mighty-colab run` interpreter in the shebang line:
-
-```python
-#!/usr/bin/env -S mighty-colab run --gpu L4 --keep
-import torch
-
-print("L4 GPU Available:", torch.cuda.is_available())
-print("Device Name:", torch.cuda.get_device_name(0))
-```
-
-Make the script executable (`chmod +x script.py`) and run it: `./script.py`. The `--keep` option tells the CLI to preserve the session VM on completion so you can re-execute or inspect logs.
+> [!NOTE]
+> When only one session is active, `-s`/`--session` can be omitted — the CLI resolves it
+> automatically (and under `--json`, a failed auto-resolve still returns a proper envelope).
 
 ---
 
 ## Deep Dive Documentation
 
-For comprehensive architectural overviews and deep-dives into specific CLI sub-systems, refer to the detailed documentation:
-
 * [Session Management & Keep-Alive Architecture](docs/01_session_management.md)
-* [Interactive & Non-Interactive Execution Design](docs/02_execution_and_interactive.md)
+* [Interactive & Non-Interactive Execution Design (`exec`, `exec-async`, `--json`)](docs/02_execution_and_interactive.md)
 * [File Management & Jupyter Contents API](docs/03_file_management.md)
 * [Authentication Providers & VM Automation](docs/04_automation_and_utility.md)
-* [Ephemeral Job Runner Design](docs/05_run_command.md)
+* [Ephemeral Job Runner Design (`run`)](docs/05_run_command.md)
 * [SSH-over-WebSocket Runtime Access](docs/06_ssh_access.md)
 * [MCP Server Design](docs/07_mcp_server.md)
+* [What broke driving this from an AI agent, and what we changed](docs/AGENT_USABILITY_LEARNINGS.md)
 
-To view interactive walkthroughs of eleven real-world automated scenarios, check out the [Demo Walkthroughs](docs/demos.md).
+To view interactive walkthroughs of eleven real-world automated scenarios, check out the
+[Demo Walkthroughs](docs/demos.md).
 
 ---
 
 ## Contributing
 
-Feedback and contributions are welcome! Please read [`CONTRIBUTING.md`](./CONTRIBUTING.md) for details.
+This fork isn't currently accepting external pull requests — see
+[`CONTRIBUTING.md`](./CONTRIBUTING.md). Ideas and pain points are welcome on
+[Discussions](https://github.com/danbarua/mighty-colab/discussions).
