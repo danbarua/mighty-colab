@@ -148,6 +148,36 @@ class TooManyAssignmentsError(Exception):
     pass
 
 
+def response_body_if_json(e: Exception, limit: int = 1000) -> Optional[str]:
+    """`e.response_body`, but only when `Content-Type` actually says JSON.
+
+    Colab's error surfaces are inconsistent by endpoint: `assign`'s 400
+    rejection (no accelerator quota/entitlement) is Google's generic
+    frontend HTML error page -- confirmed live, `<b>400.</b> That's an
+    error. That's all we know.`, verbatim, zero diagnostic content, the
+    same boilerplate every time -- while other endpoints (e.g.
+    keep-alive's scope-missing 403) return an XSSI-prefixed JSON array
+    with a real `google.rpc.Status`/`DebugInfo` payload worth keeping.
+    Never worth writing an HTML page into a JSONL history file; always
+    worth keeping real structured content when it's actually there.
+    Fails closed (returns `None`) on anything unexpected -- a missing
+    `response`, missing headers, whatever -- rather than risk logging
+    garbage.
+    """
+    body = getattr(e, "response_body", None)
+    if not body:
+        return None
+    try:
+        content_type = e.response.headers.get("Content-Type", "")
+        if "json" not in content_type.lower():
+            return None
+    except Exception:
+        return None
+    if body.startswith(XSSI_PREFIX):
+        body = body[len(XSSI_PREFIX) :]
+    return body[:limit]
+
+
 class Client:
     def __init__(self, env: ColabEnvironment, session, logger=None):
         self.colab_domain = env.domain

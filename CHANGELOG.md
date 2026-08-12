@@ -12,6 +12,37 @@ below corresponds to a tag of the same name.
 
 ### Added
 
+- **History:** `new`/`run`'s `assign()` failure now logs an
+  `assign_error` event -- previously it left zero trace, unlike
+  keep-alive's own error path. `response_body` is only ever included
+  when `Content-Type` says JSON (new `client.response_body_if_json()`
+  helper, also now guarding keep-alive's existing error logging):
+  `assign`'s 400 rejection is confirmed-live Google frontend HTML
+  boilerplate with zero diagnostic content, never worth writing into a
+  JSONL file; other endpoints (e.g. keep-alive's scope-missing 403)
+  return real structured detail worth keeping.
+- **`run --preflight-check`:** an opt-in local import check that runs
+  before a VM is allocated. `run` transmits only the script's text, so a
+  sibling import that only resolves because the real local repo
+  structure is present would otherwise only surface as
+  `ModuleNotFoundError` after paying for a VM. The check
+  (`src/colab_cli/import_check.py`) reproduces the exact `__file__`
+  substitution and empty-start-directory property `run` uses remotely,
+  imports the script as an ordinary module (so `if __name__ ==
+  "__main__":`-guarded work never executes), and reports
+  `reason="import_check_failed"` with a `hint` distinguishing a
+  sys.path-touching script from a plain missing package. Off by default:
+  it can't tell "genuinely missing" apart from "preinstalled on the
+  Colab image, just not in this local environment" -- e.g. GPU packages
+  like torch, the common case for this tool -- so a script that runs
+  fine remotely could otherwise be refused before it ever gets there.
+  Not wired into `exec -f` (no VM-provisioning cost to save there).
+- **`exec-async`:** `--output-log <directory>` now generates a unique
+  `<session>_<timestamp>.log` filename per run, instead of treating the
+  directory as a literal file path. Closes a real gap where relaunching
+  the same driver against a fixed `--output-log` path silently overwrote
+  the previous run's log and its `.json` sidecar -- the durable failure
+  record.
 - **`sessions`/`status --json`:** now report `keep_alive_pid` (only when
   currently confirmed alive) and `last_keep_alive_ping` (ISO8601 UTC) per
   session -- both omitted, not `null`, when unset. Deliberately no

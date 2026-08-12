@@ -474,6 +474,28 @@ def test_run_json_assign_generic_failure_emits_assign_failed(
     assert envelope["reason"] == "assign_failed"
 
 
+def test_run_logs_assign_error_history_event(
+    mock_client, mock_common_state, script_path
+):
+    """Mirrors `new`'s assign_error history logging -- previously assign
+    failure left no trace here either."""
+    error = _make_response_error(400, body="<html>That's an error.</html>")
+    error.response.headers = {"Content-Type": "text/html"}
+    mock_client.assign.side_effect = error
+
+    result = runner.invoke(app, ["run", str(script_path), "--gpu", "H100"])
+    assert result.exit_code == 1
+
+    log_calls = mock_common_state.history.log_event.call_args_list
+    assign_errors = [c for c in log_calls if c.args[1] == "assign_error"]
+    assert len(assign_errors) == 1
+    payload = assign_errors[0].args[2]
+    assert payload["status_code"] == 400
+    assert payload["variant"] == "GPU"
+    assert payload["accelerator"] == "H100"
+    assert payload["response_body"] is None
+
+
 def test_run_json_auth_scope_missing(
     mock_client, mock_common_state, assign_response, script_path
 ):

@@ -43,6 +43,7 @@ from colab_cli.client import (
     ColabRequestError,
     PostAssignmentResponse,
     Variant,
+    response_body_if_json,
 )
 from colab_cli.commands.execution import (
     _build_env_prelude,
@@ -57,6 +58,7 @@ from colab_cli.common import (
     json_safe_outputs,
 )
 from colab_cli.envelopes import RunEnvelope
+from colab_cli.import_check import check_imports
 from colab_cli.commands.session import (
     _is_scope_error,
     _scope_remediation_message,
@@ -249,6 +251,22 @@ def run_command(
             ),
         ),
     ] = None,
+    preflight_check: Annotated[
+        bool,
+        typer.Option(
+            "--preflight-check",
+            help=(
+                "Run a local import check before provisioning a VM, and "
+                "fail fast if the script won't import cleanly (e.g. a "
+                "sibling import that only resolves locally). Off by "
+                "default: it can't tell 'genuinely missing' apart from "
+                "'preinstalled on the Colab image, just not in this local "
+                "environment' -- e.g. GPU packages like torch -- so a "
+                "script that runs fine remotely can still be refused "
+                "here. Opt in when you want that extra local check."
+            ),
+        ),
+    ] = False,
 ):
     """Run a Python script on a fresh Colab VM
 
@@ -278,6 +296,70 @@ def run_command(
         typer.echo(f"[colab] Script not found: {script}", err=True)
         raise typer.Exit(2)
 
+    # AGENTS.md item 10, continued: `run` transmits only this file's text
+    # (see `_build_script_prelude`) -- a sibling import that only resolves
+    # because the real local repo structure is present would otherwise
+    # only surface as a `ModuleNotFoundError` after a VM is already paid
+    # for. `check_imports` reproduces the same __file__ substitution `run`
+    # performs remotely, so it catches this class of failure here instead.
+    # Opt-in (off by default): it can't distinguish "genuinely missing"
+    # from "preinstalled on the Colab image, just not locally" -- the
+    # torch/GPU-package case, which is the common case for this tool.
+    if preflight_check:
+        check_result = check_imports(script)
+        if not check_result.ok:
+            if check_result.new_sys_path_entries:
+                hint = (
+                    "This script adds "
+                    f"{check_result.new_sys_path_entries} to sys.path. "
+                    "`run` only transmits this one file's text -- anything "
+                    "imported from there won't exist on the remote VM, "
+                    "even though it resolved here. Bundle that code into "
+                    "this file, or fork a deployable subset with no "
+                    "repo-relative imports."
+                )
+            elif check_result.missing_module:
+                hint = (
+                    f"'{check_result.missing_module}' isn't importable in "
+                    "this local environment. If it's genuinely missing, "
+                    "install it on the remote (`colab install "
+                    f"{check_result.missing_module}`) before running this "
+                    "script. If it's only missing here -- e.g. a GPU "
+                    "package that's preinstalled on the Colab image but "
+                    "not in your local dev environment -- rerun without "
+                    "`--preflight-check`."
+                )
+            else:
+                hint = None
+            if state.json_output:
+                emit_json(
+                    build_envelope(
+                        "error",
+                        "run",
+                        exit_code=2,
+                        reason="import_check_failed",
+                        message=check_result.error,
+                        hint=hint,
+                    )
+                )
+            typer.echo(
+                f"[colab] Import check failed: {check_result.error}", err=True
+            )
+            if hint:
+                typer.echo(f"[colab] {hint}", err=True)
+            raise typer.Exit(2)
+        elif check_result.new_sys_path_entries:
+            typer.echo(
+                "[colab] Warning: importing "
+                f"{script!r} added {check_result.new_sys_path_entries} to "
+                "sys.path. `run` only transmits this one file's text -- "
+                "anything imported from there won't exist on the remote "
+                "VM, even though it resolved here. Bundle that code into "
+                "this file, or fork a deployable subset with no "
+                "repo-relative imports.",
+                err=True,
+            )
+
     name = session or f"run-{uuid.uuid4().hex[:6]}"
     variant, accelerator = _resolve_accelerator(gpu, tpu)
 
@@ -290,7 +372,20 @@ def run_command(
         # Mirror `colab new`'s friendly accelerator-quota message -- and,
         # like `new`, give --json callers a JSON body for it and for any
         # other assign failure, instead of a bare traceback (non-json
-        # behavior is untouched by this).
+        # behavior is untouched by this). Also mirrors `new`'s history
+        # logging: assign failure previously left no trace here either.
+        state.history.log_event(
+            name,
+            "assign_error",
+            {
+                "status_code": get_status_code(e),
+                "error_type": type(e).__name__,
+                "error": str(e)[:500],
+                "response_body": response_body_if_json(e),
+                "variant": variant.value,
+                "accelerator": accelerator.value,
+            },
+        )
         if (
             isinstance(e, ColabRequestError)
             and get_status_code(e) == 400
@@ -520,6 +615,7 @@ def run_command(
                         "keep": keep,
                         "timeout": timeout,
                         "env": env_vars,
+                        "preflight_check": preflight_check,
                     },
                 },
             )

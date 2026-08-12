@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import datetime
+import os
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -190,6 +192,96 @@ def test_exec_async_output_log_expands_user(
     expected = str(tmp_path / "mylog.txt")
     assert mock_spawn.call_args.args[2] == expected
     assert mock_session.exec_log_path == expected
+
+
+@patch("colab_cli.commands.execution.spawn_exec_async")
+def test_exec_async_output_log_existing_directory_generates_unique_filename(
+    mock_spawn, mock_store, mock_common_state, tmp_path
+):
+    """Pointing --output-log at a directory that already exists must not
+    be treated as a literal file path -- a relaunch of the same driver
+    would otherwise silently truncate the previous run's log AND its
+    .json sidecar, which is the exact failure this feature exists to
+    close. Directory mode generates a name from the session + a UTC
+    timestamp instead."""
+    mock_session = MagicMock()
+    mock_session.name = "s1"
+    mock_session.exec_pid = None
+    mock_store.get.return_value = mock_session
+    mock_store.list.return_value = {"s1": mock_session}
+    mock_common_state.resolve_session.return_value = "s1"
+    mock_spawn.return_value = 4321
+
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+
+    exec_async(session="s1", file="script.py", output_log=str(log_dir))
+
+    mock_spawn.assert_called_once()
+    resolved = mock_spawn.call_args.args[2]
+    assert resolved == mock_session.exec_log_path
+    assert os.path.dirname(resolved) == str(log_dir)
+    basename = os.path.basename(resolved)
+    assert basename.startswith("s1_")
+    assert basename.endswith(".log")
+    # <session>_<YYYYmmddTHHMMSSffffffZ>.log (microsecond precision, so
+    # back-to-back relaunches within the same second still get distinct
+    # filenames -- see test_..._relaunch_does_not_clobber below).
+    timestamp = basename[len("s1_") : -len(".log")]
+    datetime.datetime.strptime(timestamp, "%Y%m%dT%H%M%S%fZ")
+
+
+@patch("colab_cli.commands.execution.spawn_exec_async")
+def test_exec_async_output_log_trailing_slash_creates_directory(
+    mock_spawn, mock_store, mock_common_state, tmp_path
+):
+    """A trailing separator signals directory mode even when the directory
+    doesn't exist yet -- it gets created, mirroring the existing
+    make-the-parent-dirs behavior for the file-path branch."""
+    mock_session = MagicMock()
+    mock_session.name = "s1"
+    mock_session.exec_pid = None
+    mock_store.get.return_value = mock_session
+    mock_store.list.return_value = {"s1": mock_session}
+    mock_common_state.resolve_session.return_value = "s1"
+    mock_spawn.return_value = 4321
+
+    log_dir = tmp_path / "not-yet-created"
+    assert not log_dir.exists()
+
+    exec_async(session="s1", file="script.py", output_log=str(log_dir) + os.sep)
+
+    resolved = mock_spawn.call_args.args[2]
+    assert log_dir.is_dir()
+    assert os.path.dirname(resolved) == str(log_dir)
+    assert os.path.basename(resolved).startswith("s1_")
+
+
+@patch("colab_cli.commands.execution.spawn_exec_async")
+def test_exec_async_output_log_directory_mode_relaunch_does_not_clobber(
+    mock_spawn, mock_store, mock_common_state, tmp_path
+):
+    """Two relaunches against the same directory must produce two distinct
+    files -- the entire point of this feature."""
+    mock_session = MagicMock()
+    mock_session.name = "s1"
+    mock_session.exec_pid = None
+    mock_store.get.return_value = mock_session
+    mock_store.list.return_value = {"s1": mock_session}
+    mock_common_state.resolve_session.return_value = "s1"
+    mock_spawn.return_value = 1
+
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+
+    exec_async(session="s1", file="script.py", output_log=str(log_dir))
+    first = mock_spawn.call_args.args[2]
+
+    mock_session.exec_pid = None  # simulate the previous run having finished
+    exec_async(session="s1", file="script.py", output_log=str(log_dir))
+    second = mock_spawn.call_args.args[2]
+
+    assert first != second
 
 
 @patch("colab_cli.commands.execution.spawn_exec_async")
