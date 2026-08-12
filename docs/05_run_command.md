@@ -1,5 +1,6 @@
 ---
 log:
+2026-08-12: Added an always-on import pre-flight (`--no-preflight-check` to opt out), and `--output-log <directory>` unique-per-run filenames for `exec-async` -- see `docs/02_execution_and_interactive.md`'s 2026-08-12 entry for the full combined writeup of both fixes (this file covers the `run`-side half). New `src/colab_cli/import_check.py` module, `check_imports()`.
 2026-05-12: Initial design and implementation of `colab run <script.py> [args...]`. Combines `colab new` + `colab exec` + `colab stop` into a single fire-and-forget invocation so a Python file can use `#!/usr/bin/env -S  mighty-colab run` as a shebang line and execute on a freshly-allocated Colab VM. Adds `--keep` (skip auto-stop), `--gpu` / `--tpu` (passthrough to session creation), `-s/--session` (name the ephemeral session), and propagates the script's exit status (non-zero on any uncaught exception in the kernel). The script's `sys.argv` is re-set inside the kernel to mirror native `python script.py arg1 arg2` semantics, and `__name__` is set to `"__main__"`.
 2026-05-12: Native CPython exit-code semantics for `sys.exit()` / `raise SystemExit(...)` from the script body. The Colab kernel reports a `SystemExit` as `output_type=='error'`, which under the previous logic would have (a) printed the IPython traceback (`An exception has occurred, use %tb...`) and (b) flagged the run as a failure regardless of the integer exit code. Now: `sys.exit()` / `sys.exit(0)` exit 0 silently; `sys.exit(N)` exits N; `sys.exit('msg')` exits 1 (matching CPython). The IPython "To exit: use 'exit', 'quit', or Ctrl-D." UserWarning is filtered via the prelude. Encoded after running `examples/gpu_hello.py` end-to-end and seeing the noisy `SystemExit: 0` traceback at the end of an otherwise-successful GPU run.
 2026-06-04: Bumped the default value of the `--timeout` flag from 10.0s to 30.0s so short-but-silent tasks aren't prematurely killed out of the box. Mirrors the same change for `colab exec`.
@@ -32,6 +33,7 @@ colab run [OPTIONS] SCRIPT [SCRIPT_ARGS]...
 | `--tpu` | str | None | Same set as `colab new --tpu` (v5e1, v6e1). |
 | `--keep` | bool | False | Do **not** stop the session after the script finishes. |
 | `--timeout` | float | 30.0 | Timeout in seconds for code execution to prevent hanging on silent tasks. |
+| `--no-preflight-check` | bool | False | Skip the local import check that normally runs before a VM is allocated (see "Import pre-flight" below). |
 
 ### Shebang usage
 With `--keep` and `--gpu` baked into the shebang line, an entire one-file workload becomes:
@@ -45,6 +47,46 @@ print(torch.cuda.get_device_name(0))
 `chmod +x` and `./script.py` is then a single-step "rent a GPU, run, return".
 
 > The `-S` flag of `env` is necessary on Linux/macOS to allow multiple words after `colab run` in a shebang line; without it the kernel passes the whole tail as one argument.
+
+## Import pre-flight
+
+`run` transmits only the script's *text* -- nothing else travels with it,
+no sibling files, no directory structure. A script whose module-scope
+code resolves a sibling path via `os.path.dirname(os.path.abspath(__file__))`
+can import cleanly locally (the real repo structure is genuinely present)
+and still `ModuleNotFoundError` on the remote VM, where `/content` starts
+empty and `__file__` is the synthetic sentinel described below.
+
+Before allocating a VM (unless `--no-preflight-check` is passed), `run`
+imports the script via `check_imports()` (`src/colab_cli/import_check.py`)
+the same way it will be faked remotely: the file loads from its real
+absolute path (so genuinely-installed packages resolve normally), but
+the loaded module's `__file__` is overridden to the same
+`<mighty-colab-exec:basename>` sentinel `_build_script_prelude` sets, and
+the check subprocess's CWD is a fresh empty scratch directory -- mirroring
+`/content`'s own "starts empty" property, since `__file__`-relative path
+math resolves against CWD once `__file__` has no real path in it. Skipping
+either half would let a script whose sys.path hack only works because the
+real local repo structure happens to be sitting there falsely pass.
+
+The check imports the file as an ordinary module (`importlib.util`,
+never `__name__ == "__main__"`), so code correctly guarded by
+`if __name__ == "__main__":` does not execute during the check. A hard
+subprocess timeout (30s default) backstops scripts with genuinely
+unguarded module-scope work.
+
+On failure, `run` stops here (`state.client.assign` is never called):
+`reason="import_check_failed"`, `message` carries the raw import error,
+and `hint` distinguishes two causes -- a script that added to `sys.path`
+(bundle the code into the script, or fork a deployable subset with no
+repo-relative imports) versus a plain missing package (install it on the
+remote before running). A pass that still added to `sys.path` prints a
+warning to stderr and proceeds -- worth flagging even when it happens to
+work, since that path still won't exist on a real remote run.
+
+Not wired into `exec -f`: that command runs against an
+already-provisioned session, so there's no VM-provisioning cost the
+check would save there.
 
 ## Behavior
 

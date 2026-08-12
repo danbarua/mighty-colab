@@ -12,6 +12,24 @@ below corresponds to a tag of the same name.
 
 ### Added
 
+- **`run`:** an always-on import pre-flight now runs before a VM is
+  allocated (`--no-preflight-check` to opt out). `run` transmits only the
+  script's text, so a sibling import that only resolves because the real
+  local repo structure is present would otherwise only surface as
+  `ModuleNotFoundError` after paying for a VM. The check
+  (`src/colab_cli/import_check.py`) reproduces the exact `__file__`
+  substitution and empty-start-directory property `run` uses remotely,
+  imports the script as an ordinary module (so `if __name__ ==
+  "__main__":`-guarded work never executes), and reports
+  `reason="import_check_failed"` with a `hint` distinguishing a
+  sys.path-touching script from a plain missing package. Not wired into
+  `exec -f` (no VM-provisioning cost to save there).
+- **`exec-async`:** `--output-log <directory>` now generates a unique
+  `<session>_<timestamp>.log` filename per run, instead of treating the
+  directory as a literal file path. Closes a real gap where relaunching
+  the same driver against a fixed `--output-log` path silently overwrote
+  the previous run's log and its `.json` sidecar -- the durable failure
+  record.
 - **`sessions`/`status --json`:** now report `keep_alive_pid` (only when
   currently confirmed alive) and `last_keep_alive_ping` (ISO8601 UTC) per
   session -- both omitted, not `null`, when unset. Deliberately no
