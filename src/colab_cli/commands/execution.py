@@ -27,6 +27,7 @@ from rich.console import Console
 from typing import List, NoReturn, Optional
 from typing_extensions import Annotated
 
+from colab_cli import auto_update
 from colab_cli.common import (
     build_envelope,
     emit_json,
@@ -271,6 +272,17 @@ def exec_command(
     from colab_cli.common import state
 
     want_json = state.json_output or json_result_path is not None
+
+    # `exec` is in cli.py's `_AUTO_UPDATE_SUPPRESSED` unconditionally --
+    # the root callback can't reliably tell whether this invocation wants
+    # machine-parseable output, since the hidden `--json-result-path` flag
+    # (used only by `exec-async`'s spawned child) lives on this command's
+    # own parser and isn't parsed yet when the root callback runs. Run the
+    # check here instead, now that `want_json` is known, so a plain `exec`
+    # still gets the banner but neither `exec --json` nor the sidecar
+    # child does.
+    if not want_json:
+        auto_update.run_background_check()
 
     env_vars = _parse_env_vars(env, command="exec")
     name = state.resolve_session(session, command="exec")

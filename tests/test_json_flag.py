@@ -68,46 +68,47 @@ def test_json_flag_skips_background_check(mocker):
     """`--json`'s stdout is a machine-parseable envelope -- the daily
     upgrade-banner check must not run at all (not just get redirected to
     stderr), both to keep the invocation deterministic and to skip the
-    unnecessary network round-trip."""
+    unnecessary network round-trip. Uses `run` (JSON-capable, not
+    `exec` -- see the `exec`-specific tests below for why that one's
+    suppression is handled differently)."""
     mocker.patch("colab_cli.cli.setup_logging")
     mock_check = mocker.patch("colab_cli.cli.auto_update.run_background_check")
-    mocker.patch("colab_cli.cli.sys.argv", ["mighty-colab", "exec", "--json"])
-    _invoke_callback(invoked_subcommand="exec", json_output=True)
-    mock_check.assert_not_called()
-
-
-def test_json_result_path_in_argv_skips_background_check(mocker):
-    """The hidden `--json-result-path` flag (used only by `exec-async`'s
-    spawned child, which deliberately never receives `--json` itself --
-    see `spawn_exec_async`) must suppress the banner too, even though
-    `json_output` stays False for that invocation. Regression test: this
-    flag lives on `exec`'s own parser, not the root callback's, so it
-    isn't parsed yet when `callback()` runs -- the check has to scan raw
-    `argv` the same way `_check_global_option_position` does. Previously
-    unguarded, this let the banner leak straight into the child's stdout
-    (and, in CI, straight into a `CliRunner`-captured `result.stdout` a
-    test asserted was empty) whenever the daily update check happened to
-    decide a newer version was available."""
-    mocker.patch("colab_cli.cli.setup_logging")
-    mock_check = mocker.patch("colab_cli.cli.auto_update.run_background_check")
-    mocker.patch(
-        "colab_cli.cli.sys.argv",
-        ["mighty-colab", "exec", "-s", "s1", "--json-result-path", "/tmp/r.json"],
-    )
-    _invoke_callback(invoked_subcommand="exec", json_output=False)
+    _invoke_callback(invoked_subcommand="run", json_output=True)
     mock_check.assert_not_called()
 
 
 def test_background_check_still_runs_without_any_json_signal(mocker):
-    """Regression guard for the two tests above: a plain, non-`--json`
+    """Regression guard for the test above: a plain, non-`--json`
     invocation of a non-suppressed command must still run the background
     check -- suppression is scoped to machine-readable output, not
     disabled outright."""
     mocker.patch("colab_cli.cli.setup_logging")
     mock_check = mocker.patch("colab_cli.cli.auto_update.run_background_check")
-    mocker.patch("colab_cli.cli.sys.argv", ["mighty-colab", "exec", "-s", "s1"])
-    _invoke_callback(invoked_subcommand="exec", json_output=False)
+    _invoke_callback(invoked_subcommand="run", json_output=False)
     mock_check.assert_called_once()
+
+
+def test_exec_is_unconditionally_suppressed_at_the_root_callback(mocker):
+    """`exec` is always in `_AUTO_UPDATE_SUPPRESSED`, regardless of
+    `--json` -- unlike every other command, the root callback can't tell
+    whether *this* invocation wants machine-parseable output, because
+    `exec`'s hidden `--json-result-path` flag (used only by `exec-async`'s
+    spawned child, which deliberately never receives `--json` itself --
+    see `spawn_exec_async`) lives on `exec`'s own parser and isn't parsed
+    yet when the root callback runs. An earlier fix tried to detect it by
+    scanning raw `sys.argv` here instead -- that works for a real
+    invocation (`main()` sees the process's actual argv) but silently does
+    nothing under `CliRunner`-based tests (and thus in CI), which invoke
+    `app()` directly and never touch `sys.argv` at all. `exec_command`
+    itself now runs (or skips) the check after parsing its own
+    `--json-result-path` -- see `tests/test_exec_json.py`'s
+    `test_exec_*_background_check` tests for that half."""
+    mocker.patch("colab_cli.cli.setup_logging")
+    mock_check = mocker.patch("colab_cli.cli.auto_update.run_background_check")
+    _invoke_callback(invoked_subcommand="exec", json_output=False)
+    mock_check.assert_not_called()
+    _invoke_callback(invoked_subcommand="exec", json_output=True)
+    mock_check.assert_not_called()
 
 
 def test_json_flag_off_by_default(mocker):

@@ -289,17 +289,20 @@ def callback(
     #     pipelines.
     #   - `whoami`: developer-only debugging tool; banner would obscure the
     #     auth/scope info the user invoked it to see.
-    #   - `--json` (or the hidden `--json-result-path`): stdout is a
-    #     machine-parseable envelope. `--json` alone is already covered by
-    #     `_json_aware_echo`'s stderr redirect, but skipping the check
-    #     outright also saves the network round-trip. `--json-result-path`
-    #     needs its own check: `exec-async`'s spawned child receives that
-    #     flag but deliberately never `--json` itself (see
-    #     `spawn_exec_async`), so `state.json_output`/`json_output` stays
-    #     False for it -- and since it's a hidden option on `exec`'s own
-    #     parser, it isn't parsed yet at this point in the root callback
-    #     (same reason `_check_global_option_position` scans raw `argv`
-    #     for `--json` instead of relying on parsed state).
+    #   - `exec`: has its own hidden `--json-result-path` option (used only
+    #     by `exec-async`'s spawned child, which deliberately never
+    #     receives `--json` itself -- see `spawn_exec_async`), which isn't
+    #     parsed yet at this point in the root callback -- Click parses a
+    #     Group's own options, invokes the Group's callback (this
+    #     function), and only *then* parses the chosen subcommand's own
+    #     options, so there is no reliable, testable way to see
+    #     `--json-result-path` from here (raw `sys.argv` inspection, tried
+    #     first, breaks under `CliRunner`-based tests, which never touch
+    #     the real process argv). Deferred to `exec_command`'s own body
+    #     instead, gated on the same `want_json` it already computes.
+    #   - `--json`: stdout is a machine-parseable envelope. Already
+    #     implicitly covered by `_json_aware_echo`'s stderr redirect, but
+    #     skipping the check outright also saves the network round-trip.
     _AUTO_UPDATE_SUPPRESSED = {
         "update",
         "version",
@@ -312,9 +315,9 @@ def callback(
         "README",
         "skill",
         "SKILL",
+        "exec",
     }
-    wants_machine_output = json_output or "--json-result-path" in sys.argv[1:]
-    if ctx.invoked_subcommand not in _AUTO_UPDATE_SUPPRESSED and not wants_machine_output:
+    if ctx.invoked_subcommand not in _AUTO_UPDATE_SUPPRESSED and not json_output:
         auto_update.run_background_check()
 
 

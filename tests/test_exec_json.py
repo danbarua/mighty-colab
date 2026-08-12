@@ -398,6 +398,82 @@ def test_exec_json_result_path_writes_sidecar_not_stdout(
     assert envelope["exit_code"] == 0
 
 
+def test_exec_background_check_skipped_for_json_result_path(
+    mocker, mock_session, mock_runtime_class, mock_common_state, tmp_path
+):
+    """Regression test for a CI failure: `exec` is unconditionally in
+    `cli.py`'s `_AUTO_UPDATE_SUPPRESSED` (the root callback can't see this
+    command's own hidden `--json-result-path` flag -- see the comment
+    there), so `exec_command` itself must run (or skip) the update check
+    once it knows whether this invocation wants machine-parseable output.
+    Mocking `auto_update.run_background_check` to raise makes this
+    deterministic regardless of the real update-check's network/cache
+    state, unlike the sidecar test above (which merely asserts empty
+    stdout and would only fail when the real check happened to decide a
+    newer version was available -- which is exactly how this slipped into
+    CI in the first place)."""
+
+    def boom():
+        raise AssertionError("run_background_check should not be called")
+
+    mocker.patch(
+        "colab_cli.commands.execution.auto_update.run_background_check", side_effect=boom
+    )
+    mock_common_state.json_output = False
+    mock_common_state.resolve_session.return_value = "s1"
+    mock_runtime = mock_runtime_class.return_value
+    mock_runtime.execute_code.return_value = [{"output_type": "stream", "text": "hi\n"}]
+
+    result = runner.invoke(
+        app,
+        ["exec", "-s", "s1", "--json-result-path", str(tmp_path / "result.json")],
+        input="print('hi')",
+    )
+    assert result.exit_code == 0, result.output
+
+
+def test_exec_background_check_skipped_for_json_flag(
+    mocker, mock_session, mock_runtime_class, mock_common_state
+):
+    """Same guarantee, foreground `exec --json` this time (already covered
+    implicitly by `state.json_output`, but explicit here for parity with
+    the `--json-result-path` case above)."""
+
+    def boom():
+        raise AssertionError("run_background_check should not be called")
+
+    mocker.patch(
+        "colab_cli.commands.execution.auto_update.run_background_check", side_effect=boom
+    )
+    mock_common_state.json_output = True
+    mock_common_state.resolve_session.return_value = "s1"
+    mock_runtime = mock_runtime_class.return_value
+    mock_runtime.execute_code.return_value = [{"output_type": "stream", "text": "hi\n"}]
+
+    result = runner.invoke(app, ["exec", "-s", "s1"], input="print('hi')")
+    assert result.exit_code == 0, result.output
+
+
+def test_exec_background_check_runs_without_json(
+    mocker, mock_session, mock_runtime_class, mock_common_state
+):
+    """Regression guard for the two tests above: a plain `exec` (no
+    `--json`/`--json-result-path`) must still run the update check --
+    suppression is scoped to machine-readable output, not disabled
+    outright for the whole command."""
+    mock_check = mocker.patch(
+        "colab_cli.commands.execution.auto_update.run_background_check"
+    )
+    mock_common_state.json_output = False
+    mock_common_state.resolve_session.return_value = "s1"
+    mock_runtime = mock_runtime_class.return_value
+    mock_runtime.execute_code.return_value = [{"output_type": "stream", "text": "hi\n"}]
+
+    result = runner.invoke(app, ["exec", "-s", "s1"], input="print('hi')")
+    assert result.exit_code == 0, result.output
+    mock_check.assert_called_once()
+
+
 def test_exec_json_result_path_does_not_suppress_output_hook(
     mock_session, mock_runtime_class, mock_common_state, tmp_path
 ):

@@ -10,6 +10,26 @@ below corresponds to a tag of the same name.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`--json`:** the previous fix for the update-check banner leaking onto
+  `exec`'s stdout (see the `[0.4.0]` entry below) only worked for a real
+  console-script invocation -- it detected the hidden `--json-result-path`
+  flag by scanning the process's actual `sys.argv`, which `CliRunner`
+  (used by nearly every test in this codebase, and by CI) never touches,
+  so the check silently did nothing under test and the banner could still
+  leak whenever the real update check decided a newer version was
+  available. `exec` is now unconditionally in `cli.py`'s
+  `_AUTO_UPDATE_SUPPRESSED` -- the root callback genuinely cannot see this
+  flag before `exec`'s own parser runs, in a real invocation or a test --
+  and `exec_command` itself now runs (or skips) the check once its own
+  `want_json` is known. New regression tests mock `auto_update.
+  run_background_check` to raise if called, so they fail deterministically
+  regardless of network/cache state, unlike the original sidecar test that
+  merely asserted empty stdout (and only failed when the real check
+  happened to find an update -- exactly how this slipped into CI the first
+  time).
+
 ## [0.4.0] - 2026-08-12
 
 ### Added
