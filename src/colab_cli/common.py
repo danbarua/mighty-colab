@@ -19,7 +19,7 @@ import re
 import signal
 import sys
 import time
-from typing import Optional
+from typing import NoReturn, Optional
 
 import typer
 
@@ -251,17 +251,46 @@ class State:
 
         return self._sessions, assignments
 
-    def resolve_session(self, session_name: Optional[str]) -> str:
+    def _resolve_session_failure(self, command: str, reason: str, message: str) -> NoReturn:
+        """Shared exit path for `resolve_session`'s two failure shapes.
+
+        `resolve_session` predates `--json` and previously always
+        `typer.echo`'d plain text no matter which command called it --
+        the one escape hatch left after every *other* error path in
+        `exec`/`exec-async`/`stop` was made `--json`-aware, since it's a
+        shared helper those commands call before their own JSON-gating
+        logic ever runs. Fixed once, centrally, rather than patching each
+        of the three call sites separately.
+        """
+        if self.json_output:
+            emit_json(
+                build_envelope(
+                    "error", command, exit_code=1, reason=reason, message=message
+                )
+            )
+            # The envelope above is the stdout payload; this echo is
+            # supplementary and must not share that stream, or it'd corrupt
+            # the JSON a `--json` caller is trying to parse. Matches the
+            # existing `err=True` convention every other error-alongside-an-
+            # envelope call site in this codebase already uses (e.g.
+            # exec_command's session_not_found branch).
+            typer.echo(f"[colab] Error: {message}", err=True)
+        else:
+            typer.echo(f"[colab] Error: {message}")
+        raise typer.Exit(1)
+
+    def resolve_session(self, session_name: Optional[str], command: str = "cli") -> str:
         if session_name:
             return session_name
 
         # Check local store first to avoid hitting the backend (and triggering auth) if we don't have to
         local_sessions = self.store.list()
         if not local_sessions:
-            typer.echo(
-                "[colab] Error: No active sessions found. Create one with 'colab new'."
+            self._resolve_session_failure(
+                command,
+                "no_active_sessions",
+                "No active sessions found. Create one with 'colab new'.",
             )
-            raise typer.Exit(1)
 
         # If we have local sessions, we need to sync to make sure they are still valid.
         # This will trigger auth if valid credentials are not present.
@@ -273,15 +302,17 @@ class State:
             typer.echo(f"[colab] Using unique session '{name}'.")
             return name
         elif len(active_names) > 1:
-            typer.echo(
-                f"[colab] Error: Multiple active sessions found. Specify one with -s: {', '.join(active_names)}"
+            self._resolve_session_failure(
+                command,
+                "ambiguous_session",
+                f"Multiple active sessions found. Specify one with -s: {', '.join(active_names)}",
             )
-            raise typer.Exit(1)
         else:
-            typer.echo(
-                "[colab] Error: No active sessions found. Create one with 'colab new'."
+            self._resolve_session_failure(
+                command,
+                "no_active_sessions",
+                "No active sessions found. Create one with 'colab new'.",
             )
-            raise typer.Exit(1)
 
 
 state = State()

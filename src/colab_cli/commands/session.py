@@ -489,7 +489,7 @@ def stop(
     from colab_cli.common import build_envelope, emit_json, state
     from colab_cli.envelopes import StopEnvelope
 
-    name = state.resolve_session(session)
+    name = state.resolve_session(session, command="stop")
     s = state.store.get(name)
     if not s:
         # Idempotent by design: "not found" means the postcondition (no

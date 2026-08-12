@@ -50,6 +50,14 @@ below corresponds to a tag of the same name.
   mistakes worth special-casing -- e.g. passing a session name
   positionally instead of via `-s/--session`).
 
+### Fixed
+
+- **`--json`:** `exec`/`exec-async`/`stop` without `-s` now emit a JSON
+  envelope (`reason="no_active_sessions"` or `"ambiguous_session"`) when
+  session auto-resolution fails, instead of silently falling back to
+  plain text. The shared `resolve_session()` helper predated `--json` and
+  was the one error path in these three commands that never got updated.
+
 ### Changed
 
 - **Logging:** default log level dropped from `DEBUG` to `INFO`. Third-party

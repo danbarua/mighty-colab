@@ -258,7 +258,7 @@ def exec_command(
     want_json = state.json_output or json_result_path is not None
 
     env_vars = _parse_env_vars(env)
-    name = state.resolve_session(session)
+    name = state.resolve_session(session, command="exec")
     s = state.store.get(name)
     if not s:
         if want_json:
@@ -593,7 +593,7 @@ def exec_async(
     # Validate --env up front so we fail fast, before spawning anything.
     _parse_env_vars(env)
 
-    name = state.resolve_session(session)
+    name = state.resolve_session(session, command="exec-async")
     s = state.store.get(name)
     if not s:
         if state.json_output:

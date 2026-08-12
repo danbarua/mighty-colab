@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
+
 from unittest.mock import MagicMock, patch
 import pytest
 import typer
@@ -56,6 +58,72 @@ def test_resolve_session_with_local_but_none_on_server():
         )
 
     state._store.remove.assert_called_with("s1")
+
+
+# ---------------------------------------------------------------------------
+# resolve_session under --json: this helper predates the --json design and
+# was the one escape hatch left after every *other* error path in
+# exec/exec-async/stop was made JSON-aware -- it's shared code called before
+# any of those commands' own JSON-gating logic runs. Fixed once here rather
+# than patching each of the three call sites (see State._resolve_session_failure).
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_session_json_no_local_sessions_emits_envelope(capsys):
+    state = State()
+    state.json_output = True
+    state._store = MagicMock()
+    state._store.list.return_value = {}
+
+    with pytest.raises(typer.Exit) as excinfo:
+        state.resolve_session(None, command="exec")
+    assert excinfo.value.exit_code == 1
+
+    envelope = json.loads(capsys.readouterr().out)
+    assert envelope["command"] == "exec"
+    assert envelope["status"] == "error"
+    assert envelope["reason"] == "no_active_sessions"
+    assert "No active sessions found" in envelope["message"]
+
+
+def test_resolve_session_json_ambiguous_sessions_emits_envelope(capsys):
+    state = State()
+    state.json_output = True
+    state._store = MagicMock()
+    mock_session = MagicMock()
+    mock_session.endpoint = "e1"
+    state._store.list.return_value = {"s1": mock_session, "s2": mock_session}
+
+    state._client = MagicMock()
+    state._client.list_assignments.return_value = [
+        MagicMock(endpoint="e1"),
+    ]
+    # Both local sessions report the same endpoint "e1" so neither gets
+    # pruned by sync_sessions -- both stay "active", forcing the ambiguous
+    # (len > 1) branch instead of the "none survived sync" branch.
+    with pytest.raises(typer.Exit) as excinfo:
+        state.resolve_session(None, command="exec-async")
+    assert excinfo.value.exit_code == 1
+
+    envelope = json.loads(capsys.readouterr().out)
+    assert envelope["command"] == "exec-async"
+    assert envelope["reason"] == "ambiguous_session"
+    assert "Multiple active sessions found" in envelope["message"]
+
+
+def test_resolve_session_without_json_still_plain_text(capsys):
+    """Regression guard: default (non-`--json`) behavior is byte-for-byte
+    unchanged -- no envelope, no change to the plain-text message."""
+    state = State()
+    state._store = MagicMock()
+    state._store.list.return_value = {}
+
+    with pytest.raises(typer.Exit):
+        state.resolve_session(None, command="exec")
+
+    out = capsys.readouterr().out
+    assert "{" not in out
+    assert "[colab] Error: No active sessions found" in out
 
 
 def test_sync_sessions_avoids_client_if_no_local():

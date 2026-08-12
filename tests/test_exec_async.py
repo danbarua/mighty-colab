@@ -248,7 +248,7 @@ def test_exec_async_does_not_refuse_when_exec_async_called_on_different_session(
     sessions = {"s1": mock_session1, "s2": mock_session2}
     mock_store.get.side_effect = lambda name: sessions[name]
     mock_store.list.return_value = sessions
-    mock_common_state.resolve_session.side_effect = lambda session: session
+    mock_common_state.resolve_session.side_effect = lambda session, **kwargs: session
     mock_common_state.history.log_dir = "/tmp/history"
     # s1's pid is alive -- if the guard were mistakenly global rather than
     # per-session, this would cause a false refusal on s2 too.
@@ -289,7 +289,7 @@ def test_exec_async_refuses_when_log_path_collides_with_another_live_session(
     sessions = {"s1": mock_session1, "s2": mock_session2}
     mock_store.get.side_effect = lambda name: sessions[name]
     mock_store.list.return_value = sessions
-    mock_common_state.resolve_session.side_effect = lambda session: session
+    mock_common_state.resolve_session.side_effect = lambda session, **kwargs: session
     mock_common_state.history.log_dir = "/tmp/history"
     mocker.patch("colab_cli.commands.execution.pid_alive", return_value=True)
 
