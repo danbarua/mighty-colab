@@ -24,7 +24,7 @@ import typer
 import uuid
 from nbformat.v4 import new_output
 from rich.console import Console
-from typing import List, Optional
+from typing import List, NoReturn, Optional
 from typing_extensions import Annotated
 
 from colab_cli.common import (
@@ -54,28 +54,43 @@ def is_stdin_tty():
     return sys.stdin.isatty()
 
 
-def _parse_env_vars(env: Optional[List[str]]) -> dict[str, str]:
-    """Parse repeatable --env KEY=VALUE entries into an ordered mapping."""
+def _parse_env_vars(env: Optional[List[str]], command: str = "cli") -> dict[str, str]:
+    """Parse repeatable --env KEY=VALUE entries into an ordered mapping.
+
+    Shared by `exec`, `exec-async`, and `run` -- all three call this before
+    their own JSON-gating logic ever runs, so (like `state.resolve_session`)
+    it needs its own `--json` awareness rather than relying on the caller to
+    catch a `typer.Exit` it didn't gate. `command` names the caller for the
+    envelope's `command` field.
+    """
     env_vars = {}
     for item in env or []:
         if "=" not in item:
-            typer.echo(
-                f"[colab] Invalid --env value {item!r}. Expected KEY=VALUE.",
-                err=True,
-            )
-            raise typer.Exit(2)
+            _invalid_env_exit(command, f"Invalid --env value {item!r}. Expected KEY=VALUE.")
 
         key, value = item.split("=", 1)
         if not ENV_KEY_REGEX.fullmatch(key):
-            typer.echo(
-                f"[colab] Invalid --env key {key!r}. Expected a valid "
-                "environment variable name.",
-                err=True,
+            _invalid_env_exit(
+                command,
+                f"Invalid --env key {key!r}. Expected a valid environment "
+                "variable name.",
             )
-            raise typer.Exit(2)
 
         env_vars[key] = value
     return env_vars
+
+
+def _invalid_env_exit(command: str, message: str) -> NoReturn:
+    from colab_cli.common import state
+
+    if state.json_output:
+        emit_json(
+            build_envelope(
+                "error", command, exit_code=2, reason="invalid_env", message=message
+            )
+        )
+    typer.echo(f"[colab] {message}", err=True)
+    raise typer.Exit(2)
 
 
 def _build_env_prelude(env_vars: dict[str, str]) -> str:
@@ -257,7 +272,7 @@ def exec_command(
 
     want_json = state.json_output or json_result_path is not None
 
-    env_vars = _parse_env_vars(env)
+    env_vars = _parse_env_vars(env, command="exec")
     name = state.resolve_session(session, command="exec")
     s = state.store.get(name)
     if not s:
@@ -591,7 +606,7 @@ def exec_async(
     from colab_cli.common import state
 
     # Validate --env up front so we fail fast, before spawning anything.
-    _parse_env_vars(env)
+    _parse_env_vars(env, command="exec-async")
 
     name = state.resolve_session(session, command="exec-async")
     s = state.store.get(name)
@@ -636,6 +651,8 @@ def exec_async(
             raise typer.Exit(1)
         code = sys.stdin.read()
         if not code.strip():
+            if state.json_output:
+                emit_json(build_envelope("ok", "exec-async", exit_code=0))
             raise typer.Exit(0)
         exec_async_dir = _exec_async_dir()
         os.makedirs(exec_async_dir, exist_ok=True)

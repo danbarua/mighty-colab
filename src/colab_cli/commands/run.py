@@ -264,7 +264,7 @@ def run_command(
 
     script_args = script_args or []
     script_args, inline_env = _extract_env_args_from_script_args(script_args)
-    env_vars = _parse_env_vars([*(env or []), *inline_env])
+    env_vars = _parse_env_vars([*(env or []), *inline_env], command="run")
 
     # AGENTS.md item 10: validate locally BEFORE allocating a VM. A typo'd
     # script path should not cost the user real compute.
@@ -286,9 +286,26 @@ def run_command(
         res = state.client.assign(
             uuid.uuid4(), variant=variant, accelerator=accelerator
         )
-    except ColabRequestError as e:
-        # Mirror `colab new`'s friendly accelerator-quota message.
-        if get_status_code(e) == 400 and accelerator != Accelerator.NONE:
+    except Exception as e:
+        # Mirror `colab new`'s friendly accelerator-quota message -- and,
+        # like `new`, give --json callers a JSON body for it and for any
+        # other assign failure, instead of a bare traceback (non-json
+        # behavior is untouched by this).
+        if (
+            isinstance(e, ColabRequestError)
+            and get_status_code(e) == 400
+            and accelerator != Accelerator.NONE
+        ):
+            if state.json_output:
+                emit_json(
+                    build_envelope(
+                        "error",
+                        "run",
+                        exit_code=1,
+                        reason="accelerator_rejected",
+                        http_status=400,
+                    )
+                )
             typer.echo(
                 f"[colab] Backend rejected accelerator '{accelerator.value}'. "
                 "You may not have quota or entitlement for this accelerator on "
@@ -297,6 +314,16 @@ def run_command(
                 err=True,
             )
             raise typer.Exit(code=1)
+        if state.json_output:
+            emit_json(
+                build_envelope(
+                    "error",
+                    "run",
+                    exit_code=1,
+                    reason="assign_failed",
+                    http_status=get_status_code(e),
+                )
+            )
         raise
 
     if isinstance(res, PostAssignmentResponse):
@@ -327,6 +354,16 @@ def run_command(
         state.client.keep_alive_assignment(endpoint)
     except ColabRequestError as e:
         if get_status_code(e) == 403 and _is_scope_error(e):
+            if state.json_output:
+                emit_json(
+                    build_envelope(
+                        "error",
+                        "run",
+                        exit_code=1,
+                        reason="auth_scope_missing",
+                        http_status=403,
+                    )
+                )
             typer.echo(
                 "[colab] Keep-alive pre-flight failed: your credentials "
                 "are missing an OAuth scope required by Colab.\n",

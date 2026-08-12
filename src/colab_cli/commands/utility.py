@@ -328,6 +328,22 @@ def log(
     ] = None,
 ):
     """Manage and view session history logs"""
+    if state.json_output and not tail:
+        # `--json` only has a defined shape for `log --tail --json` (the
+        # sidecar/pid-liveness envelope in `_tail_log_json`). Every other
+        # mode here (`--follow`, or the default history listing) just
+        # prints prose -- which the `_json_aware_echo` wrapper would
+        # silently redirect entirely to stderr, leaving a `--json` caller's
+        # stdout empty with no envelope and no warning. Same fallback this
+        # codebase already uses for a `--json`-unsupported command
+        # entirely (see cli.py's callback()), applied at flag-combination
+        # granularity here since `log` is JSON-capable but only partially.
+        state.json_output = False
+        typer.echo(
+            "[colab] --json has no effect on 'log' without --tail; "
+            "supported: `log --tail --json`.",
+            err=True,
+        )
     if follow or tail:
         if not session:
             flag = "--follow" if follow else "--tail"

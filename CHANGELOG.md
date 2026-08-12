@@ -57,6 +57,14 @@ below corresponds to a tag of the same name.
   session auto-resolution fails, instead of silently falling back to
   plain text. The shared `resolve_session()` helper predated `--json` and
   was the one error path in these three commands that never got updated.
+- **`--json`:** four more shared/duplicated-code gaps found via a
+  follow-up audit, all fixed the same way: `_parse_env_vars` (shared by
+  `exec`/`exec-async`/`run`, new reason `invalid_env`); `run`'s own copies
+  of `new`'s accelerator-rejection and keep-alive-scope-preflight handling
+  (never got the `--json` gating `new` has, despite matching text);
+  `exec-async` on empty piped stdin (no envelope at all before, now emits
+  a bare `status="ok"`); `log --json` without `--tail` (previously sent
+  all output to stderr silently, now warns and falls back to plain text).
 
 ### Changed
 

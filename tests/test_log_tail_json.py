@@ -210,6 +210,45 @@ def test_log_tail_json_requires_session(mocker):
     assert excinfo.value.exit_code == 2
 
 
+def test_log_json_without_tail_warns_and_falls_back_to_plain_text(mocker, capsys):
+    """`--json` only has a defined shape for `log --tail --json` -- without
+    --tail, the global `typer.echo` redirect would otherwise silently send
+    every line of this command's output to stderr with no JSON envelope
+    and no warning, leaving a `--json` caller's stdout empty. Matches the
+    existing "--json has no effect on X" fallback cli.py's callback()
+    already uses for whole unsupported commands, applied here at
+    flag-combination granularity since `log` is JSON-capable but only
+    partially (--tail only, not --follow or the default listing)."""
+    mock_state = _mock_state(mocker)
+    mock_state.history.list_sessions.return_value = []
+
+    log(session=None, tail=False, follow=False)
+
+    assert mock_state.json_output is False
+    err = capsys.readouterr().err
+    assert "--json has no effect on 'log' without --tail" in err
+
+
+def test_log_json_with_tail_is_unaffected(mocker, tmp_path, capsys):
+    """Regression guard: `--tail --json` (the one combination --json does
+    support) must not trip the new fallback."""
+    log_file = tmp_path / "s1.exec.log"
+    log_file.write_text("step 0\n")
+
+    mock_state = _mock_state(mocker)
+    mock_state.store.get.return_value = SessionState(
+        name="s1", token="t", url="u", endpoint="e", exec_pid=999,
+        exec_log_path=str(log_file),
+    )
+    mocker.patch("colab_cli.commands.utility.pid_alive", return_value=True)
+
+    log(session="s1", tail=True)
+
+    assert mock_state.json_output is True
+    envelope = json.loads(capsys.readouterr().out)
+    assert envelope["status"] == "running"
+
+
 def test_log_tail_without_json_is_unaffected(mocker, tmp_path, capsys):
     """Regression guard: the plain-text --tail path (no --json) must be
     byte-for-byte unchanged."""

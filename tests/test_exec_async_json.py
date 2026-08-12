@@ -144,6 +144,24 @@ def test_exec_async_json_session_not_found_error_envelope(
     assert envelope["reason"] == "session_not_found"
 
 
+def test_exec_async_json_malformed_env_emits_envelope(
+    mock_store, mock_common_state, capsys
+):
+    """`_parse_env_vars` is shared with exec/run and predates --json (like
+    resolve_session) -- validated up front, before session resolution."""
+    mock_common_state.json_output = True
+
+    with pytest.raises(typer.Exit) as excinfo:
+        exec_async(session="s1", file="script.py", env=["HF_TOKEN"])
+    assert excinfo.value.exit_code == 2
+
+    envelope = json.loads(capsys.readouterr().out)
+    assert envelope["command"] == "exec-async"
+    assert envelope["status"] == "error"
+    assert envelope["reason"] == "invalid_env"
+    mock_common_state.resolve_session.assert_not_called()
+
+
 def test_exec_async_json_no_input_error_envelope(mock_store, mock_common_state, capsys, mocker):
     mock_session = MagicMock()
     mock_session.name = "s1"
@@ -186,6 +204,52 @@ def test_exec_async_json_log_path_collision_error_envelope(
     envelope = json.loads(captured.out)
     assert envelope["status"] == "error"
     assert envelope["reason"] == "log_path_collision"
+
+
+def test_exec_async_json_empty_stdin_emits_ok_envelope(
+    mock_store, mock_common_state, capsys, mocker
+):
+    """`if not code.strip(): raise typer.Exit(0)` used to leak silently --
+    empty stdout, no envelope, matching status=ok but with nothing for a
+    `--json` caller to parse. Mirrors exec_command's own empty-code-ok
+    case (`blocks=[]`); exec-async has no "started" pid/log_path to report
+    since nothing actually started."""
+    mock_session = MagicMock()
+    mock_session.name = "s1"
+    mock_session.exec_pid = None
+    mock_store.get.return_value = mock_session
+    mock_common_state.resolve_session.return_value = "s1"
+    mock_common_state.json_output = True
+    mocker.patch("colab_cli.commands.execution.is_stdin_tty", return_value=False)
+    mocker.patch("sys.stdin.read", return_value="   \n  ")
+
+    with pytest.raises(typer.Exit) as excinfo:
+        exec_async(session="s1", file=None)
+    assert excinfo.value.exit_code == 0
+
+    envelope = json.loads(capsys.readouterr().out)
+    assert envelope["command"] == "exec-async"
+    assert envelope["status"] == "ok"
+    assert envelope["exit_code"] == 0
+
+
+def test_exec_async_without_json_empty_stdin_stays_silent(
+    mock_store, mock_common_state, capsys, mocker
+):
+    """Regression guard: the non-`--json` path is unchanged -- no envelope."""
+    mock_session = MagicMock()
+    mock_session.name = "s1"
+    mock_session.exec_pid = None
+    mock_store.get.return_value = mock_session
+    mock_common_state.resolve_session.return_value = "s1"
+    mock_common_state.json_output = False
+    mocker.patch("colab_cli.commands.execution.is_stdin_tty", return_value=False)
+    mocker.patch("sys.stdin.read", return_value="")
+
+    with pytest.raises(typer.Exit) as excinfo:
+        exec_async(session="s1", file=None)
+    assert excinfo.value.exit_code == 0
+    assert capsys.readouterr().out == ""
 
 
 def test_spawn_exec_async_appends_json_result_path_flag(mocker):

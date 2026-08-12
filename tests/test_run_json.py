@@ -23,9 +23,18 @@ import pytest
 from typer.testing import CliRunner
 
 from colab_cli.cli import app
-from colab_cli.client import PostAssignmentResponse
+from colab_cli.client import ColabRequestError, PostAssignmentResponse
 
 runner = CliRunner()
+
+
+def _make_response_error(status_code, body="", message="error"):
+    response = MagicMock()
+    response.status_code = status_code
+    response.reason = message
+    return ColabRequestError(
+        message, request=MagicMock(), response=response, response_body=body
+    )
 
 
 @pytest.fixture
@@ -364,3 +373,72 @@ def test_run_json_script_not_found(mock_common_state, tmp_path):
     assert envelope["status"] == "error"
     assert envelope["reason"] == "script_not_found"
     assert envelope["exit_code"] == 2
+
+
+def test_run_json_accelerator_rejected(mock_client, mock_common_state, script_path):
+    """Mirrors `new --json`'s accelerator_rejected handling -- `run_command`
+    only had the plain-text message, not the --json gating, until now."""
+    mock_common_state.json_output = True
+    mock_client.assign.side_effect = _make_response_error(400)
+
+    result = runner.invoke(app, ["run", str(script_path), "--gpu", "H100"])
+    assert result.exit_code == 1
+
+    envelope = json.loads(result.stdout)
+    assert envelope["command"] == "run"
+    assert envelope["status"] == "error"
+    assert envelope["reason"] == "accelerator_rejected"
+    assert envelope["http_status"] == 400
+
+
+def test_run_json_assign_generic_failure_emits_assign_failed(
+    mock_client, mock_common_state, script_path
+):
+    """A non-400 (or accelerator-less) assign failure falls through to a
+    generic catch-all, mirroring `new --json`'s `new_failed`."""
+    mock_common_state.json_output = True
+    mock_client.assign.side_effect = RuntimeError("connection reset")
+
+    result = runner.invoke(app, ["run", str(script_path)])
+    assert result.exit_code == 1
+
+    envelope = json.loads(result.stdout)
+    assert envelope["status"] == "error"
+    assert envelope["reason"] == "assign_failed"
+
+
+def test_run_json_auth_scope_missing(
+    mock_client, mock_common_state, assign_response, script_path
+):
+    """Mirrors `new --json`'s auth_scope_missing handling for the same
+    keep-alive preflight scope check, which `run_command` duplicates."""
+    mock_common_state.json_output = True
+    mock_client.assign.return_value = assign_response
+    mock_client.keep_alive_assignment.side_effect = _make_response_error(
+        403, body="...SCOPE_NOT_PERMITTED..."
+    )
+
+    result = runner.invoke(app, ["run", str(script_path)])
+    assert result.exit_code == 1
+
+    envelope = json.loads(result.stdout)
+    assert envelope["status"] == "error"
+    assert envelope["reason"] == "auth_scope_missing"
+    assert envelope["http_status"] == 403
+    mock_client.unassign.assert_called_once_with("ep-123")
+
+
+def test_run_json_malformed_env(mock_common_state, script_path):
+    """`_parse_env_vars` is shared with exec/exec-async and predates
+    --json -- validated up front, before any VM is allocated."""
+    mock_common_state.json_output = True
+
+    result = runner.invoke(
+        app, ["run", str(script_path), "--env", "HF_TOKEN"]
+    )
+    assert result.exit_code == 2
+
+    envelope = json.loads(result.stdout)
+    assert envelope["command"] == "run"
+    assert envelope["status"] == "error"
+    assert envelope["reason"] == "invalid_env"

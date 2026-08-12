@@ -391,3 +391,24 @@ def test_exec_json_result_path_does_not_suppress_output_hook(
         "print('hi')", output_hook=ANY, timeout=30.0
     )
     assert mock_runtime.execute_code.call_args.kwargs["output_hook"] is not None
+
+
+def test_exec_json_malformed_env_emits_envelope(mock_common_state, mock_runtime_class):
+    """`_parse_env_vars` is shared by exec/exec-async/run and predates
+    --json (like `resolve_session`) -- it sits upstream of exec_command's
+    own JSON-gating logic, so it needs its own envelope on this failure
+    rather than leaking plain text."""
+    mock_common_state.json_output = True
+
+    result = runner.invoke(
+        app, ["exec", "-s", "s1", "--env", "HF_TOKEN"], input="print(1)"
+    )
+    assert result.exit_code == 2
+
+    envelope = json.loads(result.stdout)
+    assert envelope["command"] == "exec"
+    assert envelope["status"] == "error"
+    assert envelope["reason"] == "invalid_env"
+    assert "Expected KEY=VALUE" in envelope["message"]
+    mock_common_state.resolve_session.assert_not_called()
+    mock_runtime_class.assert_not_called()
