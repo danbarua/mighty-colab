@@ -115,6 +115,56 @@ def test_run_basic_flow(
     mock_client.unassign.assert_called_once_with("ep-123")
 
 
+def test_run_logs_invocation_provenance(
+    mock_client,
+    mock_store,
+    mock_runtime_class,
+    mock_spawn_keep_alive,
+    mock_common_state,
+    assign_response,
+    script_path,
+):
+    """The `execution` history event must carry the CLI-level params that
+    produced it, not just the outcome -- mirrors `exec`'s equivalent
+    provenance logging."""
+    mock_client.assign.return_value = assign_response
+    mock_runtime = mock_runtime_class.return_value
+    mock_runtime.execute_code.return_value = []
+
+    persisted = {}
+    mock_store.add.side_effect = lambda s: persisted.__setitem__("s", s)
+    mock_store.get.side_effect = lambda name: persisted.get("s")
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "--gpu",
+            "T4",
+            "--keep",
+            "--timeout",
+            "45",
+            "--env",
+            "RUN_ID=abc123",
+            str(script_path),
+            "--",
+            "positional-arg",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+    call = mock_common_state.history.log_event.call_args
+    assert call.args[1] == "execution"
+    invocation = call.args[2]["invocation"]
+    assert invocation["script"] == str(script_path)
+    assert invocation["script_args"] == ["positional-arg"]
+    assert invocation["gpu"] == "T4"
+    assert invocation["tpu"] is None
+    assert invocation["keep"] is True
+    assert invocation["timeout"] == 45.0
+    assert invocation["env"] == {"RUN_ID": "abc123"}
+
+
 def test_run_teardown_warns_and_preserves_state_when_unassign_fails(
     mock_client,
     mock_store,

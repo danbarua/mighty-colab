@@ -443,6 +443,17 @@ def exec_command(
                     "outputs": outputs,
                     "cell_index": i if len(code_blocks) > 1 else None,
                     "cell_id": block.get("id"),
+                    # Provenance: what invocation produced this outcome, not
+                    # just the outcome itself. Logged as-is, no redaction --
+                    # no CLI flag anywhere carries a raw secret directly, and
+                    # --env's real usage is provenance metadata of its own
+                    # (CORRELATION_ID/RUN_ID/EXPERIMENT_ID), not a secret
+                    # vector.
+                    "invocation": {
+                        "file": file,
+                        "timeout": timeout,
+                        "env": env_vars,
+                    },
                 },
             )
             if want_json:

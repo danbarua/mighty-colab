@@ -17,6 +17,15 @@ below corresponds to a tag of the same name.
   session -- both omitted, not `null`, when unset. Deliberately no
   estimated time-until-idle-timeout: only what's actually been measured
   is surfaced. Plain-text output is unchanged.
+- **History:** `exec`/`exec-async`/`run`'s `execution` events now carry an
+  `invocation` sub-dict (the CLI params that produced them --
+  `timeout`/`env`/`file` for `exec`, plus
+  `script`/`script_args`/`tpu`/`gpu`/`keep` for `run`) alongside the
+  existing `code`/`outputs`, so a session's history log can answer "what
+  invocation produced this outcome," not just "what happened." Logged
+  plainly, no redaction -- no CLI flag carries a raw secret directly, and
+  `--env` in practice carries provenance metadata of its own
+  (`RUN_ID`/`EXPERIMENT_ID`/etc.).
 
 ### Fixed
 

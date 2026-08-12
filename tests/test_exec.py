@@ -68,6 +68,80 @@ def test_cli_exec_file(mock_store, mock_runtime_class, mock_common_state, tmp_pa
     mock_runtime.execute_code.assert_any_call(expected, output_hook=ANY, timeout=30.0)
 
 
+def test_cli_exec_logs_invocation_provenance(
+    mock_store, mock_runtime_class, mock_common_state, tmp_path
+):
+    """The `execution` history event must carry the CLI-level params that
+    produced it -- --timeout/--env/--file -- not just the outcome
+    (code/outputs). Values logged as-is (no redaction): --env is the
+    real vector for run-provenance metadata (CORRELATION_ID, RUN_ID,
+    EXPERIMENT_ID) in practice, and no CLI flag anywhere carries a raw
+    secret directly."""
+    mock_session = MagicMock()
+    mock_session.url = "http://url"
+    mock_session.token = "token123"
+    mock_session.name = "s1"
+    mock_session.kernel_id = None
+    mock_session.session_id = None
+    mock_store.get.return_value = mock_session
+    mock_common_state.resolve_session.return_value = "s1"
+    mock_runtime = mock_runtime_class.return_value
+    mock_runtime.execute_code.return_value = [{"text": "hello\n"}]
+
+    script = tmp_path / "script.py"
+    script.write_text("print('hello')")
+
+    result = runner.invoke(
+        app,
+        [
+            "exec",
+            "-s",
+            "s1",
+            "-f",
+            str(script),
+            "--timeout",
+            "45",
+            "--env",
+            "RUN_ID=abc123",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+    call = mock_common_state.history.log_event.call_args
+    assert call.args[0] == "s1"
+    assert call.args[1] == "execution"
+    invocation = call.args[2]["invocation"]
+    assert invocation["file"] == str(script)
+    assert invocation["timeout"] == 45.0
+    assert invocation["env"] == {"RUN_ID": "abc123"}
+
+
+def test_cli_exec_logs_invocation_with_unset_options_as_none(
+    mock_store, mock_runtime_class, mock_common_state
+):
+    """Omitted options log as None/empty, not a missing key or KeyError --
+    this is a raw debug log, not a schema-validated envelope, so what
+    *wasn't* set is as informative as what was."""
+    mock_session = MagicMock()
+    mock_session.url = "http://url"
+    mock_session.token = "token123"
+    mock_session.name = "s1"
+    mock_session.kernel_id = None
+    mock_session.session_id = None
+    mock_store.get.return_value = mock_session
+    mock_common_state.resolve_session.return_value = "s1"
+    mock_runtime = mock_runtime_class.return_value
+    mock_runtime.execute_code.return_value = [{"text": "hi\n"}]
+
+    result = runner.invoke(app, ["exec", "-s", "s1"], input="print('hi')")
+    assert result.exit_code == 0, result.output
+
+    call = mock_common_state.history.log_event.call_args
+    invocation = call.args[2]["invocation"]
+    assert invocation["file"] is None
+    assert invocation["env"] == {}
+
+
 def test_cli_exec_file_prelude_precedes_env_prelude(
     mock_store, mock_runtime_class, mock_common_state, tmp_path
 ):

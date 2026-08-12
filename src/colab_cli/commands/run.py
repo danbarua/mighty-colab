@@ -505,7 +505,23 @@ def run_command(
             state.history.log_event(
                 name,
                 "execution",
-                {"code": payload, "outputs": outputs, "via": "run"},
+                {
+                    "code": payload,
+                    "outputs": outputs,
+                    "via": "run",
+                    # Provenance: see the matching comment at exec's
+                    # equivalent log_event call in execution.py for why
+                    # this is logged as-is, no redaction.
+                    "invocation": {
+                        "script": script,
+                        "script_args": script_args,
+                        "tpu": tpu,
+                        "gpu": gpu,
+                        "keep": keep,
+                        "timeout": timeout,
+                        "env": env_vars,
+                    },
+                },
             )
     finally:
         s.running = None

@@ -38,13 +38,21 @@ class HistoryLogger:
         """
         Appends a structured event to the session's history file.
 
-        event_types:
-          - session_created
-          - session_terminated
-          - execution (code + outputs)
-          - input_requested (stdin prompts/replies)
-          - file_operation (ls, rm, upload, download)
-          - automation (auth, install, drivemount)
+        event_types (grep this file's own `.log_event(` call sites for the
+        exact `data` shape each carries -- this logger itself doesn't
+        constrain it):
+          - session_created / session_terminated / session_refreshed /
+            session_adopted
+          - execution (code + outputs; exec/exec-async/run/repl also
+            carry an "invocation" sub-dict with the CLI params that
+            produced it, e.g. timeout/env/file)
+          - stdin_request / input_reply (stdin prompts/replies)
+          - file_operation (ls, rm, upload, download, edit)
+          - automation / automation_result (auth, install, drivemount)
+          - colab_request / drive_auth_needed / drive_auth_success
+            (Drive-mount automation's own sub-events)
+          - repl_started / console_started
+          - keep_alive_started / keep_alive_error / keep_alive_stopped
         """
         log_path = self._get_log_path(session_name)
         event = {
