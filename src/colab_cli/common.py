@@ -315,13 +315,23 @@ def kill_process(pid: int):
         logging.debug(f"Failed to kill process {pid}")
 
 
-def setup_logging(log_to_stderr: bool):
+def setup_logging(log_to_stderr: bool, debug: bool = False):
+    """Configure the root logger.
+
+    Defaults to INFO -- DEBUG is opt-in via `--debug`, since third-party
+    libraries (urllib3, jupyter_kernel_client, websocket) have no level of
+    their own and inherit whatever the root logger is set to, so a
+    DEBUG-by-default root logger meant every invocation's log file (and
+    stderr, under --logtostderr/--json) filled with their internal chatter
+    -- not something a "normal" CLI does by default.
+    """
     log_format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    level = logging.DEBUG if debug else logging.INFO
     logger = logging.getLogger()
-    logger.setLevel(logging.DEBUG)
+    logger.setLevel(level)
 
     requests_log = logging.getLogger("urllib3")
-    requests_log.setLevel(logging.DEBUG)
+    requests_log.setLevel(level)
     requests_log.propagate = True
 
     log_dir = os.path.expanduser("~/.config/colab-cli")

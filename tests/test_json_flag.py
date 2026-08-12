@@ -41,6 +41,7 @@ def _invoke_callback(invoked_subcommand="version", **overrides):
         client_oauth_config="/tmp/oauth.json",
         config=None,
         logtostderr=False,
+        debug=False,
         json_output=False,
         auth=AuthProvider.OAUTH2,
     )
@@ -61,7 +62,7 @@ def test_json_flag_sets_state_and_forces_logtostderr(mocker):
     _invoke_callback(invoked_subcommand="exec", json_output=True)
     assert state.json_output is True
     assert state.logtostderr is True
-    mock_setup_logging.assert_called_once_with(True)
+    mock_setup_logging.assert_called_once_with(True, False)
 
 
 def test_json_flag_on_unsupported_command_warns_and_disables_json_output(
@@ -76,7 +77,7 @@ def test_json_flag_on_unsupported_command_warns_and_disables_json_output(
     # --logtostderr is still forced -- harmless, and simpler than carving
     # out an exception for it too.
     assert state.logtostderr is True
-    mock_setup_logging.assert_called_once_with(True)
+    mock_setup_logging.assert_called_once_with(True, False)
     assert "--json has no effect on 'version'" in capsys.readouterr().err
 
 
@@ -94,7 +95,7 @@ def test_explicit_logtostderr_is_not_clobbered_by_json_false(mocker):
     mock_setup_logging = mocker.patch("colab_cli.cli.setup_logging")
     _invoke_callback(json_output=False, logtostderr=True)
     assert state.logtostderr is True
-    mock_setup_logging.assert_called_once_with(True)
+    mock_setup_logging.assert_called_once_with(True, False)
 
 
 def test_echo_wrapper_noop_when_json_output_false(mock_common_state, mocker):

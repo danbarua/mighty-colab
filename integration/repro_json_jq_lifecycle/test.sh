@@ -41,13 +41,15 @@
 #      reason=session_not_found, and jq reads the exit code straight out
 #      of the envelope.
 #
-# `--json` implies `--logtostderr`, so every invocation below dumps
-# urllib3/jupyter_kernel_client/websocket DEBUG chatter to stderr -- useful
-# when something breaks, pure noise when skimming for pass/fail. That
-# chatter is captured into one running $DEBUG_LOG instead of the console;
-# `fail()` dumps it on the way out if a phase actually fails, and the
-# cleanup trap deletes it (with the rest of $TMP_DIR) either way, so it
-# never lingers on disk.
+# `--json` implies `--logtostderr`, so every invocation below sends its
+# INFO-level log lines to stderr too (DEBUG-level urllib3/
+# jupyter_kernel_client/websocket chatter is opt-in via `--debug` and off
+# by default -- see docs/02_execution_and_interactive.md's 2026-08-12
+# entry). Still, that's noise when skimming for pass/fail, so it's
+# captured into one running $DEBUG_LOG instead of the console; `fail()`
+# dumps it on the way out if a phase actually fails, and the cleanup trap
+# deletes it (with the rest of $TMP_DIR) either way, so it never lingers
+# on disk.
 
 # Don't `set -e` so we can capture failures and still clean up explicitly.
 

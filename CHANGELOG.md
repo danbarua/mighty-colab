@@ -38,6 +38,18 @@ below corresponds to a tag of the same name.
   exit-0 no-op), matching the "query commands should error on not found"
   principle. Every error envelope also carries `http_status`, the raw
   backend HTTP status code alongside `reason`.
+- **`--debug`:** new global flag to opt into `DEBUG`-level logging
+  (including third-party library chatter from urllib3,
+  `jupyter_kernel_client`, and websocket). Off by default.
+
+### Changed
+
+- **Logging:** default log level dropped from `DEBUG` to `INFO`. Third-party
+  libraries have no level of their own and inherit the root logger's, so a
+  `DEBUG`-by-default root meant every invocation's log file (and stderr,
+  under `--logtostderr`/`--json`) filled with their internal chatter --
+  not something a normal CLI does by default. Use `--debug` to restore the
+  old behavior.
 
 ## [0.3.0] - 2026-08-11
 

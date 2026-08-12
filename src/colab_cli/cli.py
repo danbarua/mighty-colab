@@ -55,6 +55,7 @@ GLOBAL_OPTION_NAMES = {
     "--client-oauth-config",
     "--config",
     "--logtostderr",
+    "--debug",
     "--json",
     "--auth",
 }
@@ -131,6 +132,17 @@ def callback(
     logtostderr: Annotated[
         bool, typer.Option("--logtostderr", help="Log all output to stderr")
     ] = False,
+    debug: Annotated[
+        bool,
+        typer.Option(
+            "--debug",
+            help=(
+                "Enable DEBUG-level logging, including third-party library "
+                "chatter (urllib3, jupyter_kernel_client, websocket). "
+                "Default level is INFO."
+            ),
+        ),
+    ] = False,
     json_output: Annotated[
         bool,
         typer.Option(
@@ -183,7 +195,7 @@ def callback(
             )
     state.logtostderr = logtostderr
     state.auth_provider = auth
-    setup_logging(logtostderr)
+    setup_logging(logtostderr, debug)
 
     # Daily fetch + cached banner on every invocation.
     #
