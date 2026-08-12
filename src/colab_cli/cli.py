@@ -289,6 +289,17 @@ def callback(
     #     pipelines.
     #   - `whoami`: developer-only debugging tool; banner would obscure the
     #     auth/scope info the user invoked it to see.
+    #   - `--json` (or the hidden `--json-result-path`): stdout is a
+    #     machine-parseable envelope. `--json` alone is already covered by
+    #     `_json_aware_echo`'s stderr redirect, but skipping the check
+    #     outright also saves the network round-trip. `--json-result-path`
+    #     needs its own check: `exec-async`'s spawned child receives that
+    #     flag but deliberately never `--json` itself (see
+    #     `spawn_exec_async`), so `state.json_output`/`json_output` stays
+    #     False for it -- and since it's a hidden option on `exec`'s own
+    #     parser, it isn't parsed yet at this point in the root callback
+    #     (same reason `_check_global_option_position` scans raw `argv`
+    #     for `--json` instead of relying on parsed state).
     _AUTO_UPDATE_SUPPRESSED = {
         "update",
         "version",
@@ -302,7 +313,8 @@ def callback(
         "skill",
         "SKILL",
     }
-    if ctx.invoked_subcommand not in _AUTO_UPDATE_SUPPRESSED:
+    wants_machine_output = json_output or "--json-result-path" in sys.argv[1:]
+    if ctx.invoked_subcommand not in _AUTO_UPDATE_SUPPRESSED and not wants_machine_output:
         auto_update.run_background_check()
 
 

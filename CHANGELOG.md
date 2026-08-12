@@ -87,6 +87,17 @@ below corresponds to a tag of the same name.
   failures) escape uncaught. Emits the same envelope/plain-text shape as
   every other error path; `--debug` bypasses it and re-raises the full
   traceback for anyone debugging the CLI itself.
+- **`--json`:** the daily update-check banner could leak onto stdout
+  alongside a `--json`/`--json-result-path` envelope, corrupting it for a
+  `jq` consumer. `--json` itself was already implicitly safe (routed to
+  stderr by the `--json` echo redirect), but `exec-async`'s spawned child
+  -- which receives the hidden `--json-result-path` flag but deliberately
+  never `--json` itself -- had no such protection, since the banner-vs-
+  suppress decision runs in the root callback before `exec`'s own
+  `--json-result-path` option is parsed. Both are now checked explicitly
+  (scanning raw `argv` for the hidden flag, the same way
+  `_check_global_option_position` already does for misplaced globals)
+  before the background check ever runs -- not just before it prints.
 
 ### Changed
 
