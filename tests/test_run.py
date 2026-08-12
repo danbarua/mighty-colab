@@ -164,7 +164,7 @@ def test_run_logs_invocation_provenance(
     assert invocation["keep"] is True
     assert invocation["timeout"] == 45.0
     assert invocation["env"] == {"RUN_ID": "abc123"}
-    assert invocation["no_preflight_check"] is False
+    assert invocation["preflight_check"] is False
 
 
 def test_run_teardown_warns_and_preserves_state_when_unassign_fails(
@@ -645,22 +645,48 @@ def sibling_import_script(tmp_path):
     return script
 
 
-def test_run_import_check_failure_errors_before_assign(mock_client, sibling_import_script):
-    """The pre-flight runs unconditionally (no flag) and must stop `run`
-    before any VM is allocated."""
+def test_run_without_preflight_check_flag_does_not_gate_a_bad_script(
+    mock_client,
+    mock_store,
+    mock_runtime_class,
+    mock_spawn_keep_alive,
+    assign_response,
+    sibling_import_script,
+):
+    """Off by default: the check can't distinguish 'genuinely missing'
+    from 'preinstalled remotely, just not in this local environment' (the
+    common case for this tool -- torch et al.), so it must not run unless
+    explicitly requested. `assign` IS called even for a script that would
+    fail the check."""
+    mock_client.assign.return_value = assign_response
+    mock_runtime = mock_runtime_class.return_value
+    mock_runtime.execute_code.return_value = []
+    persisted = {}
+    mock_store.add.side_effect = lambda s: persisted.__setitem__("s", s)
+    mock_store.get.side_effect = lambda name: persisted.get("s")
+
     result = runner.invoke(app, ["run", str(sibling_import_script)])
+
+    assert result.exit_code == 0, result.output
+    mock_client.assign.assert_called_once()
+
+
+def test_run_preflight_check_flag_errors_before_assign(mock_client, sibling_import_script):
+    """With --preflight-check opted in, the check must stop `run` before
+    any VM is allocated."""
+    result = runner.invoke(app, ["run", "--preflight-check", str(sibling_import_script)])
 
     assert result.exit_code != 0
     assert "Import check failed" in result.output
     mock_client.assign.assert_not_called()
 
 
-def test_run_import_check_failure_json_envelope(
+def test_run_preflight_check_flag_json_envelope(
     mock_client, mock_common_state, sibling_import_script
 ):
     mock_common_state.json_output = True
 
-    result = runner.invoke(app, ["run", str(sibling_import_script)])
+    result = runner.invoke(app, ["run", "--preflight-check", str(sibling_import_script)])
 
     assert result.exit_code != 0
     envelope = json.loads(result.stdout)
@@ -671,53 +697,29 @@ def test_run_import_check_failure_json_envelope(
     mock_client.assign.assert_not_called()
 
 
-def test_run_import_check_plain_missing_module_hint_mentions_escape_hatch(
+def test_run_preflight_check_plain_missing_module_hint_is_honest(
     mock_client, mock_common_state, tmp_path
 ):
     """A plain missing-import (no sys.path involvement) can't be told apart
     from 'genuinely missing on the remote too' vs 'preinstalled on the
     Colab image, just absent from this local dev environment' (e.g. torch
     on a Mac). The hint must not assert the former as fact -- and must
-    point at --no-preflight-check for the latter, real case."""
+    point at rerunning without --preflight-check for the latter, real
+    case (which, since the flag is opt-in, is also just the default)."""
     mock_common_state.json_output = True
     script = tmp_path / "needs_missing_pkg.py"
     script.write_text("import totally_nonexistent_package_xyz\n")
 
-    result = runner.invoke(app, ["run", str(script)])
+    result = runner.invoke(app, ["run", "--preflight-check", str(script)])
 
     assert result.exit_code != 0
     envelope = json.loads(result.stdout)
     assert envelope["reason"] == "import_check_failed"
-    assert "--no-preflight-check" in envelope["hint"]
+    assert "--preflight-check" in envelope["hint"]
     mock_client.assign.assert_not_called()
 
 
-def test_run_no_preflight_check_bypasses_the_gate(
-    mock_client,
-    mock_store,
-    mock_runtime_class,
-    mock_spawn_keep_alive,
-    assign_response,
-    sibling_import_script,
-):
-    """The escape hatch must genuinely bypass the check -- `assign` IS
-    called -- not just suppress the error message."""
-    mock_client.assign.return_value = assign_response
-    mock_runtime = mock_runtime_class.return_value
-    mock_runtime.execute_code.return_value = []
-    persisted = {}
-    mock_store.add.side_effect = lambda s: persisted.__setitem__("s", s)
-    mock_store.get.side_effect = lambda name: persisted.get("s")
-
-    result = runner.invoke(
-        app, ["run", "--no-preflight-check", str(sibling_import_script)]
-    )
-
-    assert result.exit_code == 0, result.output
-    mock_client.assign.assert_called_once()
-
-
-def test_run_import_check_passes_for_clean_script(
+def test_run_preflight_check_passes_for_clean_script(
     mock_client,
     mock_store,
     mock_runtime_class,
@@ -734,7 +736,7 @@ def test_run_import_check_passes_for_clean_script(
     mock_store.add.side_effect = lambda s: persisted.__setitem__("s", s)
     mock_store.get.side_effect = lambda name: persisted.get("s")
 
-    result = runner.invoke(app, ["run", str(script_path)])
+    result = runner.invoke(app, ["run", "--preflight-check", str(script_path)])
 
     assert result.exit_code == 0, result.output
     mock_client.assign.assert_called_once()

@@ -250,14 +250,19 @@ def run_command(
             ),
         ),
     ] = None,
-    no_preflight_check: Annotated[
+    preflight_check: Annotated[
         bool,
         typer.Option(
-            "--no-preflight-check",
+            "--preflight-check",
             help=(
-                "Skip the local import check that normally runs before a VM "
-                "is provisioned. Use this if the check produces a false "
-                "positive for a use case it doesn't yet understand."
+                "Run a local import check before provisioning a VM, and "
+                "fail fast if the script won't import cleanly (e.g. a "
+                "sibling import that only resolves locally). Off by "
+                "default: it can't tell 'genuinely missing' apart from "
+                "'preinstalled on the Colab image, just not in this local "
+                "environment' -- e.g. GPU packages like torch -- so a "
+                "script that runs fine remotely can still be refused "
+                "here. Opt in when you want that extra local check."
             ),
         ),
     ] = False,
@@ -296,7 +301,10 @@ def run_command(
     # only surface as a `ModuleNotFoundError` after a VM is already paid
     # for. `check_imports` reproduces the same __file__ substitution `run`
     # performs remotely, so it catches this class of failure here instead.
-    if not no_preflight_check:
+    # Opt-in (off by default): it can't distinguish "genuinely missing"
+    # from "preinstalled on the Colab image, just not locally" -- the
+    # torch/GPU-package case, which is the common case for this tool.
+    if preflight_check:
         check_result = check_imports(script)
         if not check_result.ok:
             if check_result.new_sys_path_entries:
@@ -317,8 +325,8 @@ def run_command(
                     f"{check_result.missing_module}`) before running this "
                     "script. If it's only missing here -- e.g. a GPU "
                     "package that's preinstalled on the Colab image but "
-                    "not in your local dev environment -- pass "
-                    "`--no-preflight-check` to skip this local check."
+                    "not in your local dev environment -- rerun without "
+                    "`--preflight-check`."
                 )
             else:
                 hint = None
@@ -593,7 +601,7 @@ def run_command(
                         "keep": keep,
                         "timeout": timeout,
                         "env": env_vars,
-                        "no_preflight_check": no_preflight_check,
+                        "preflight_check": preflight_check,
                     },
                 },
             )

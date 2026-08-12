@@ -1,6 +1,6 @@
 ---
 log:
-2026-08-12: Added an always-on import pre-flight (`--no-preflight-check` to opt out), and `--output-log <directory>` unique-per-run filenames for `exec-async` -- see `docs/02_execution_and_interactive.md`'s 2026-08-12 entry for the full combined writeup of both fixes (this file covers the `run`-side half). New `src/colab_cli/import_check.py` module, `check_imports()`.
+2026-08-12: Added an opt-in import pre-flight (`--preflight-check`), and `--output-log <directory>` unique-per-run filenames for `exec-async` -- see `docs/02_execution_and_interactive.md`'s 2026-08-12 entry for the full combined writeup of both fixes (this file covers the `run`-side half). New `src/colab_cli/import_check.py` module, `check_imports()`. Shipped always-on first, then flipped to opt-in the same day after live-testing surfaced that it hard-blocked `import torch` at module scope -- the exact GPU shebang workflow this doc demonstrates -- on any machine where torch isn't in the CLI's own local environment, even though torch is preinstalled on every real Colab runtime. The check genuinely cannot tell "missing everywhere" apart from "missing only locally," so defaulting it on penalized the single most common Colab workload (GPU/ML packages) to catch a narrower class of failure (sibling imports that only resolve locally). `--preflight-check` opts in when the caller wants that extra local check anyway.
 2026-05-12: Initial design and implementation of `colab run <script.py> [args...]`. Combines `colab new` + `colab exec` + `colab stop` into a single fire-and-forget invocation so a Python file can use `#!/usr/bin/env -S  mighty-colab run` as a shebang line and execute on a freshly-allocated Colab VM. Adds `--keep` (skip auto-stop), `--gpu` / `--tpu` (passthrough to session creation), `-s/--session` (name the ephemeral session), and propagates the script's exit status (non-zero on any uncaught exception in the kernel). The script's `sys.argv` is re-set inside the kernel to mirror native `python script.py arg1 arg2` semantics, and `__name__` is set to `"__main__"`.
 2026-05-12: Native CPython exit-code semantics for `sys.exit()` / `raise SystemExit(...)` from the script body. The Colab kernel reports a `SystemExit` as `output_type=='error'`, which under the previous logic would have (a) printed the IPython traceback (`An exception has occurred, use %tb...`) and (b) flagged the run as a failure regardless of the integer exit code. Now: `sys.exit()` / `sys.exit(0)` exit 0 silently; `sys.exit(N)` exits N; `sys.exit('msg')` exits 1 (matching CPython). The IPython "To exit: use 'exit', 'quit', or Ctrl-D." UserWarning is filtered via the prelude. Encoded after running `examples/gpu_hello.py` end-to-end and seeing the noisy `SystemExit: 0` traceback at the end of an otherwise-successful GPU run.
 2026-06-04: Bumped the default value of the `--timeout` flag from 10.0s to 30.0s so short-but-silent tasks aren't prematurely killed out of the box. Mirrors the same change for `colab exec`.
@@ -33,7 +33,7 @@ colab run [OPTIONS] SCRIPT [SCRIPT_ARGS]...
 | `--tpu` | str | None | Same set as `colab new --tpu` (v5e1, v6e1). |
 | `--keep` | bool | False | Do **not** stop the session after the script finishes. |
 | `--timeout` | float | 30.0 | Timeout in seconds for code execution to prevent hanging on silent tasks. |
-| `--no-preflight-check` | bool | False | Skip the local import check that normally runs before a VM is allocated (see "Import pre-flight" below). |
+| `--preflight-check` | bool | False | Opt in to a local import check before a VM is allocated (see "Import pre-flight" below). Off by default. |
 
 ### Shebang usage
 With `--keep` and `--gpu` baked into the shebang line, an entire one-file workload becomes:
@@ -57,8 +57,9 @@ can import cleanly locally (the real repo structure is genuinely present)
 and still `ModuleNotFoundError` on the remote VM, where `/content` starts
 empty and `__file__` is the synthetic sentinel described below.
 
-Before allocating a VM (unless `--no-preflight-check` is passed), `run`
-imports the script via `check_imports()` (`src/colab_cli/import_check.py`)
+With `--preflight-check` passed, `run` imports the script via
+`check_imports()` (`src/colab_cli/import_check.py`), before allocating a
+VM,
 the same way it will be faked remotely: the file loads from its real
 absolute path (so genuinely-installed packages resolve normally), but
 the loaded module's `__file__` is overridden to the same
@@ -88,19 +89,21 @@ Not wired into `exec -f`: that command runs against an
 already-provisioned session, so there's no VM-provisioning cost the
 check would save there.
 
-**Local-vs-remote environment drift**: the check can only report what
-imports locally, in the CLI's own Python environment -- it has no
-visibility into what's actually installed on the Colab image. A GPU
-shebang script like the one earlier in this doc (`import torch` at
-module scope) will fail this check on any machine where the CLI's own
-environment doesn't have `torch` installed, even though `torch` is
-preinstalled on every real Colab runtime -- the local answer and the
-remote answer are genuinely different questions here, and the check
-can't tell them apart. This is a deliberate, documented trade-off, not a
-bug: catching the sibling-import class of failure (provably will not
-exist remotely, regardless of what's installed where) is worth a false
-positive on this one. `--no-preflight-check` is the escape hatch for
-exactly this case.
+**Why opt-in, not default-on**: the check can only report what imports
+locally, in the CLI's own Python environment -- it has no visibility
+into what's actually installed on the Colab image. A GPU shebang script
+like the one earlier in this doc (`import torch` at module scope) fails
+this check on any machine where the CLI's own environment doesn't have
+`torch` installed, even though `torch` is preinstalled on every real
+Colab runtime -- the local answer and the remote answer are genuinely
+different questions here, and the check can't tell them apart. GPU/ML
+packages missing locally but present on the Colab image is the *common*
+case for this tool, not an edge case, so defaulting the check on would
+penalize the majority workload to catch a narrower failure class
+(sibling imports that provably won't exist remotely regardless of what's
+installed where). `--preflight-check` opts in when the caller wants that
+extra local check anyway -- e.g. CI, or a script known not to depend on
+anything GPU-specific.
 
 ## Behavior
 
