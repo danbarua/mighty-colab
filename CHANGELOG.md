@@ -10,6 +10,8 @@ below corresponds to a tag of the same name.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-12
+
 ### Added
 
 - **History:** `new`/`run`'s `assign()` failure now logs an
@@ -402,7 +404,8 @@ below corresponds to a tag of the same name.
 - The experimental `colab-mcp` git submodule, superseded by the hand-rolled
   MCP server above.
 
-[Unreleased]: https://github.com/danbarua/mighty-colab/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/danbarua/mighty-colab/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/danbarua/mighty-colab/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/danbarua/mighty-colab/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/danbarua/mighty-colab/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/danbarua/mighty-colab/compare/v0.2.2...v0.3.0
