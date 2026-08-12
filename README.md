@@ -59,34 +59,86 @@ Or, with `pip`:
 pip install mighty-colab
 ```
 
-> [!IMPORTANT]
-> `exec-async` is available in `v0.3.0`. The new `--json` interface is currently
-> on `main` and will ship in the next tagged release. To use it now:
->
-> ```bash
-> uv tool install git+https://github.com/danbarua/mighty-colab
-> ```
-
 ## A 60-second agent workflow
 
-Assuming Application Default Credentials are configured:
+Assuming Application Default Credentials are configured. Every response below
+was captured live against a real CPU runtime — nothing fabricated. Swap in
+`--gpu T4` / `--gpu A100` on `new` for accelerated workloads; the envelope
+shape is identical either way.
 
 ```bash
 SESSION=agent-job
+echo 'print("hello from mighty-colab")' > job.py
 
 # Allocate a named runtime.
-mighty-colab --auth=adc --json new -s "$SESSION" --gpu T4
+mighty-colab --auth=adc --json new -s "$SESSION"
+```
 
+```json
+{
+  "schema_version": "1",
+  "cli_version": "<installed version>",
+  "command": "new",
+  "status": "ok",
+  "exit_code": 0,
+  "session": "agent-job",
+  "endpoint": "m-s-kkb-use1c1-2ol526ollah5r",
+  "variant": "DEFAULT",
+  "accelerator": "NONE"
+}
+```
+
+```bash
 # Capture the remote verdict as data, not terminal prose.
 RESULT="$(mighty-colab --auth=adc --json exec \
   -s "$SESSION" -f job.py --timeout 3600)"
+```
 
+```json
+{
+  "schema_version": "1",
+  "cli_version": "<installed version>",
+  "command": "exec",
+  "status": "ok",
+  "exit_code": 0,
+  "blocks": [
+    {
+      "code": "import sys\nsys.argv = ['job.py']\n__name__ = '__main__'\n__file__ = '<mighty-colab-exec:job.py>'\nprint(\"hello from mighty-colab\")\n",
+      "outputs": [
+        {
+          "output_type": "stream",
+          "name": "stdout",
+          "text": "hello from mighty-colab\n"
+        }
+      ],
+      "cell_index": null,
+      "cell_id": null
+    }
+  ]
+}
+```
+
+```bash
 # Teardown happens before either verdict is propagated.
 CLEANUP="$(mighty-colab --auth=adc --json stop -s "$SESSION")"
+```
 
+```json
+{
+  "schema_version": "1",
+  "cli_version": "<installed version>",
+  "command": "stop",
+  "status": "ok",
+  "exit_code": 0,
+  "session": "agent-job"
+}
+```
+
+```bash
 # Fail if either the remote job or cleanup failed.
 jq -en --argjson job "$RESULT" --argjson cleanup "$CLEANUP" \
   '$job.status == "ok" and $cleanup.status == "ok"'
+# -> true
 ```
 
 Global flags such as `--auth`, `--json`, and `--config` belong **before** the
