@@ -311,10 +311,14 @@ def run_command(
                 )
             elif check_result.missing_module:
                 hint = (
-                    f"Make sure '{check_result.missing_module}' is "
-                    "installed on the remote (`colab install "
+                    f"'{check_result.missing_module}' isn't importable in "
+                    "this local environment. If it's genuinely missing, "
+                    "install it on the remote (`colab install "
                     f"{check_result.missing_module}`) before running this "
-                    "script."
+                    "script. If it's only missing here -- e.g. a GPU "
+                    "package that's preinstalled on the Colab image but "
+                    "not in your local dev environment -- pass "
+                    "`--no-preflight-check` to skip this local check."
                 )
             else:
                 hint = None

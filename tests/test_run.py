@@ -670,6 +670,27 @@ def test_run_import_check_failure_json_envelope(
     mock_client.assign.assert_not_called()
 
 
+def test_run_import_check_plain_missing_module_hint_mentions_escape_hatch(
+    mock_client, mock_common_state, tmp_path
+):
+    """A plain missing-import (no sys.path involvement) can't be told apart
+    from 'genuinely missing on the remote too' vs 'preinstalled on the
+    Colab image, just absent from this local dev environment' (e.g. torch
+    on a Mac). The hint must not assert the former as fact -- and must
+    point at --no-preflight-check for the latter, real case."""
+    mock_common_state.json_output = True
+    script = tmp_path / "needs_missing_pkg.py"
+    script.write_text("import totally_nonexistent_package_xyz\n")
+
+    result = runner.invoke(app, ["run", str(script)])
+
+    assert result.exit_code != 0
+    envelope = json.loads(result.stdout)
+    assert envelope["reason"] == "import_check_failed"
+    assert "--no-preflight-check" in envelope["hint"]
+    mock_client.assign.assert_not_called()
+
+
 def test_run_no_preflight_check_bypasses_the_gate(
     mock_client,
     mock_store,

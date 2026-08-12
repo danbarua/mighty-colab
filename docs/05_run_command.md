@@ -88,6 +88,20 @@ Not wired into `exec -f`: that command runs against an
 already-provisioned session, so there's no VM-provisioning cost the
 check would save there.
 
+**Local-vs-remote environment drift**: the check can only report what
+imports locally, in the CLI's own Python environment -- it has no
+visibility into what's actually installed on the Colab image. A GPU
+shebang script like the one earlier in this doc (`import torch` at
+module scope) will fail this check on any machine where the CLI's own
+environment doesn't have `torch` installed, even though `torch` is
+preinstalled on every real Colab runtime -- the local answer and the
+remote answer are genuinely different questions here, and the check
+can't tell them apart. This is a deliberate, documented trade-off, not a
+bug: catching the sibling-import class of failure (provably will not
+exist remotely, regardless of what's installed where) is worth a false
+positive on this one. `--no-preflight-check` is the escape hatch for
+exactly this case.
+
 ## Behavior
 
 1. **Allocate**: Creates a fresh session (mirrors `colab new` end-to-end: `assign` → keep-alive pre-flight → spawn keep-alive daemon → persist `SessionState`). Session name defaults to `run-<6 hex>`.
