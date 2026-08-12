@@ -75,8 +75,12 @@ echo "----------------------------------------------"
 # 3. Assertions
 EXPECTED_CLIENT_ID="764086051850-6qr4p6gpi6hn506pt8ejuq83di341hur.apps.googleusercontent.com"
 
-# The command should have printed the authorization URL
-if ! grep -q "Please visit this URL to authorize this application" "$OUTPUT_LOG"; then
+# The command should have printed the authorization URL. This must match
+# the literal message auth.py's device-flow prompt actually prints
+# (auth.py:88) -- not InstalledAppFlow's own default wording, since this
+# codebase deliberately overrides it (see the comment there on why
+# run_local_server/run_console aren't used).
+if ! grep -q "To authorize colab-cli, visit this URL in any browser" "$OUTPUT_LOG"; then
     echo "[FAILURE] OAuth prompt message not found in output."
     rm -f "$OUTPUT_LOG"
     exit 1

@@ -100,10 +100,21 @@ fi
 # Verify the process command line is actually mighty-colab keep-alive
 ps -fp $PID | grep "keep-alive"
 
-LOG_OUTPUT=$(uv run mighty-colab $AUTH_FLAGS --config "$SESSION_FILE" log -s "$SESSION_NAME")
+# `new` returns as soon as the daemon is *spawned*, not once it's actually
+# running -- the detached child still has to boot Python, import the
+# package, and write its keep_alive_started event before it shows up here.
+# Poll instead of checking once, immediately, with zero retry budget.
+LOG_OUTPUT=""
+for i in $(seq 1 10); do
+    LOG_OUTPUT=$(uv run mighty-colab $AUTH_FLAGS --config "$SESSION_FILE" log -s "$SESSION_NAME")
+    if echo "$LOG_OUTPUT" | grep -q "KEEP: started"; then
+        break
+    fi
+    sleep 0.5
+done
 echo "$LOG_OUTPUT"
 if ! echo "$LOG_OUTPUT" | grep -q "KEEP: started"; then
-    echo "[FAILURE] keep_alive_started event missing from history."
+    echo "[FAILURE] keep_alive_started event missing from history after 5s."
     exit 1
 fi
 # The pre-flight in `colab new` calls keep_alive_assignment once
