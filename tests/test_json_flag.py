@@ -22,6 +22,8 @@ retarget it). So the callback is exercised directly here, against the real
 singleton, rather than through `CliRunner` + the mock.
 """
 
+import json
+
 from unittest.mock import MagicMock
 
 from colab_cli.auth import AuthProvider
@@ -149,7 +151,13 @@ def test_echo_wrapper_respects_explicit_file(mock_common_state, mocker):
 # ---------------------------------------------------------------------------
 
 
-def test_check_global_option_position_flags_json_after_subcommand(capsys):
+def test_check_global_option_position_flags_json_after_subcommand_as_json_envelope(
+    capsys,
+):
+    """`--json` itself being the misplaced option is exactly the case a
+    caller piping into `jq` needs a parseable answer for -- plain text
+    would just break their pipeline -- so this diverts to a JSON envelope
+    on stdout instead, same as any other `--json`-present-in-argv case."""
     from colab_cli.cli import _check_global_option_position
 
     try:
@@ -157,9 +165,31 @@ def test_check_global_option_position_flags_json_after_subcommand(capsys):
         assert False, "expected SystemExit"
     except SystemExit as e:
         assert e.code == 2
-    stderr = capsys.readouterr().err
-    assert "'--json' is a global option" in stderr
-    assert "must come before the subcommand" in stderr
+    envelope = json.loads(capsys.readouterr().out)
+    assert envelope["status"] == "error"
+    assert envelope["exit_code"] == 2
+    assert envelope["reason"] == "usage_error"
+    assert envelope["command"] == "help"
+    assert "'--json' is a global option" in envelope["message"]
+    assert "must come before the subcommand" in envelope["message"]
+
+
+def test_check_global_option_position_other_option_after_correctly_placed_json(
+    capsys,
+):
+    """`--json` correctly precedes the subcommand while `--auth` doesn't --
+    still JSON-shaped, since `--json` appearing anywhere in argv is enough
+    to know the caller wants JSON back."""
+    from colab_cli.cli import _check_global_option_position
+
+    try:
+        _check_global_option_position(["--json", "sessions", "--auth", "adc"])
+        assert False, "expected SystemExit"
+    except SystemExit as e:
+        assert e.code == 2
+    envelope = json.loads(capsys.readouterr().out)
+    assert envelope["command"] == "sessions"
+    assert "'--auth' is a global option" in envelope["message"]
 
 
 def test_check_global_option_position_allows_json_before_subcommand():
@@ -208,7 +238,9 @@ def test_check_global_option_position_skips_value_of_preceding_global_option():
     )  # must not raise
 
 
-def test_check_global_option_position_still_catches_mistake_after_value_taking_option():
+def test_check_global_option_position_still_catches_mistake_after_value_taking_option(
+    capsys,
+):
     from colab_cli.cli import _check_global_option_position
 
     try:
@@ -218,3 +250,8 @@ def test_check_global_option_position_still_catches_mistake_after_value_taking_o
         assert False, "expected SystemExit"
     except SystemExit as e:
         assert e.code == 2
+    # --json is present (it's the misplaced option itself here) -- JSON
+    # envelope, not plain text, and the resolved command name skips past
+    # --config's value token correctly.
+    envelope = json.loads(capsys.readouterr().out)
+    assert envelope["command"] == "log"

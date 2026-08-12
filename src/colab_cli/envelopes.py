@@ -31,6 +31,15 @@ either.
 rather than modeled further: they're nbformat-shaped, and nbformat is
 upstream's contract, not this CLI's.
 
+`message`/`hint` also live on `EnvelopeBase`: `message` carries a Click/Typer
+parse error's own text (e.g. "Got unexpected extra argument(s) (...)") when
+`--json` diverts one of those away from its usual Rich-boxed stderr display
+(see `cli.py`'s `_json_aware_rich_format_error`); `hint` is a short,
+actionable suggestion, populated only for the handful of parse-error shapes
+worth special-casing (not general-purpose inference -- new shapes get added
+when a real one shows up, same bar already applied to deferring
+input-parameter echoing).
+
 `http_status` also lives on `EnvelopeBase`, for the same reason: whenever
 an error envelope wraps a `ColabRequestError`, the raw HTTP status code is
 cheap, honest, already-available context (`utils.get_status_code`) worth
@@ -63,6 +72,8 @@ class EnvelopeBase(BaseModel):
     content: Optional[str] = None
     next_offset: Optional[int] = None
     http_status: Optional[int] = None
+    message: Optional[str] = None
+    hint: Optional[str] = None
 
 
 class Block(BaseModel):

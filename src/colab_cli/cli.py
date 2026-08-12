@@ -18,13 +18,14 @@ from typing import List, Optional
 
 import click
 import typer
+from typer import rich_utils
 from typer.core import TyperGroup
 from typing_extensions import Annotated
 
 from colab_cli import auto_update
 from colab_cli import common
 from colab_cli.auth import AuthProvider
-from colab_cli.common import state, setup_logging
+from colab_cli.common import build_envelope, emit_json, state, setup_logging
 from colab_cli.commands import session, execution, files, automation, run, ssh, utility
 from colab_cli.commands import adopt, mcp
 
@@ -91,6 +92,72 @@ def _json_aware_echo(message=None, file=None, nl=True, err=False, color=None):
 
 
 typer.echo = _json_aware_echo
+
+
+def _usage_error_hint(exc) -> Optional[str]:
+    """A short, actionable suggestion for the handful of parse-error shapes
+    worth special-casing -- not general-purpose inference. New shapes get
+    added when a real one shows up, the same bar already applied to
+    deferring input-parameter echoing in the envelope.
+    """
+    message = exc.format_message()
+    ctx = getattr(exc, "ctx", None)
+    if ctx is not None and "unexpected extra argument" in message.lower():
+        # The single most common shape: a session name passed positionally
+        # (e.g. `stop SESSION`) instead of via the command's own `-s/
+        # --session` option.
+        for param in ctx.command.params:
+            if getattr(param, "name", None) == "session" and getattr(
+                param, "opts", None
+            ):
+                opt = param.opts[0]
+                return f"Pass the session name with '{opt}', not as a positional argument."
+    return None
+
+
+_original_rich_format_error = rich_utils.rich_format_error
+
+
+def _json_aware_rich_format_error(exc) -> None:
+    """Divert Click/Typer parse errors (unknown option, missing argument,
+    unexpected extra argument, ...) into a JSON envelope on stdout while
+    `--json` is active, instead of Typer's Rich-boxed stderr display --
+    which a `--json` caller piping into `jq` would otherwise have to
+    text-scrape (or get nothing at all, since the box goes to stderr).
+
+    Hooked here because Typer funnels every parse-time `ClickException`
+    through this one function (`typer.core._main`'s except-ClickException
+    branch) whenever Rich rendering is enabled -- the same choke point that
+    produces the boxed "Error: ..." panel. By the time this fires, the
+    root `@app.callback()` has already run (a Click Group invokes its own
+    callback before parsing its subcommand's args -- verified empirically,
+    not assumed), so `state.json_output` already reflects whatever `--json`
+    did for this invocation. Checks the module-level `state` (the exact
+    object `callback()` itself mutates), not `common.state` -- unlike
+    `_json_aware_echo`'s ~160 call sites spread across the whole codebase,
+    this function has exactly one caller (Typer's own error path) and
+    fires only after `callback()` has already run, so there's no benefit
+    to a fresh `common.state` lookup, only a cost: under test mocking that
+    patches `colab_cli.common.state` to a separate object (see
+    `tests/conftest.py`), a fresh lookup would miss the mutation this
+    module's own `callback()` just made.
+    """
+    if state.json_output:
+        ctx = getattr(exc, "ctx", None)
+        command_name = ctx.command.name if ctx is not None and ctx.command.name else "cli"
+        extra = {"message": exc.format_message()}
+        hint = _usage_error_hint(exc)
+        if hint is not None:
+            extra["hint"] = hint
+        envelope = build_envelope(
+            "error", command_name, exit_code=exc.exit_code, reason="usage_error", **extra
+        )
+        emit_json(envelope)
+        return
+    _original_rich_format_error(exc)
+
+
+rich_utils.rich_format_error = _json_aware_rich_format_error
 
 
 class AlphabeticalGroup(TyperGroup):
@@ -290,18 +357,38 @@ def _check_global_option_position(argv: List[str]) -> None:
             i += 2  # this option and its separate value token
         else:
             i += 1
+    command_name = argv[i] if i < len(argv) else "cli"
     i += 1  # skip the subcommand token itself, if there was one
 
     for arg in argv[i:]:
         if arg.startswith("-"):
             option_name = arg.split("=", 1)[0]
             if option_name in GLOBAL_OPTION_NAMES:
-                typer.echo(
-                    f"[colab] '{option_name}' is a global option and must "
-                    f"come before the subcommand, e.g.: "
-                    f"mighty-colab {option_name} <command> [args...]",
-                    err=True,
+                message = (
+                    f"'{option_name}' is a global option and must come "
+                    f"before the subcommand, e.g.: mighty-colab {option_name} "
+                    f"<command> [args...]"
                 )
+                if "--json" in argv:
+                    # This runs before Click (and this CLI's own callback)
+                    # ever parses argv, so `common.state.json_output` isn't
+                    # set yet -- check the raw tokens instead. `--json`
+                    # itself may be the misplaced option here, or it may
+                    # genuinely precede the subcommand while some other
+                    # global option doesn't; either way, a caller piping
+                    # into `jq` should get valid JSON back, not plain text
+                    # that breaks the pipeline.
+                    emit_json(
+                        build_envelope(
+                            "error",
+                            command_name,
+                            exit_code=2,
+                            reason="usage_error",
+                            message=message,
+                        )
+                    )
+                else:
+                    typer.echo(f"[colab] {message}", err=True)
                 raise SystemExit(2)
 
 

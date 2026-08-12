@@ -41,6 +41,14 @@ below corresponds to a tag of the same name.
 - **`--debug`:** new global flag to opt into `DEBUG`-level logging
   (including third-party library chatter from urllib3,
   `jupyter_kernel_client`, and websocket). Off by default.
+- **`--json`:** Click/Typer parse errors (unknown option, missing/extra
+  argument) now emit a JSON envelope on stdout instead of a Rich-boxed
+  stderr display, so a `| jq` pipeline gets a parseable answer instead of
+  breaking. Applies to every subcommand, not just the `--json`-capable
+  ones. New envelope fields: `message` (the underlying parse-error text)
+  and `hint` (a short, actionable suggestion, populated for the handful of
+  mistakes worth special-casing -- e.g. passing a session name
+  positionally instead of via `-s/--session`).
 
 ### Changed
 

@@ -188,6 +188,26 @@ def test_envelope_base_http_status_defaults_to_none():
     assert envelope.http_status is None
 
 
+def test_envelope_base_accepts_message_and_hint():
+    envelope = EnvelopeBase(
+        **_base_kwargs(
+            status="error",
+            exit_code=2,
+            reason="usage_error",
+            message="Got unexpected extra argument(s) (badarg)",
+            hint="Pass the session name with '-s', not as a positional argument.",
+        )
+    )
+    assert envelope.message == "Got unexpected extra argument(s) (badarg)"
+    assert envelope.hint == "Pass the session name with '-s', not as a positional argument."
+
+
+def test_envelope_base_message_and_hint_default_to_none():
+    envelope = EnvelopeBase(**_base_kwargs())
+    assert envelope.message is None
+    assert envelope.hint is None
+
+
 def test_new_session_envelope_valid_construction():
     envelope = NewSessionEnvelope(
         **_base_kwargs(
