@@ -40,6 +40,14 @@
 #   8. `status --json -s <name>` after stop -> status=error,
 #      reason=session_not_found, and jq reads the exit code straight out
 #      of the envelope.
+#
+# `--json` implies `--logtostderr`, so every invocation below dumps
+# urllib3/jupyter_kernel_client/websocket DEBUG chatter to stderr -- useful
+# when something breaks, pure noise when skimming for pass/fail. That
+# chatter is captured into one running $DEBUG_LOG instead of the console;
+# `fail()` dumps it on the way out if a phase actually fails, and the
+# cleanup trap deletes it (with the rest of $TMP_DIR) either way, so it
+# never lingers on disk.
 
 # Don't `set -e` so we can capture failures and still clean up explicitly.
 
@@ -69,6 +77,7 @@ echo "[*] Using $AUTH_FLAGS"
 # ---------- Isolated session state -------------------------------------------
 TMP_DIR=$(mktemp -d)
 SESSION_FILE="$TMP_DIR/sessions.json"
+DEBUG_LOG="$TMP_DIR/debug.log"
 MC="uv run mighty-colab $AUTH_FLAGS --config $SESSION_FILE"
 
 SESSION_NAME=""
@@ -81,30 +90,40 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Prints a failure message, dumps whatever mighty-colab chatter has
+# accumulated in $DEBUG_LOG so far (the cleanup trap deletes it right
+# after -- this is the one chance to see it), then exits 1.
+fail() {
+    echo "[FAILURE] $1"
+    if [ -s "$DEBUG_LOG" ]; then
+        echo "--- debug log ($DEBUG_LOG) ---"
+        cat "$DEBUG_LOG"
+        echo "--- end debug log ---"
+    fi
+    exit 1
+}
+
 # ---------- Phase 1: new --json -> jq extracts the session name -------------
 echo ""
 echo "[*] Phase 1: new --json (REAL API CALL) -- jq extracts the session name"
-NEW_OUT=$($MC --json new 2>"$TMP_DIR/new_stderr.log")
+NEW_OUT=$($MC --json new 2>>"$DEBUG_LOG")
 RC=$?
 echo "$NEW_OUT"
 if [ $RC -ne 0 ]; then
-    echo "[FAILURE] new --json exited $RC"
-    cat "$TMP_DIR/new_stderr.log"
-    exit 1
+    fail "new --json exited $RC"
 fi
 
 NEW_STATUS=$(echo "$NEW_OUT" | jq -r '.status')
 SESSION_NAME=$(echo "$NEW_OUT" | jq -r '.session')
 if [ "$NEW_STATUS" != "ok" ] || [ -z "$SESSION_NAME" ] || [ "$SESSION_NAME" = "null" ]; then
-    echo "[FAILURE] new --json did not report status=ok with a session name."
-    exit 1
+    fail "new --json did not report status=ok with a session name."
 fi
 echo "[SUCCESS] Phase 1 passed: session '$SESSION_NAME' created."
 
 # ---------- Phase 2: exec --json a sys.exit(0) script ------------------------
 echo ""
 echo "[*] Phase 2: exec --json -- sys.exit(0) after real work must be status=ok"
-EXEC_OUT=$(cat <<'PYEOF' | $MC --json exec -s "$SESSION_NAME"
+EXEC_OUT=$(cat <<'PYEOF' | $MC --json exec -s "$SESSION_NAME" 2>>"$DEBUG_LOG"
 import sys
 print("computed:", 1 + 1)
 sys.exit(0)
@@ -113,44 +132,40 @@ PYEOF
 RC=$?
 echo "$EXEC_OUT"
 if [ $RC -ne 0 ]; then
-    echo "[FAILURE] exec --json exited $RC on a sys.exit(0) script."
-    exit 1
+    fail "exec --json exited $RC on a sys.exit(0) script."
 fi
 
 EXEC_STATUS=$(echo "$EXEC_OUT" | jq -r '.status')
 STDOUT_TEXT=$(echo "$EXEC_OUT" | jq -r '.blocks[0].outputs[] | select(.output_type=="stream") | .text')
 if [ "$EXEC_STATUS" != "ok" ]; then
-    echo "[FAILURE] status=$EXEC_STATUS, wanted 'ok' -- this is the exact"
-    echo "          incident (SystemExit(0) misread as failure) this design fixes."
-    exit 1
+    # This is the exact incident (SystemExit(0) misread as failure) this
+    # design fixes -- if it regresses, that's what a status!=ok here means.
+    fail "status=$EXEC_STATUS, wanted 'ok'."
 fi
 if ! echo "$STDOUT_TEXT" | grep -q "computed: 2"; then
-    echo "[FAILURE] jq did not find the expected stdout inside blocks[].outputs[]."
-    exit 1
+    fail "jq did not find the expected stdout inside blocks[].outputs[]."
 fi
 echo "[SUCCESS] Phase 2 passed: status=ok, jq read the script's stdout out of blocks[]."
 
 # ---------- Phase 3: status --json -s <name> ---------------------------------
 echo ""
 echo "[*] Phase 3: status --json -s $SESSION_NAME -- jq reads the busy/idle field"
-STATUS_OUT=$($MC --json status -s "$SESSION_NAME")
+STATUS_OUT=$($MC --json status -s "$SESSION_NAME" 2>>"$DEBUG_LOG")
 echo "$STATUS_OUT"
 SESSION_STATE=$(echo "$STATUS_OUT" | jq -r '.session.status')
 if [ "$SESSION_STATE" != "IDLE" ]; then
-    echo "[FAILURE] session.status=$SESSION_STATE, wanted 'IDLE' (exec finished above)."
-    exit 1
+    fail "session.status=$SESSION_STATE, wanted 'IDLE' (exec finished above)."
 fi
 echo "[SUCCESS] Phase 3 passed: session.status=$SESSION_STATE."
 
 # ---------- Phase 4: sessions --json -----------------------------------------
 echo ""
 echo "[*] Phase 4: sessions --json -- jq confirms the session is listed"
-SESSIONS_OUT=$($MC --json sessions)
+SESSIONS_OUT=$($MC --json sessions 2>>"$DEBUG_LOG")
 echo "$SESSIONS_OUT"
 FOUND=$(echo "$SESSIONS_OUT" | jq -r --arg name "$SESSION_NAME" '.sessions[] | select(.name == $name) | .name')
 if [ "$FOUND" != "$SESSION_NAME" ]; then
-    echo "[FAILURE] '$SESSION_NAME' not found in sessions --json's list."
-    exit 1
+    fail "'$SESSION_NAME' not found in sessions --json's list."
 fi
 echo "[SUCCESS] Phase 4 passed: sessions --json lists '$SESSION_NAME'."
 
@@ -167,19 +182,18 @@ for i in range(4):
 print("done", flush=True)
 PYEOF
 
-SUBMIT_OUT=$($MC --json exec-async -s "$SESSION_NAME" -f "$ASYNC_SCRIPT")
+SUBMIT_OUT=$($MC --json exec-async -s "$SESSION_NAME" -f "$ASYNC_SCRIPT" 2>>"$DEBUG_LOG")
 echo "$SUBMIT_OUT"
 SUBMIT_STATUS=$(echo "$SUBMIT_OUT" | jq -r '.status')
 LOG_PATH=$(echo "$SUBMIT_OUT" | jq -r '.log_path')
 if [ "$SUBMIT_STATUS" != "started" ] || [ -z "$LOG_PATH" ] || [ "$LOG_PATH" = "null" ]; then
-    echo "[FAILURE] exec-async --json did not report status=started with a log_path."
-    exit 1
+    fail "exec-async --json did not report status=started with a log_path."
 fi
 
 OFFSET=0
 FINAL_STATUS=""
 for i in $(seq 1 15); do
-    POLL_OUT=$($MC --json log -s "$SESSION_NAME" --tail --since-offset "$OFFSET")
+    POLL_OUT=$($MC --json log -s "$SESSION_NAME" --tail --since-offset "$OFFSET" 2>>"$DEBUG_LOG")
     POLL_STATUS=$(echo "$POLL_OUT" | jq -r '.status')
     OFFSET=$(echo "$POLL_OUT" | jq -r '.next_offset')
     echo "[poll $i] status=$POLL_STATUS next_offset=$OFFSET"
@@ -191,54 +205,47 @@ for i in $(seq 1 15); do
 done
 
 if [ "$FINAL_STATUS" != "ok" ]; then
-    echo "[FAILURE] exec-async job's final status=$FINAL_STATUS, wanted 'ok'."
-    exit 1
+    fail "exec-async job's final status=$FINAL_STATUS, wanted 'ok'."
 fi
 echo "[SUCCESS] Phase 5 passed: exec-async --json -> jq-driven poll loop -> ok."
 
 # ---------- Phase 6: stop --json (real teardown) ------------------------------
 echo ""
 echo "[*] Phase 6: stop --json -- a real teardown this time"
-STOP_OUT=$($MC --json stop -s "$SESSION_NAME")
+STOP_OUT=$($MC --json stop -s "$SESSION_NAME" 2>>"$DEBUG_LOG")
 echo "$STOP_OUT"
 STOP_STATUS=$(echo "$STOP_OUT" | jq -r '.status')
 if [ "$STOP_STATUS" != "ok" ]; then
-    echo "[FAILURE] stop --json status=$STOP_STATUS, wanted 'ok'."
-    exit 1
+    fail "stop --json status=$STOP_STATUS, wanted 'ok'."
 fi
 echo "[SUCCESS] Phase 6 passed: stop --json status=ok."
 
 # ---------- Phase 7: stop --json again -- idempotent -------------------------
 echo ""
 echo "[*] Phase 7: stop --json again -- must be idempotent, not an error"
-STOP_AGAIN_OUT=$($MC --json stop -s "$SESSION_NAME")
+STOP_AGAIN_OUT=$($MC --json stop -s "$SESSION_NAME" 2>>"$DEBUG_LOG")
 echo "$STOP_AGAIN_OUT"
 STOP_AGAIN_STATUS=$(echo "$STOP_AGAIN_OUT" | jq -r '.status')
 STOP_AGAIN_REASON=$(echo "$STOP_AGAIN_OUT" | jq -r '.reason')
 if [ "$STOP_AGAIN_STATUS" != "ok" ] || [ "$STOP_AGAIN_REASON" != "already_stopped" ]; then
-    echo "[FAILURE] second stop --json was not the idempotent ok/already_stopped case."
-    exit 1
+    fail "second stop --json was not the idempotent ok/already_stopped case."
 fi
 echo "[SUCCESS] Phase 7 passed: idempotent stop -- status=ok, reason=already_stopped."
 
 # ---------- Phase 8: status --json -s <name> after stop -----------------------
 echo ""
 echo "[*] Phase 8: status --json -s $SESSION_NAME after stop -- must now error"
-AFTER_STOP_OUT=$($MC --json status -s "$SESSION_NAME")
+AFTER_STOP_OUT=$($MC --json status -s "$SESSION_NAME" 2>>"$DEBUG_LOG")
 AFTER_STOP_RC=$?
 echo "$AFTER_STOP_OUT"
 AFTER_STOP_STATUS=$(echo "$AFTER_STOP_OUT" | jq -r '.status')
 AFTER_STOP_REASON=$(echo "$AFTER_STOP_OUT" | jq -r '.reason')
 AFTER_STOP_EXIT_CODE=$(echo "$AFTER_STOP_OUT" | jq -r '.exit_code')
 if [ "$AFTER_STOP_STATUS" != "error" ] || [ "$AFTER_STOP_REASON" != "session_not_found" ]; then
-    echo "[FAILURE] status --json after stop did not report error/session_not_found."
-    exit 1
+    fail "status --json after stop did not report error/session_not_found."
 fi
 if [ "$AFTER_STOP_RC" -eq 0 ] || [ "$AFTER_STOP_EXIT_CODE" != "1" ]; then
-    echo "[FAILURE] status --json on a gone session must exit non-zero AND carry"
-    echo "          exit_code=1 in the envelope -- got process rc=$AFTER_STOP_RC,"
-    echo "          envelope exit_code=$AFTER_STOP_EXIT_CODE."
-    exit 1
+    fail "status --json on a gone session must exit non-zero AND carry exit_code=1 in the envelope -- got process rc=$AFTER_STOP_RC, envelope exit_code=$AFTER_STOP_EXIT_CODE."
 fi
 echo "[SUCCESS] Phase 8 passed: status --json correctly errors after teardown."
 
