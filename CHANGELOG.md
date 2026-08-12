@@ -12,6 +12,15 @@ below corresponds to a tag of the same name.
 
 ### Added
 
+- **History:** `new`/`run`'s `assign()` failure now logs an
+  `assign_error` event -- previously it left zero trace, unlike
+  keep-alive's own error path. `response_body` is only ever included
+  when `Content-Type` says JSON (new `client.response_body_if_json()`
+  helper, also now guarding keep-alive's existing error logging):
+  `assign`'s 400 rejection is confirmed-live Google frontend HTML
+  boilerplate with zero diagnostic content, never worth writing into a
+  JSONL file; other endpoints (e.g. keep-alive's scope-missing 403)
+  return real structured detail worth keeping.
 - **`run --preflight-check`:** an opt-in local import check that runs
   before a VM is allocated. `run` transmits only the script's text, so a
   sibling import that only resolves because the real local repo

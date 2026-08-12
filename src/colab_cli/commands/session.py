@@ -27,6 +27,7 @@ from colab_cli.client import (
     ColabRequestError,
     PostAssignmentResponse,
     Variant,
+    response_body_if_json,
 )
 from colab_cli.utils import get_status_code
 from colab_cli.state import SessionState
@@ -162,6 +163,24 @@ def new(
             uuid.uuid4(), variant=variant, accelerator=accelerator
         )
     except Exception as e:
+        # Assign failure is the one error that gates every `new`/`run`
+        # invocation, and previously left zero trace in session history --
+        # unlike keep-alive's own error path, which always logs. Log it
+        # here, before either branch below, so it's captured regardless of
+        # which message the caller sees. `name` isn't persisted to the
+        # store yet, but `log_event` doesn't require that.
+        state.history.log_event(
+            name,
+            "assign_error",
+            {
+                "status_code": get_status_code(e),
+                "error_type": type(e).__name__,
+                "error": str(e)[:500],
+                "response_body": response_body_if_json(e),
+                "variant": variant.value,
+                "accelerator": accelerator.value,
+            },
+        )
         # The Colab backend returns 400 when the caller is not entitled to the
         # requested accelerator (e.g. no A100 quota). Translate that to a
         # friendly, actionable message instead of a raw traceback. We only
@@ -675,12 +694,11 @@ def keep_alive(
             state.store.add(s)
         except Exception as e:
             code = get_status_code(e)
-            response_body = getattr(e, "response_body", None)
             err_info = {
                 "status_code": code,
                 "error_type": type(e).__name__,
                 "error": str(e)[:500],
-                "response_body": (str(response_body)[:1000] if response_body else None),
+                "response_body": response_body_if_json(e),
             }
             last_error = err_info
             state.history.log_event(

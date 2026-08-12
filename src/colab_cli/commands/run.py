@@ -43,6 +43,7 @@ from colab_cli.client import (
     ColabRequestError,
     PostAssignmentResponse,
     Variant,
+    response_body_if_json,
 )
 from colab_cli.commands.execution import (
     _build_env_prelude,
@@ -371,7 +372,20 @@ def run_command(
         # Mirror `colab new`'s friendly accelerator-quota message -- and,
         # like `new`, give --json callers a JSON body for it and for any
         # other assign failure, instead of a bare traceback (non-json
-        # behavior is untouched by this).
+        # behavior is untouched by this). Also mirrors `new`'s history
+        # logging: assign failure previously left no trace here either.
+        state.history.log_event(
+            name,
+            "assign_error",
+            {
+                "status_code": get_status_code(e),
+                "error_type": type(e).__name__,
+                "error": str(e)[:500],
+                "response_body": response_body_if_json(e),
+                "variant": variant.value,
+                "accelerator": accelerator.value,
+            },
+        )
         if (
             isinstance(e, ColabRequestError)
             and get_status_code(e) == 400

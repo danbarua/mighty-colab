@@ -137,6 +137,33 @@ def test_new_json_generic_failure_emits_new_failed(mock_common_state, capsys):
     assert envelope["http_status"] is None
 
 
+def test_new_logs_assign_error_history_event(mock_common_state):
+    """assign failure previously left zero trace in session history --
+    unlike keep-alive's own error path, which always logs one. `new` must
+    log an `assign_error` event regardless of which error branch the
+    caller sees."""
+    error = _make_response_error(
+        400, body="<html><b>400.</b> That's an error.</html>"
+    )
+    error.response.headers = {"Content-Type": "text/html; charset=UTF-8"}
+    mock_common_state.client.assign.side_effect = error
+
+    with pytest.raises(typer.Exit):
+        new(session="s1", gpu="H100")
+
+    log_calls = mock_common_state.history.log_event.call_args_list
+    assign_errors = [c for c in log_calls if c.args[1] == "assign_error"]
+    assert len(assign_errors) == 1
+    payload = assign_errors[0].args[2]
+    assert payload["status_code"] == 400
+    assert payload["error_type"] == "ColabRequestError"
+    assert payload["variant"] == "GPU"
+    assert payload["accelerator"] == "H100"
+    # HTML body must never be logged, matching response_body_if_json's
+    # content-type gate.
+    assert payload["response_body"] is None
+
+
 def test_new_without_json_unaffected(mock_common_state, mock_spawn_keep_alive, capsys):
     """Regression guard: default (non-`--json`) path emits no JSON."""
     mock_common_state.json_output = False
