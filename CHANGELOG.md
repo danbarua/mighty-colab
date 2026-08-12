@@ -10,6 +10,8 @@ below corresponds to a tag of the same name.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-12
+
 ### Added
 
 - **`--json`:** new global flag for `exec`/`run`/`exec-async`/`log --tail`,
@@ -319,7 +321,8 @@ below corresponds to a tag of the same name.
 - The experimental `colab-mcp` git submodule, superseded by the hand-rolled
   MCP server above.
 
-[Unreleased]: https://github.com/danbarua/mighty-colab/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/danbarua/mighty-colab/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/danbarua/mighty-colab/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/danbarua/mighty-colab/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/danbarua/mighty-colab/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/danbarua/mighty-colab/compare/v0.2.0...v0.2.1
