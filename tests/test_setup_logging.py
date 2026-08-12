@@ -39,14 +39,29 @@ def _isolated_root_logger():
 
 
 def test_setup_logging_defaults_to_info(mocker, _isolated_root_logger):
-    mocker.patch("colab_cli.common.logging.FileHandler")
+    mocker.patch("colab_cli.common.RotatingFileHandler")
     setup_logging(log_to_stderr=False)
     assert logging.getLogger().level == logging.INFO
     assert logging.getLogger("urllib3").level == logging.INFO
 
 
 def test_setup_logging_debug_true_enables_debug(mocker, _isolated_root_logger):
-    mocker.patch("colab_cli.common.logging.FileHandler")
+    mocker.patch("colab_cli.common.RotatingFileHandler")
     setup_logging(log_to_stderr=False, debug=True)
     assert logging.getLogger().level == logging.DEBUG
     assert logging.getLogger("urllib3").level == logging.DEBUG
+
+
+def test_setup_logging_caps_log_file_size(mocker, _isolated_root_logger):
+    """Every CLI invocation is a fresh process that re-runs setup_logging
+    and re-opens the same file -- a plain FileHandler has no cap, so it
+    grows forever across the tool's lifetime (observed: colab.log at
+    192MB from about a week of normal use). Must use a RotatingFileHandler
+    with an actual maxBytes/backupCount, not just any handler."""
+    mock_handler_cls = mocker.patch("colab_cli.common.RotatingFileHandler")
+    setup_logging(log_to_stderr=False)
+
+    mock_handler_cls.assert_called_once()
+    kwargs = mock_handler_cls.call_args.kwargs
+    assert kwargs["maxBytes"] > 0
+    assert kwargs["backupCount"] > 0

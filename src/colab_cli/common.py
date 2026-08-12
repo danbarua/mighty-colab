@@ -14,6 +14,7 @@
 
 import json
 import logging
+from logging.handlers import RotatingFileHandler
 import os
 import re
 import signal
@@ -418,7 +419,16 @@ def setup_logging(log_to_stderr: bool, debug: bool = False):
 
     log_dir = os.path.expanduser("~/.config/colab-cli")
     os.makedirs(log_dir, exist_ok=True)
-    file_handler = logging.FileHandler(os.path.join(log_dir, "colab.log"))
+    # Every CLI invocation is a fresh process that re-runs this function and
+    # re-opens the same file -- a plain FileHandler has no cap, so it grows
+    # forever across the tool's lifetime (observed: 192MB from about a
+    # week of normal use). 10MB x 5 backups bounds it to ~60MB total while
+    # still keeping recent history for debugging.
+    file_handler = RotatingFileHandler(
+        os.path.join(log_dir, "colab.log"),
+        maxBytes=10 * 1024 * 1024,
+        backupCount=5,
+    )
     file_handler.setFormatter(logging.Formatter(log_format))
     logger.addHandler(file_handler)
 
