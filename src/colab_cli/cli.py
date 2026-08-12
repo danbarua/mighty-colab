@@ -33,7 +33,7 @@ from colab_cli.commands import adopt, mcp
 # invocation's subcommand actually support --json?) and `main()`'s
 # flag-position pre-check (does this look like a global-flag typo?) agree
 # on the exact same list without importing each other's internals.
-JSON_CAPABLE_COMMANDS = {"exec", "run", "exec-async", "log"}
+JSON_CAPABLE_COMMANDS = {"exec", "run", "exec-async", "log", "new"}
 
 # Every option defined on the root `@app.callback()` below -- i.e. one that
 # must precede the subcommand name, not follow it. Click's per-subcommand

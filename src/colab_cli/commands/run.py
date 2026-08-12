@@ -395,7 +395,11 @@ def run_command(
                 if state.json_output:
                     emit_json(
                         build_envelope(
-                            "error", "run", exit_code=1, reason="session_lost"
+                            "error",
+                            "run",
+                            exit_code=1,
+                            reason="session_lost",
+                            http_status=get_status_code(e),
                         )
                     )
                 typer.echo(

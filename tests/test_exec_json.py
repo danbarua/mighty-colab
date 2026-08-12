@@ -197,6 +197,31 @@ def test_exec_json_preflight_session_lost_emits_error_envelope(
     mock_common_state.prune_session.assert_called_once_with("s1")
 
 
+def test_exec_json_preflight_session_lost_includes_http_status(
+    mock_session, mock_runtime_class, mock_common_state
+):
+    """session_lost collapses 404 and 401 into one reason even though they
+    mean different things (session gone vs. auth expired) -- http_status
+    recovers that distinction without inventing a second reason code."""
+    mock_common_state.json_output = True
+    mock_common_state.resolve_session.return_value = "s1"
+    mock_runtime = mock_runtime_class.return_value
+
+    class _FakeHttpError(Exception):
+        def __init__(self, message, status_code):
+            super().__init__(message)
+            self.status_code = status_code
+
+    mock_runtime.execute_code.side_effect = _FakeHttpError("Not Found", 404)
+
+    result = runner.invoke(app, ["exec", "-s", "s1"], input="print(1)")
+    assert result.exit_code == 1
+
+    envelope = json.loads(result.stdout)
+    assert envelope["reason"] == "session_lost"
+    assert envelope["http_status"] == 404
+
+
 def test_exec_json_preflight_nonterminal_failure_emits_error_envelope(
     mock_session, mock_runtime_class, mock_common_state
 ):

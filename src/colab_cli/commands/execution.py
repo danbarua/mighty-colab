@@ -36,7 +36,12 @@ from colab_cli.common import (
 from colab_cli.common import _exit_code_from_outputs
 from colab_cli.envelopes import EnvelopeBase, ExecAsyncStarted, ExecEnvelope
 from colab_cli.runtime import ColabRuntime
-from colab_cli.utils import handle_image, is_terminal_error, render_display_data
+from colab_cli.utils import (
+    get_status_code,
+    handle_image,
+    is_terminal_error,
+    render_display_data,
+)
 from colab_cli.console import connect_console
 
 _console = Console()
@@ -333,7 +338,13 @@ def exec_command(
         if is_terminal_error(e):
             if want_json:
                 _finish_json(
-                    build_envelope("error", "exec", exit_code=1, reason="session_lost"),
+                    build_envelope(
+                        "error",
+                        "exec",
+                        exit_code=1,
+                        reason="session_lost",
+                        http_status=get_status_code(e),
+                    ),
                     json_result_path,
                 )
             typer.echo(

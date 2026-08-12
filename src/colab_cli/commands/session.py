@@ -134,7 +134,8 @@ def new(
     ] = None,
 ):
     """Create a new session"""
-    from colab_cli.common import state
+    from colab_cli.common import build_envelope, emit_json, state
+    from colab_cli.envelopes import NewSessionEnvelope
 
     name = session or uuid.uuid4().hex[:6]
     variant = Variant.DEFAULT
@@ -159,13 +160,31 @@ def new(
         res = state.client.assign(
             uuid.uuid4(), variant=variant, accelerator=accelerator
         )
-    except ColabRequestError as e:
+    except Exception as e:
         # The Colab backend returns 400 when the caller is not entitled to the
         # requested accelerator (e.g. no A100 quota). Translate that to a
         # friendly, actionable message instead of a raw traceback. We only
         # interpret it this way when an accelerator was actually requested;
-        # otherwise we re-raise so the user sees the real cause.
-        if get_status_code(e) == 400 and accelerator != Accelerator.NONE:
+        # otherwise we fall through to the generic wrap below. Confirmed live
+        # (docs/AGENT_USABILITY_LEARNINGS.md): the 400 body is Google's
+        # generic frontend error page, not structured JSON -- there's no
+        # finer-grained reason (quota vs. entitlement) to recover here, so
+        # one honest reason code, not two guessed ones.
+        if (
+            isinstance(e, ColabRequestError)
+            and get_status_code(e) == 400
+            and accelerator != Accelerator.NONE
+        ):
+            if state.json_output:
+                emit_json(
+                    build_envelope(
+                        "error",
+                        "new",
+                        exit_code=1,
+                        reason="accelerator_rejected",
+                        http_status=400,
+                    )
+                )
             typer.echo(
                 f"[colab] Backend rejected accelerator '{accelerator.value}'. "
                 "You may not have quota or entitlement for this accelerator on "
@@ -174,6 +193,20 @@ def new(
                 err=True,
             )
             raise typer.Exit(code=1)
+        # Genuine unexpected failure (any other ColabRequestError, or a
+        # non-HTTP failure like a network error) -- best-effort: give
+        # --json callers a JSON body instead of a bare traceback before it
+        # propagates unchanged (non-json behavior is untouched by this).
+        if state.json_output:
+            emit_json(
+                build_envelope(
+                    "error",
+                    "new",
+                    exit_code=1,
+                    reason="new_failed",
+                    http_status=get_status_code(e),
+                )
+            )
         raise
 
     if isinstance(res, PostAssignmentResponse):
@@ -209,6 +242,16 @@ def new(
         state.client.keep_alive_assignment(endpoint)
     except ColabRequestError as e:
         if get_status_code(e) == 403 and _is_scope_error(e):
+            if state.json_output:
+                emit_json(
+                    build_envelope(
+                        "error",
+                        "new",
+                        exit_code=1,
+                        reason="auth_scope_missing",
+                        http_status=403,
+                    )
+                )
             typer.echo(
                 "[colab] Keep-alive pre-flight failed: your credentials "
                 "are missing an OAuth scope required by Colab.\n",
@@ -247,6 +290,18 @@ def new(
         },
     )
     typer.echo("[colab] Session READY.")
+    if state.json_output:
+        emit_json(
+            build_envelope(
+                "ok",
+                "new",
+                session=name,
+                endpoint=endpoint,
+                variant=variant.value,
+                accelerator=accelerator.value,
+            ),
+            model=NewSessionEnvelope,
+        )
 
 
 def restart_kernel(

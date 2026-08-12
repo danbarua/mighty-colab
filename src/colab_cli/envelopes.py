@@ -30,6 +30,20 @@ either.
 `outputs`/`Block.outputs` are deliberately left as `list[dict[str, Any]]`
 rather than modeled further: they're nbformat-shaped, and nbformat is
 upstream's contract, not this CLI's.
+
+`http_status` also lives on `EnvelopeBase`, for the same reason: whenever
+an error envelope wraps a `ColabRequestError`, the raw HTTP status code is
+cheap, honest, already-available context (`utils.get_status_code`) worth
+passing through alongside our own `reason` -- e.g. `session_lost` collapses
+404 and 401 into one reason, even though they mean different things
+(session gone vs. auth expired); `http_status` recovers that distinction
+without inventing a reason code for something we can't actually tell apart
+(see `docs/AGENT_USABILITY_LEARNINGS.md`'s `accelerator_rejected` note: the
+backend's 400 body for a rejected accelerator is a generic Google frontend
+error page, not structured JSON -- there was never a finer-grained reason
+to recover there, but other statuses may carry more).  `None` for errors
+with no HTTP response behind them at all (`session_not_found` from a local
+store miss, `worker_terminated`, `log_path_collision`).
 """
 
 from typing import Any, Dict, List, Optional
@@ -48,6 +62,7 @@ class EnvelopeBase(BaseModel):
     reason: Optional[str] = None
     content: Optional[str] = None
     next_offset: Optional[int] = None
+    http_status: Optional[int] = None
 
 
 class Block(BaseModel):
@@ -70,3 +85,39 @@ class RunEnvelope(EnvelopeBase):
 class ExecAsyncStarted(EnvelopeBase):
     pid: int
     log_path: str
+
+
+class NewSessionEnvelope(EnvelopeBase):
+    session: str
+    endpoint: str
+    variant: str
+    accelerator: str
+
+
+class StopEnvelope(EnvelopeBase):
+    session: str
+
+
+class SessionInfo(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    endpoint: str
+    accelerator: str
+    variant: str
+    status: Optional[str] = None
+    last_execution_file: Optional[str] = None
+    last_execution_cell: Optional[str] = None
+    last_execution_time: Optional[str] = None
+    exec_log_path: Optional[str] = None
+
+
+class SessionListEnvelope(EnvelopeBase):
+    """`sessions --json`, and `status --json` with no `-s` (the two
+    commands' list-all output is structurally identical)."""
+
+    sessions: List[SessionInfo]
+
+
+class StatusSingleEnvelope(EnvelopeBase):
+    session: SessionInfo

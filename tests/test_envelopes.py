@@ -22,7 +22,12 @@ from colab_cli.envelopes import (
     EnvelopeBase,
     ExecAsyncStarted,
     ExecEnvelope,
+    NewSessionEnvelope,
     RunEnvelope,
+    SessionInfo,
+    SessionListEnvelope,
+    StatusSingleEnvelope,
+    StopEnvelope,
 )
 
 
@@ -169,3 +174,112 @@ def test_exec_async_started_rejects_blocks_field():
                 blocks=[],
             )
         )
+
+
+def test_envelope_base_accepts_http_status():
+    envelope = EnvelopeBase(
+        **_base_kwargs(status="error", exit_code=1, reason="session_lost", http_status=404)
+    )
+    assert envelope.http_status == 404
+
+
+def test_envelope_base_http_status_defaults_to_none():
+    envelope = EnvelopeBase(**_base_kwargs())
+    assert envelope.http_status is None
+
+
+def test_new_session_envelope_valid_construction():
+    envelope = NewSessionEnvelope(
+        **_base_kwargs(
+            command="new",
+            session="s1",
+            endpoint="ep-1",
+            variant="GPU",
+            accelerator="T4",
+        )
+    )
+    assert envelope.session == "s1"
+    assert envelope.endpoint == "ep-1"
+
+
+def test_new_session_envelope_requires_all_session_fields():
+    with pytest.raises(ValidationError):
+        NewSessionEnvelope(**_base_kwargs(command="new", session="s1"))
+
+
+def test_stop_envelope_valid_construction():
+    envelope = StopEnvelope(**_base_kwargs(command="stop", session="s1"))
+    assert envelope.session == "s1"
+
+
+def test_stop_envelope_requires_session():
+    with pytest.raises(ValidationError):
+        StopEnvelope(**_base_kwargs(command="stop"))
+
+
+def test_session_info_valid_construction_minimal():
+    info = SessionInfo(name="s1", endpoint="ep-1", accelerator="NONE", variant="DEFAULT")
+    assert info.status is None
+    assert info.last_execution_file is None
+    assert info.exec_log_path is None
+
+
+def test_session_info_valid_construction_full():
+    info = SessionInfo(
+        name="s1",
+        endpoint="ep-1",
+        accelerator="T4",
+        variant="GPU",
+        status="BUSY (exec.py)",
+        last_execution_file="script.py",
+        last_execution_cell=None,
+        last_execution_time="2026-08-12 01:00:00",
+        exec_log_path="/tmp/s1.exec.log",
+    )
+    assert info.status == "BUSY (exec.py)"
+    assert info.last_execution_file == "script.py"
+
+
+def test_session_info_rejects_unexpected_field():
+    with pytest.raises(ValidationError):
+        SessionInfo(name="s1", endpoint="e", accelerator="NONE", variant="DEFAULT", pid=1)
+
+
+def test_session_list_envelope_valid_construction():
+    envelope = SessionListEnvelope(
+        **_base_kwargs(
+            command="sessions",
+            sessions=[
+                {"name": "s1", "endpoint": "e1", "accelerator": "NONE", "variant": "DEFAULT"}
+            ],
+        )
+    )
+    assert len(envelope.sessions) == 1
+    assert isinstance(envelope.sessions[0], SessionInfo)
+
+
+def test_session_list_envelope_empty_list_is_valid():
+    envelope = SessionListEnvelope(**_base_kwargs(command="sessions", sessions=[]))
+    assert envelope.sessions == []
+
+
+def test_status_single_envelope_valid_construction():
+    envelope = StatusSingleEnvelope(
+        **_base_kwargs(
+            command="status",
+            session={
+                "name": "s1",
+                "endpoint": "e1",
+                "accelerator": "NONE",
+                "variant": "DEFAULT",
+                "status": "IDLE",
+            },
+        )
+    )
+    assert envelope.session.name == "s1"
+    assert envelope.session.status == "IDLE"
+
+
+def test_status_single_envelope_requires_session():
+    with pytest.raises(ValidationError):
+        StatusSingleEnvelope(**_base_kwargs(command="status"))

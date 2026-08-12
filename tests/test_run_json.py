@@ -325,6 +325,34 @@ def test_run_json_preflight_session_lost_emits_error_envelope(
     assert envelope["exit_code"] == 1
 
 
+def test_run_json_preflight_session_lost_includes_http_status(
+    mock_client,
+    mock_store,
+    mock_runtime_class,
+    mock_spawn_keep_alive,
+    mock_common_state,
+    assign_response,
+    script_path,
+):
+    mock_common_state.json_output = True
+    mock_client.assign.return_value = assign_response
+    mock_runtime = mock_runtime_class.return_value
+
+    class _FakeHttpError(Exception):
+        def __init__(self, message, status_code):
+            super().__init__(message)
+            self.status_code = status_code
+
+    mock_runtime.execute_code.side_effect = _FakeHttpError("Not Found", 401)
+
+    result = runner.invoke(app, ["run", str(script_path)])
+    assert result.exit_code != 0
+
+    envelope = json.loads(result.stdout)
+    assert envelope["reason"] == "session_lost"
+    assert envelope["http_status"] == 401
+
+
 def test_run_json_script_not_found(mock_common_state, tmp_path):
     mock_common_state.json_output = True
     missing = tmp_path / "nope.py"
