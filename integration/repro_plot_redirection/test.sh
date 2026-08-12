@@ -22,10 +22,17 @@ SESSION_NAME="repro-plot-$(date +%s)"
 OUTPUT_FILE="intercepted_plot.png"
 SCRIPT_FILE="plot_gen.py"
 
+# Invoke via `uv run` throughout (not bare `colab`/`mighty-colab`) so this
+# test always exercises the local checkout, regardless of what else is on
+# $PATH -- `colab` in particular commonly resolves to an unrelated, stale
+# globally-installed package (`uv tool install`), not this repo, which
+# previously made this test fail against code it never actually changed.
+MC="uv run mighty-colab"
+
 # Cleanup on exit
 cleanup() {
     echo "[*] Cleaning up..."
-    mighty-colab stop -s "$SESSION_NAME" || true
+    $MC stop -s "$SESSION_NAME" || true
     rm -f "$SCRIPT_FILE" "$OUTPUT_FILE"
 }
 trap cleanup EXIT
@@ -45,11 +52,11 @@ plt.show()
 EOF
 
 echo "[*] Starting session..."
-colab new -s "$SESSION_NAME"
+$MC new -s "$SESSION_NAME"
 
 echo "[*] Running execution with plot redirection..."
 # Note: On a fresh VM, this may trigger the retry logic.
-colab exec -s "$SESSION_NAME" -f "$SCRIPT_FILE" --output-image "$OUTPUT_FILE"
+$MC exec -s "$SESSION_NAME" -f "$SCRIPT_FILE" --output-image "$OUTPUT_FILE"
 
 if [ -f "$OUTPUT_FILE" ]; then
     echo "[SUCCESS] Plot intercepted and saved to $OUTPUT_FILE"
