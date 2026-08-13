@@ -620,6 +620,7 @@ def run_command(
                         "timeout": timeout,
                         "env": env_vars,
                         "preflight_check": preflight_check,
+                        "high_mem": high_mem,
                     },
                 },
             )

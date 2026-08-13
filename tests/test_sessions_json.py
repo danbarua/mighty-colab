@@ -34,6 +34,7 @@ def test_sessions_json_list_shape(mock_common_state, mocker):
     mock_assignment.endpoint = "e1"
     mock_assignment.variant.name = "GPU"
     mock_assignment.accelerator.value = "T4"
+    mock_assignment.machine_shape.name = "HIGH_RAM"
 
     mock_session_state = MagicMock()
     mock_session_state.name = "s1"
@@ -66,6 +67,9 @@ def test_sessions_json_list_shape(mock_common_state, mocker):
             "endpoint": "e1",
             "accelerator": "T4",
             "variant": "GPU",
+            # Server-side truth (the listed assignment's machineShape), not
+            # local state -- matching the plain-text Shape: column.
+            "machine_shape": "HIGH_RAM",
             "keep_alive_pid": 4242,
             "last_keep_alive_ping": "2026-08-12T01:00:00+00:00",
         }
@@ -82,6 +86,7 @@ def test_sessions_json_keep_alive_none_for_orphaned_assignment(mock_common_state
     mock_assignment.endpoint = "orphan-ep"
     mock_assignment.variant.name = "DEFAULT"
     mock_assignment.accelerator.value = "NONE"
+    mock_assignment.machine_shape.name = "STANDARD"
 
     mock_common_state.sync_sessions.return_value = ({}, [mock_assignment])
 
@@ -100,6 +105,7 @@ def test_sessions_json_orphaned_assignment_marked(mock_common_state):
     mock_assignment.endpoint = "orphan-ep"
     mock_assignment.variant.name = "DEFAULT"
     mock_assignment.accelerator.value = "NONE"
+    mock_assignment.machine_shape.name = "STANDARD"
 
     mock_common_state.sync_sessions.return_value = ({}, [mock_assignment])
 

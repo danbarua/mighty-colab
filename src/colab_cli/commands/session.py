@@ -365,6 +365,7 @@ def new(
                 endpoint=endpoint,
                 variant=variant.value,
                 accelerator=accelerator.value,
+                machine_shape=s.machine_shape,
             ),
             model=NewSessionEnvelope,
         )
@@ -449,6 +450,7 @@ def sessions_command():
             "endpoint": a.endpoint,
             "accelerator": a.accelerator.value,
             "variant": a.variant.name,
+            "machine_shape": a.machine_shape.name,
         }
         # Omitted (not null) when unset -- same convention as
         # `_print_status_for` and every other optional envelope field.
@@ -493,6 +495,7 @@ def _print_status_for(s: SessionState) -> dict:
         "endpoint": s.endpoint,
         "accelerator": s.accelerator,
         "variant": s.variant,
+        "machine_shape": s.machine_shape,
         "status": status_str,
     }
     # Omitted (not null) when unset, matching every other optional field

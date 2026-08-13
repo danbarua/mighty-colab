@@ -216,6 +216,7 @@ def test_new_session_envelope_valid_construction():
             endpoint="ep-1",
             variant="GPU",
             accelerator="T4",
+            machine_shape="STANDARD",
         )
     )
     assert envelope.session == "s1"
@@ -238,7 +239,13 @@ def test_stop_envelope_requires_session():
 
 
 def test_session_info_valid_construction_minimal():
-    info = SessionInfo(name="s1", endpoint="ep-1", accelerator="NONE", variant="DEFAULT")
+    info = SessionInfo(
+        name="s1",
+        endpoint="ep-1",
+        accelerator="NONE",
+        variant="DEFAULT",
+        machine_shape="STANDARD",
+    )
     assert info.status is None
     assert info.last_execution_file is None
     assert info.exec_log_path is None
@@ -252,6 +259,7 @@ def test_session_info_valid_construction_full():
         endpoint="ep-1",
         accelerator="T4",
         variant="GPU",
+        machine_shape="HIGH_RAM",
         status="BUSY (exec.py)",
         last_execution_file="script.py",
         last_execution_cell=None,
@@ -268,7 +276,14 @@ def test_session_info_valid_construction_full():
 
 def test_session_info_rejects_unexpected_field():
     with pytest.raises(ValidationError):
-        SessionInfo(name="s1", endpoint="e", accelerator="NONE", variant="DEFAULT", pid=1)
+        SessionInfo(
+            name="s1",
+            endpoint="e",
+            accelerator="NONE",
+            variant="DEFAULT",
+            machine_shape="STANDARD",
+            pid=1,
+        )
 
 
 def test_session_list_envelope_valid_construction():
@@ -276,7 +291,13 @@ def test_session_list_envelope_valid_construction():
         **_base_kwargs(
             command="sessions",
             sessions=[
-                {"name": "s1", "endpoint": "e1", "accelerator": "NONE", "variant": "DEFAULT"}
+                {
+                    "name": "s1",
+                    "endpoint": "e1",
+                    "accelerator": "NONE",
+                    "variant": "DEFAULT",
+                    "machine_shape": "STANDARD",
+                }
             ],
         )
     )
@@ -298,6 +319,7 @@ def test_status_single_envelope_valid_construction():
                 "endpoint": "e1",
                 "accelerator": "NONE",
                 "variant": "DEFAULT",
+                "machine_shape": "STANDARD",
                 "status": "IDLE",
             },
         )
