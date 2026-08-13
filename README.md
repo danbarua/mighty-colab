@@ -63,8 +63,9 @@ pip install mighty-colab
 
 Assuming Application Default Credentials are configured. Every response below
 was captured live against a real CPU runtime — nothing fabricated. Swap in
-`--gpu T4` / `--gpu A100` on `new` for accelerated workloads; the envelope
-shape is identical either way.
+`--gpu T4` / `--gpu A100` on `new` for accelerated workloads (add `--high-mem`
+for a high-RAM machine shape, Colab Pro/Pro+ required); the envelope shape is
+identical either way.
 
 ```bash
 SESSION=agent-job
