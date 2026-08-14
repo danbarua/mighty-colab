@@ -25,9 +25,13 @@ from typing_extensions import Annotated
 from colab_cli.client import (
     Accelerator,
     ColabRequestError,
+    HIGH_MEM_ONLY_ACCELERATORS,
     PostAssignmentResponse,
+    Shape,
     Variant,
+    resolve_assign_shape,
     response_body_if_json,
+    shape_display_label,
 )
 from colab_cli.utils import get_status_code
 from colab_cli.state import SessionState
@@ -97,21 +101,51 @@ def _format_session_line(
     accelerator: str,
     variant: str,
     status: Optional[str] = None,
+    machine_shape: Optional[str] = None,
 ) -> str:
     """Single source of truth for session display lines.
 
-    Format: ``[name] endpoint | Hardware: X | Variant: Y[ | Status: Z]``.
+    Format: ``[name] endpoint | Hardware: X | Shape: Y | Variant: Z[ | Status: W]``.
     Use ``"?"`` as the name for orphaned server-side assignments with no local
     state.
     """
     parts = [
         f"[{name}] {endpoint}",
         f"Hardware: {_hardware_label(accelerator)}",
+        f"Shape: {shape_display_label(machine_shape)}",
         f"Variant: {variant}",
     ]
     if status is not None:
         parts.append(f"Status: {status}")
     return " | ".join(parts)
+
+
+def resolve_runtime_options(
+    gpu: Optional[str] = None,
+    tpu: Optional[str] = None,
+    *,
+    high_mem: bool = False,
+) -> tuple[Variant, Accelerator, Optional[Shape]]:
+    """Map CLI flags to backend variant, accelerator, and optional shape."""
+    if tpu:
+        variant = Variant.TPU
+        accelerator = Accelerator.V5E1 if tpu.lower() == "v5e1" else Accelerator.V6E1
+    elif gpu:
+        variant = Variant.GPU
+        mapping = {
+            "a100": Accelerator.A100,
+            "h100": Accelerator.H100,
+            "l4": Accelerator.L4,
+            "t4": Accelerator.T4,
+            "g4": Accelerator.G4,
+        }
+        accelerator = mapping.get(gpu.lower(), Accelerator.A100)
+    else:
+        variant = Variant.DEFAULT
+        accelerator = Accelerator.NONE
+
+    shape = resolve_assign_shape(accelerator, high_mem=high_mem)
+    return variant, accelerator, shape
 
 
 def new(
@@ -134,33 +168,36 @@ def new(
             ),
         ),
     ] = None,
+    high_mem: Annotated[
+        bool,
+        typer.Option(
+            "--high-mem",
+            help=(
+                "Request a high-RAM machine shape (CPU, T4, A100, etc.). "
+                "Requires Colab Pro or Pro+ entitlement. Ignored for "
+                "accelerators that only offer a single shape (L4, v5e1, v6e1)."
+            ),
+        ),
+    ] = False,
 ):
     """Create a new session"""
     from colab_cli.common import build_envelope, emit_json, state
     from colab_cli.envelopes import NewSessionEnvelope
 
     name = session or uuid.uuid4().hex[:6]
-    variant = Variant.DEFAULT
-    accelerator = Accelerator.NONE
+    variant, accelerator, shape = resolve_runtime_options(gpu, tpu, high_mem=high_mem)
 
-    if tpu:
-        variant = Variant.TPU
-        accelerator = Accelerator.V5E1 if tpu.lower() == "v5e1" else Accelerator.V6E1
-    elif gpu:
-        variant = Variant.GPU
-        mapping = {
-            "a100": Accelerator.A100,
-            "h100": Accelerator.H100,
-            "l4": Accelerator.L4,
-            "t4": Accelerator.T4,
-            "g4": Accelerator.G4,
-        }
-        accelerator = mapping.get(gpu.lower(), Accelerator.A100)
+    if high_mem and accelerator in HIGH_MEM_ONLY_ACCELERATORS:
+        typer.echo(
+            "[colab] --high-mem ignored: this accelerator only offers one "
+            "machine shape.",
+            err=True,
+        )
 
     typer.echo(f"[colab] Creating session '{name}'...")
     try:
         res = state.client.assign(
-            uuid.uuid4(), variant=variant, accelerator=accelerator
+            uuid.uuid4(), variant=variant, accelerator=accelerator, shape=shape
         )
     except Exception as e:
         # Assign failure is the one error that gates every `new`/`run`
@@ -251,6 +288,9 @@ def new(
         endpoint=endpoint,
         variant=variant.value,
         accelerator=accelerator.value,
+        machine_shape=(
+            Shape.HIGH_RAM.name if shape == Shape.HIGH_RAM else Shape.STANDARD.name
+        ),
     )
 
     # Pre-flight the keep-alive ping once. If it returns a 403 caused by
@@ -312,6 +352,7 @@ def new(
             "endpoint": endpoint,
             "variant": variant.value,
             "accelerator": accelerator.value,
+            "machine_shape": s.machine_shape,
         },
     )
     typer.echo("[colab] Session READY.")
@@ -324,6 +365,7 @@ def new(
                 endpoint=endpoint,
                 variant=variant.value,
                 accelerator=accelerator.value,
+                machine_shape=s.machine_shape,
             ),
             model=NewSessionEnvelope,
         )
@@ -400,6 +442,7 @@ def sessions_command():
                 endpoint=a.endpoint,
                 accelerator=a.accelerator.value,
                 variant=a.variant.name,
+                machine_shape=a.machine_shape.name,
             )
         )
         info = {
@@ -407,6 +450,7 @@ def sessions_command():
             "endpoint": a.endpoint,
             "accelerator": a.accelerator.value,
             "variant": a.variant.name,
+            "machine_shape": a.machine_shape.name,
         }
         # Omitted (not null) when unset -- same convention as
         # `_print_status_for` and every other optional envelope field.
@@ -441,6 +485,7 @@ def _print_status_for(s: SessionState) -> dict:
             accelerator=s.accelerator,
             variant=s.variant,
             status=status_str,
+            machine_shape=s.machine_shape,
         )
     )
     from colab_cli.common import pid_alive
@@ -450,6 +495,7 @@ def _print_status_for(s: SessionState) -> dict:
         "endpoint": s.endpoint,
         "accelerator": s.accelerator,
         "variant": s.variant,
+        "machine_shape": s.machine_shape,
         "status": status_str,
     }
     # Omitted (not null) when unset, matching every other optional field

@@ -46,6 +46,9 @@ def _session_state_from_assignment(assignment, name: str) -> SessionState:
         endpoint=assignment.endpoint,
         variant=assignment.variant.name,
         accelerator=assignment.accelerator.value,
+        # From the assignment's own machineShape -- an adopted high-RAM
+        # session must not silently fall back to the "STANDARD" default.
+        machine_shape=assignment.machine_shape.name,
     )
 
 

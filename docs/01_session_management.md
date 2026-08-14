@@ -6,6 +6,7 @@ log:
 
 2026-08-12: Extended `--json` (see `docs/02_execution_and_interactive.md`'s 2026-08-12 entry for the flag's original design) to `new`/`stop`/`sessions`/`status`. `new --json` returns `session`/`endpoint`/`variant`/`accelerator` on success, plus three failure reasons: `accelerator_rejected` (400 + accelerator requested -- confirmed live the response body is Google's generic frontend error page, not structured JSON, so one honest reason code rather than a guessed quota-vs-entitlement split), `auth_scope_missing` (403 during the keep-alive preflight), and `new_failed` as a catch-all. `stop --json` on an absent session stays `status="ok", reason="already_stopped"` (idempotent by design, matching the exact example the consumer agent behind this design gave); a genuine unassign failure is `status="error", reason="unassign_failed"`. `sessions --json` and `status --json` (with no `-s`) return a `sessions: [...]` list; empty is `ok`, not an error. The one deliberate behavior divergence: `status --json -s <missing>` now reports `status="error", reason="session_not_found"` and exits non-zero, diverging from the plain-text path's exit-0 no-op -- `status` is a query command, and this opts into the design principle already recorded in `docs/AGENT_USABILITY_LEARNINGS.md` ("query commands should error on 'not found'; desired-state commands like `stop` should not"), without changing the non-`--json` behavior anything might already depend on. Every error envelope also carries `http_status: Optional[int]`, an honest pass-through of the backend's raw HTTP status code alongside `reason` -- threaded into the existing `exec`/`run` `session_lost` reason too, which collapses 404 and 401 (session gone vs. auth expired) into one reason. New live integration test: `integration/repro_json_jq_lifecycle/`, a full session lifecycle composed entirely with `jq` against real `--json` output.
 
+2026-08-09: [upstream] Added `--high-mem` to `colab new`, `colab run`, and `colab ssh` (auto-create). Assign requests now send `shape=hm` when high-RAM is requested; `colab sessions` and `colab status` display machine shape.
 2026-06-15: Switched the keep-alive daemon from the `colab.pa.googleapis.com` `RuntimeService/KeepAliveAssignment` RPC to a Tunnel Frontend HTTP ping (`GET /tun/m/<endpoint>/keep-alive/` with `X-Colab-Tunnel: Google`) on `colab.research.google.com`. The RPC required `serviceusage` consumer access to Colab's internal project `1014160490159`, which ordinary user accounts lack, so every external user hit HTTP 403 `USER_PROJECT_DENIED` and their CLI sessions were idle-pruned within minutes (issue #14). Reproduced live with a third-party account; verified the tunnel ping is accepted by the same bearer-token credential that already works for `assign`. A `ReadTimeout` on the ping is treated as success (TFE records activity before forwarding to the often-non-responding VM). Generalized the pre-flight remediation messaging away from the now-irrelevant `colaboratory`/`pa.googleapis.com` framing, and removed the dead grpc-web client-registry/API-key code.
 2026-06-10: Replaced the POSIX-only `fcntl.flock` file locking in `_LockedFileStore` with the cross-platform `filelock` library (reported broken on Windows). Reads use `ReadWriteLock.read_lock()` (shared) and writes use `write_lock()` (exclusive), preserving the original `LOCK_SH`/`LOCK_EX` semantics. The lock is constructed with `is_singleton=False` so two `StateStore` instances for the same path in one process don't collapse into a single reentrant lock (which would raise `RuntimeError` on multi-threaded write contention). Added shared-read, cross-process exclusion, and multi-thread/multi-process regression tests.
 ---
@@ -38,11 +39,20 @@ Defines the specific hardware model.
     - `V5E1`: TPU v5e (1 core, optimized for inference/efficient training).
     - `V6E1`: TPU v6e (1 core, high performance).
 
-### 3. CLI Mapping
+### 3. Machine shape (`shape`)
+Defines the RAM profile for runtimes that support a choice (CPU, T4, A100, etc.).
+- `STANDARD` (default): omit the `shape` query param on assign.
+- `HIGH_RAM`: send `shape=hm` on assign (requires Colab Pro/Pro+ entitlement).
+
+Accelerators with only one shape (L4, v5e1, v6e1) ignore `--high-mem`.
+
+### 4. CLI Mapping
 The CLI maps user flags to these backend parameters:
 - `colab new my-session` -> `variant=DEFAULT`, `accelerator=NONE`
-- `colab new my-session -gpu=L4` -> `variant=GPU`, `accelerator=L4`
-- `colab new my-session -tpu=v5e1` -> `variant=TPU`, `accelerator=V5E1`
+- `colab new my-session --gpu=L4` -> `variant=GPU`, `accelerator=L4`
+- `colab new my-session --tpu=v5e1` -> `variant=TPU`, `accelerator=V5E1`
+- `colab new my-session --high-mem` -> adds `shape=hm` (when supported)
+- `colab new my-session --gpu A100 --high-mem` -> `variant=GPU`, `accelerator=A100`, `shape=hm`
 
 ## Approach
 

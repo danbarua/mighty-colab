@@ -10,6 +10,23 @@ below corresponds to a tag of the same name.
 
 ## [Unreleased]
 
+### Added
+
+- **`--high-mem`** (merged from upstream `googlecolab/google-colab-cli`,
+  their PR 105): `new`/`run`/`ssh` (auto-create) can request a high-RAM
+  machine shape (`shape=hm` on assign; Colab Pro/Pro+ entitlement
+  required; ignored for single-shape accelerators L4/v5e1/v6e1).
+  `sessions`/`status` plain text gains a `Shape: Standard|High-RAM`
+  column, and `machine_shape` is persisted on session state. This fork's
+  first upstream merge -- every fork addition (JSON envelopes, history
+  logging, pre-flight checks) carried through intact.
+- **`machine_shape` in `--json`** (fork-side extension of the above):
+  `sessions`/`status`/`new --json` now carry `machine_shape`
+  (`"STANDARD"`/`"HIGH_RAM"`) alongside `accelerator`/`variant`; `run`'s
+  `invocation` provenance gains `high_mem`; `adopt` now reads the
+  adopted assignment's real machine shape instead of defaulting to
+  `"STANDARD"`.
+
 ### Fixed
 
 - **Logging:** `~/.config/colab-cli/colab.log` now rotates (10MB x 5

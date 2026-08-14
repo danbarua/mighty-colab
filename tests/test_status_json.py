@@ -36,6 +36,7 @@ def test_status_json_single_session_found(mock_common_state, mocker):
     mock_session_state.endpoint = "e1"
     mock_session_state.accelerator = "T4"
     mock_session_state.variant = "GPU"
+    mock_session_state.machine_shape = "HIGH_RAM"
     mock_session_state.running = "exec.py"
     mock_session_state.last_execution = ("script.py", None, "2026-08-12 01:00:00")
     mock_session_state.exec_log_path = "/tmp/s1.exec.log"
@@ -58,6 +59,7 @@ def test_status_json_single_session_found(mock_common_state, mocker):
         "endpoint": "e1",
         "accelerator": "T4",
         "variant": "GPU",
+        "machine_shape": "HIGH_RAM",
         "status": "BUSY (exec.py)",
         "last_execution_file": "script.py",
         "last_execution_cell": None,
@@ -79,6 +81,7 @@ def test_status_json_keep_alive_pid_hidden_when_daemon_confirmed_dead(
     mock_session_state.endpoint = "e1"
     mock_session_state.accelerator = "NONE"
     mock_session_state.variant = "DEFAULT"
+    mock_session_state.machine_shape = "STANDARD"
     mock_session_state.running = None
     mock_session_state.last_execution = None
     mock_session_state.exec_log_path = None
@@ -127,6 +130,7 @@ def test_status_json_no_session_flag_lists_all(mock_common_state):
     mock_session_state.endpoint = "e1"
     mock_session_state.accelerator = "NONE"
     mock_session_state.variant = "DEFAULT"
+    mock_session_state.machine_shape = "STANDARD"
     mock_session_state.running = None
     mock_session_state.last_execution = None
     mock_session_state.exec_log_path = None
@@ -145,6 +149,7 @@ def test_status_json_no_session_flag_lists_all(mock_common_state):
             "endpoint": "e1",
             "accelerator": "NONE",
             "variant": "DEFAULT",
+            "machine_shape": "STANDARD",
             "status": "IDLE",
         }
     ]

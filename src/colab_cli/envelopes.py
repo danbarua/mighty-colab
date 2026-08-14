@@ -103,6 +103,7 @@ class NewSessionEnvelope(EnvelopeBase):
     endpoint: str
     variant: str
     accelerator: str
+    machine_shape: str
 
 
 class StopEnvelope(EnvelopeBase):
@@ -116,6 +117,10 @@ class SessionInfo(BaseModel):
     endpoint: str
     accelerator: str
     variant: str
+    # "STANDARD" or "HIGH_RAM" -- always knowable (SessionState defaults it;
+    # server-side listed assignments carry machineShape), so required like
+    # accelerator/variant rather than omit-when-unset.
+    machine_shape: str
     status: Optional[str] = None
     last_execution_file: Optional[str] = None
     last_execution_cell: Optional[str] = None

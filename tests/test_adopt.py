@@ -17,7 +17,7 @@ from unittest.mock import MagicMock
 import pytest
 import typer
 
-from colab_cli.client import Accelerator, AssignmentVariant, ColabRequestError
+from colab_cli.client import Accelerator, AssignmentVariant, ColabRequestError, Shape
 from colab_cli.commands.adopt import adopt
 from colab_cli.state import SessionState
 
@@ -28,11 +28,13 @@ def _listed_assignment(
     accelerator=Accelerator.NONE,
     token="tok",
     url="http://runtime",
+    machine_shape=Shape.STANDARD,
 ):
     return MagicMock(
         endpoint=endpoint,
         variant=variant,
         accelerator=accelerator,
+        machine_shape=machine_shape,
         runtime_proxy_info=MagicMock(token=token, url=url),
     )
 
@@ -66,6 +68,7 @@ def test_adopt_persists_matching_assignment(mock_common_state):
             accelerator=Accelerator.T4,
             token="tok1",
             url="http://u1",
+            machine_shape=Shape.HIGH_RAM,
         ),
     ]
 
@@ -81,6 +84,9 @@ def test_adopt_persists_matching_assignment(mock_common_state):
     # AssignmentVariant.GPU.name -> "GPU", matching the Variant string enum.
     assert saved.variant == "GPU"
     assert saved.accelerator == "T4"
+    # From the listed assignment's own machineShape -- an adopted high-RAM
+    # session must not silently display "Standard".
+    assert saved.machine_shape == "HIGH_RAM"
     # No --keep-alive requested: never touch the keep-alive RPC or daemon.
     mock_common_state.client.keep_alive_assignment.assert_not_called()
     assert saved.keep_alive_pid is None

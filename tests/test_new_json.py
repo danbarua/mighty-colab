@@ -57,7 +57,7 @@ def test_new_json_success_envelope_shape(
     mock_res.endpoint = "ep-1"
     mock_common_state.client.assign.return_value = mock_res
 
-    new(session="s1", gpu="T4")
+    new(session="s1", gpu="T4", high_mem=True)
 
     envelope = json.loads(capsys.readouterr().out)
     assert envelope["schema_version"] == "1"
@@ -69,6 +69,7 @@ def test_new_json_success_envelope_shape(
     assert envelope["endpoint"] == "ep-1"
     assert envelope["variant"] == "GPU"
     assert envelope["accelerator"] == "T4"
+    assert envelope["machine_shape"] == "HIGH_RAM"
 
 
 def test_new_json_accelerator_rejected(mock_common_state, capsys):

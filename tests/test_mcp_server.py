@@ -19,7 +19,7 @@ import pytest
 import typer.main
 
 from colab_cli.cli import app
-from colab_cli.client import Accelerator, AssignmentVariant
+from colab_cli.client import Accelerator, AssignmentVariant, Shape
 from colab_cli.mcp_server import (
     EXCLUDED_COMMANDS,
     build_tools,
@@ -32,6 +32,7 @@ def _listed_assignment(endpoint, variant, accelerator, token, url):
         endpoint=endpoint,
         variant=variant,
         accelerator=accelerator,
+        machine_shape=Shape.STANDARD,
         runtime_proxy_info=MagicMock(token=token, url=url),
     )
 
