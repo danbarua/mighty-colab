@@ -91,3 +91,6 @@ docs/credential propagation - flow details.md
 docs/credential propagation analysis.md
 docs/creds.md
 get_drive_source.py
+
+# OMP session config (agent-local, never committed)
+WATCHDOG.yml

@@ -14,17 +14,24 @@
 
 from unittest.mock import MagicMock, patch
 
-import jupyter_kernel_client
 import requests
 
+from colab_cli import _vendor
 from colab_cli.runtime import ColabRuntime
+
+jupyter_kernel_client = _vendor.jupyter_kernel_client
 
 
 def test_colab_runtime_kernel_client():
-    target_attr = "ColabKernelClient" if hasattr(jupyter_kernel_client, "ColabKernelClient") else "KernelClient"
-    token_param_name = "proxy_token" if hasattr(jupyter_kernel_client, "ColabKernelClient") else "token"
-
-    with patch.object(jupyter_kernel_client, target_attr) as mock_kc_cls:
+    """`colab_cli._vendor.jupyter_kernel_client` is a vendored copy of
+    googlecolab's fork (see src/colab_cli/_vendor/jupyter_kernel_client/
+    VENDOR.md) -- always exports `KernelClient`, always takes `token=`.
+    Vendoring removed the prior wrong-distribution failure mode this test
+    used to guard against (a plain PyPI install resolved to an unrelated
+    same-named project and `exec` died with an AttributeError); there is no
+    other distribution to install anymore.
+    """
+    with patch.object(jupyter_kernel_client, "KernelClient") as mock_kc_cls:
         mock_kc = mock_kc_cls.return_value
         runtime = ColabRuntime("http://url", "token123")
 
@@ -34,7 +41,7 @@ def test_colab_runtime_kernel_client():
 
         expected_kwargs = {
             "server_url": "http://url",
-            token_param_name: "token123",
+            "token": "token123",
             "kernel_id": None,
             "client_kwargs": {
                 "subprotocol": jupyter_kernel_client.JupyterSubprotocol.DEFAULT,
@@ -56,14 +63,13 @@ def test_colab_runtime_kernel_client_retry_cleans_up_stale_client():
     before the reference to it is discarded and replaced on the next
     attempt -- otherwise whatever channels/socket the partial start opened
     are leaked."""
-    target_attr = "ColabKernelClient" if hasattr(jupyter_kernel_client, "ColabKernelClient") else "KernelClient"
-
     mock_client_1 = MagicMock()
+
     mock_client_1.start.side_effect = requests.exceptions.ReadTimeout()
     mock_client_2 = MagicMock()
 
     with patch.object(
-        jupyter_kernel_client, target_attr, side_effect=[mock_client_1, mock_client_2]
+        jupyter_kernel_client, "KernelClient", side_effect=[mock_client_1, mock_client_2]
     ), patch("colab_cli.runtime.time.sleep") as mock_sleep:
         runtime = ColabRuntime("http://url", "token123")
 

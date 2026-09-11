@@ -16,7 +16,7 @@ import logging
 import time
 from typing import Any, Callable, Dict, List, Optional
 
-import jupyter_kernel_client
+from colab_cli._vendor import jupyter_kernel_client
 import requests
 
 
@@ -52,16 +52,18 @@ class ColabRuntime:
                 return original_on_message(s_ws, message)
 
             try:
-                from jupyter_kernel_client.wsclient import JupyterSubprotocol
+                from colab_cli._vendor.jupyter_kernel_client.wsclient import (
+                    JupyterSubprotocol,
+                )
 
                 if wsclient._subprotocol == JupyterSubprotocol.DEFAULT:
-                    from jupyter_kernel_client.wsclient import (
+                    from colab_cli._vendor.jupyter_kernel_client.wsclient import (
                         deserialize_msg_from_ws_default,
                     )
 
                     deserialize_msg = deserialize_msg_from_ws_default(message)
                 elif wsclient._subprotocol == JupyterSubprotocol.V1:
-                    from jupyter_kernel_client.wsclient import (
+                    from colab_cli._vendor.jupyter_kernel_client.wsclient import (
                         deserialize_msg_from_ws_v1,
                     )
 
@@ -103,28 +105,20 @@ class ColabRuntime:
                         # WSSession (Session) expects 'session' for the ID
                         client_kwargs["session"] = self.session_id
 
-                    if hasattr(jupyter_kernel_client, "ColabKernelClient"):
-                        self._kernel_client = jupyter_kernel_client.ColabKernelClient(
-                            server_url=self.url,
-                            proxy_token=self.token,
-                            kernel_id=self.kernel_id,
-                            client_kwargs=client_kwargs,
-                            headers={
-                                "X-Colab-Client-Agent": "colab-cli",
-                                "X-Colab-Runtime-Proxy-Token": self.token,
-                            },
-                        )
-                    else:
-                        self._kernel_client = jupyter_kernel_client.KernelClient(
-                            server_url=self.url,
-                            token=self.token,
-                            kernel_id=self.kernel_id,
-                            client_kwargs=client_kwargs,
-                            headers={
-                                "X-Colab-Client-Agent": "colab-cli",
-                                "X-Colab-Runtime-Proxy-Token": self.token,
-                            },
-                        )
+                    # `colab_cli._vendor.jupyter_kernel_client` is a vendored
+                    # copy of googlecolab's fork (see VENDOR.md) -- it always
+                    # exports `KernelClient`; there is no wrong-distribution
+                    # case to guard against anymore.
+                    self._kernel_client = jupyter_kernel_client.KernelClient(
+                        server_url=self.url,
+                        token=self.token,
+                        kernel_id=self.kernel_id,
+                        client_kwargs=client_kwargs,
+                        headers={
+                            "X-Colab-Client-Agent": "colab-cli",
+                            "X-Colab-Runtime-Proxy-Token": self.token,
+                        },
+                    )
                     # Force _own_kernel to False. This prevents jupyter-kernel-client
                     # from automatically deleting the kernel when the client is closed or deleted.
                     self._kernel_client._own_kernel = False
@@ -232,7 +226,7 @@ class ColabRuntime:
             outputs = []
 
             def wrapped_output_hook(msg):
-                from jupyter_kernel_client.client import (
+                from colab_cli._vendor.jupyter_kernel_client.client import (
                     output_hook as default_output_hook,
                 )
 
