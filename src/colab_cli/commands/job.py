@@ -548,12 +548,93 @@ def _force_release_unconfirmed_secret(env, state, store, action: str) -> None:
     _emit(env, action)
     raise typer.Exit(1)
 
+
+def _observe_remote(transport, job_id: str):
+    result, status = transport.read_json(f"/content/jobs/{job_id}/result.json")
+    if status.name == "SESSION_LOST":
+        return "session_lost", None
+    if status.name == "OK" and result:
+        return "result", result
+    if status.name == "DEGRADED":
+        return "degraded", None
+    launch, launch_status = transport.read_json(
+        f"/content/jobs/{job_id}/launch.json"
+    )
+    if launch_status.name == "SESSION_LOST":
+        return "session_lost", None
+    if launch_status.name == "DEGRADED":
+        return "degraded", None
+    if launch_status.name != "OK" or not launch:
+        return "never_started", None
+    pid = launch.get("pid")
+    starttime = launch.get("starttime")
+    boot_id = launch.get("boot_id")
+    if (
+        not isinstance(pid, int)
+        or not isinstance(starttime, str)
+        or not isinstance(boot_id, str)
+    ):
+        return "degraded", None
+    watchdog, watchdog_status = transport.read_json(
+        f"/content/jobs/{job_id}/watchdog.json"
+    )
+    if watchdog_status.name == "SESSION_LOST":
+        return "session_lost", None
+    if (
+        watchdog_status.name == "OK"
+        and watchdog is not None
+        and watchdog.get("runner_alive") is False
+    ):
+        return "runner_dead", launch
+    return "runner_alive", launch
+
+
+def _absorb_remote_result(env, store, job_id, result) -> None:
+    saved_plan = store.read_plan(job_id)
+    if saved_plan is not None:
+        Orchestrator.absorb_result(env, saved_plan.spec, result)
+    else:
+        env.workload = Workload(result.get("workload", "unknown"))
+        env.exit_code = result.get("exit_code")
+        env.signal = result.get("signal")
+        env.exception = result.get("exception")
+
+
+def _release_orphaned_job(env, session, state, store) -> None:
+    stop_session_keep_alive(session)
+    if env.endpoint:
+        try:
+            state.client.unassign(env.endpoint)
+            env.cleanup = Cleanup.RELEASED
+        except Exception as error:  # noqa: BLE001
+            if "404" in str(error) or "not found" in str(error).lower():
+                env.cleanup = Cleanup.ALREADY_ABSENT
+            else:
+                env.cleanup = Cleanup.FAILED
+                env.hints.append(
+                    f"recovery teardown failed ({type(error).__name__}); "
+                    f"endpoint {env.endpoint} may still be billing"
+                )
+    else:
+        env.cleanup = Cleanup.ALREADY_ABSENT
+    if env.session and env.cleanup is not Cleanup.FAILED:
+        try:
+            state.store.remove(env.session)
+        except Exception:  # noqa: BLE001
+            pass
+    env.supervisor = Supervisor.FINISHED
+    if not env.offload.terminal:
+        env.offload = Offload.SKIPPED
+    store.write_envelope(env)
+
+
 def status(
     job_id: Annotated[str, typer.Argument(help="Job id")],
     poll: Annotated[
         bool,
         typer.Option(
-            "--poll", help="Keep polling until remote result.json is available"
+            "--poll",
+            help="Keep polling until a remote verdict or dead runner, then finish leftover cleanup",
         ),
     ] = False,
     interval: Annotated[int, typer.Option("--interval", help="Poll interval (s)")] = 15,
@@ -586,42 +667,56 @@ def status(
         env.supervisor = Supervisor.INTERRUPTED
         env.reason = "the supervisor process that started this job is gone"
 
-    cleanup_pending = env.cleanup not in {Cleanup.RELEASED, Cleanup.ALREADY_ABSENT}
-    must_scrub = env.supervisor is not Supervisor.RUNNING or env.cleanup is Cleanup.FAILED
+    orphaned = not supervisor_alive and env.supervisor is not Supervisor.RUNNING
+    cleanup_pending = env.cleanup not in {
+        Cleanup.RELEASED,
+        Cleanup.ALREADY_ABSENT,
+        Cleanup.LEFT_UP,
+    }
+    must_scrub = orphaned or env.cleanup is Cleanup.FAILED
     if env.session and cleanup_pending:
-        s = state.store.get(env.session)
-        if s is None and must_scrub:
+        session = state.store.get(env.session)
+        if session is None and must_scrub:
             _force_release_unconfirmed_secret(env, state, store, "status")
-        if s is not None:
-            transport = JobTransport(s, state.client, state.store)
+        if session is not None:
+            transport = JobTransport(session, state.client, state.store)
             if must_scrub and not _scrub_transfer_secret(transport, job_id):
                 _force_release_unconfirmed_secret(env, state, store, "status")
-            if must_scrub and env.workload.terminal:
-                store.write_envelope(env)
+            kind = None
+            if orphaned and env.workload.terminal:
+                _release_orphaned_job(env, session, state, store)
                 _emit(env, "status")
                 return
             if not env.workload.terminal:
                 while True:
-                    result, st = transport.read_json(
-                        f"/content/jobs/{job_id}/result.json"
-                    )
-                    if st.name == "OK" and result:
-                        saved_plan = store.read_plan(job_id)
-                        if saved_plan is not None:
-                            Orchestrator.absorb_result(env, saved_plan.spec, result)
-                        else:
-                            env.workload = Workload(result.get("workload", "unknown"))
-                            env.exit_code = result.get("exit_code")
-                            env.signal = result.get("signal")
-                            env.exception = result.get("exception")
-                        env.supervisor = Supervisor.FINISHED
+                    kind, payload = _observe_remote(transport, job_id)
+                    if kind == "result":
+                        _absorb_remote_result(env, store, job_id, payload)
+                        if orphaned:
+                            env.supervisor = Supervisor.FINISHED
                         break
-                    if st.name == "SESSION_LOST":
+                    if kind == "session_lost":
                         env.workload = Workload.UNKNOWN
                         env.reason = "the assignment is gone from the server"
                         env.supervisor = Supervisor.FINISHED
                         break
-                    if st.name == "DEGRADED":
+                    if kind == "runner_dead":
+                        env.workload = Workload.UNKNOWN
+                        env.reason = (
+                            "runner identity is dead and no result.json was written"
+                        )
+                        env.retry_class = RetryClass.RETRY_SAME
+                        env.supervisor = Supervisor.FINISHED
+                        break
+                    if kind == "never_started" and orphaned:
+                        env.workload = Workload.UNKNOWN
+                        env.reason = (
+                            "supervisor is gone and no runner identity was recorded"
+                        )
+                        env.retry_class = RetryClass.RETRY_SAME
+                        env.supervisor = Supervisor.FINISHED
+                        break
+                    if kind == "degraded":
                         env.supervisor = Supervisor.DEGRADED
                         env.reason = (
                             "transport failing; the assignment is still listed, "
@@ -629,8 +724,13 @@ def status(
                         )
                     if not poll:
                         break
+                    if kind == "never_started":
+                        break
                     time.sleep(interval)
-            store.write_envelope(env)
+            if orphaned and env.workload.terminal:
+                _release_orphaned_job(env, session, state, store)
+            else:
+                store.write_envelope(env)
 
     _emit(env, "status")
 

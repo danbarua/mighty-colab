@@ -7,6 +7,8 @@ log:
 2026-09-11: Addressed PR #15 peer review: cancellation now reaches detached workloads, destroy preserves remote verdicts, SHA-256 input is validated, supervisor failures terminalize, control PUT credentials stay out of kernel history, unsupported policies fail planning, status absorbs full remote results, and declared artifact sizes count in the disk gate. Source-byte locking remains [#20](https://github.com/danbarua/mighty-colab/issues/20).
 2026-09-11: Live-verified `destroy --cancel-only` against a running CPU workload: the remote verdict became `cancelled`, the assignment remained listed until full destroy, and final teardown removed the endpoint.
 2026-09-11: Fixed and live-verified [#18](https://github.com/danbarua/mighty-colab/issues/18): generated records and remote manifests redact signed URL queries; owner-mode sidecars and an ephemeral descriptor handoff hold the credentials; missing required handoffs fail closed; recovery scrubs or tears down; credential-bearing source files are rejected. The live CPU regression proved a signed data URL remained usable while its sentinel stayed absent from command output, durable job records, remote files, and kernel history, then confirmed teardown.
+2026-09-11: Fixed and live-verified [#16](https://github.com/danbarua/mighty-colab/issues/16): `status --poll` recovers an orphaned supervisor by absorbing a complete remote result or classifying a dead runner, then finishing cleanup.
+
 2026-09-11: Fixed and live-verified [#17](https://github.com/danbarua/mighty-colab/issues/17): `job apply` starts and owns the TFE keep-alive daemon; destroy/cleanup stop it except on deliberate leave-up.
 
 ---
@@ -35,7 +37,6 @@ and cleanup still have the limits below.
 
 That is the whole idea. The detached consumer survives a dropped launch-kernel connection, but the current v0 supervisor has important limits:
 
-- `job status --poll` observes `result.json`; it does not take over offload or cleanup after the original supervisor dies.
 - Source staging is not resumable and has weaker timeout/token-refresh handling than result polling.
 - Caller-owned source specs and generated owner-mode `.mighty-colab-secrets.json` sidecars contain full signed URLs. Generated records, remote manifests, diagnostics, and kernel history contain only canonical identities and credential references.
 
@@ -282,8 +283,7 @@ mighty-colab sessions            # server-side assignment inventory
 Be aware of these before trusting a long run:
 
 - No GPU run has yet outlived the approximately 60-minute proxy refresh boundary.
-- Status polling is observation, not supervisor takeover; it does not complete cleanup.
-- Endpoint persistence is not the first post-assignment write, and concurrent/repeated apply has no lock.
+- Concurrent or repeated apply of one plan has no lock.
 - Source bytes are not part of `spec_hash`; exact locking is tracked by [#20](https://github.com/danbarua/mighty-colab/issues/20).
 - Stage uploads lack the result poller's refresh/deadline wrapper; restart has no explicit timeout.
 - Data GET and artifact PUT buffer whole objects; source size is limited per file only after allocation, with no aggregate bundle ceiling.
@@ -292,4 +292,4 @@ Be aware of these before trusting a long run:
 - Detected tagged escapees are reported, not killed; the dedicated shipped-path setsid case is still unverified.
 - Job-group help omits `list`, and some early `--json` errors and failed-apply outer exit fields are inconsistent with actual behavior.
 
-Verified live on 2026-09-11: CPU and T4 GPU runs end to end; install/restart/verify with a real dependency pin; the workload failure path with cleanup; proxy access recovery after the approximately 60-minute failure; explicit public launch-kernel restart while a detached consumer continued; cancel-only termination while the assignment remained live, followed by full teardown; signed GCS data GET, artifact PUT, and control-result PUT; and job-owned TFE keep-alive through idle leave-up and destroy. These runs do not verify platform-initiated kernel replacement or the gaps above.
+Verified live on 2026-09-11: CPU and T4 GPU runs end to end; install/restart/verify with a real dependency pin; the workload failure path with cleanup; proxy access recovery after the approximately 60-minute failure; explicit public launch-kernel restart while a detached consumer continued; cancel-only termination while the assignment remained live, followed by full teardown; signed GCS data GET, artifact PUT, and control-result PUT; job-owned TFE keep-alive through idle leave-up and destroy; and supervisor crash recovery via `status --poll` after killing apply during run. These runs do not verify platform-initiated kernel replacement or the gaps above.
