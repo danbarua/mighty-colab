@@ -923,6 +923,142 @@ def test_status_does_not_scrub_a_live_supervisor_before_launch(
     transport.remove.assert_not_called()
 
 
+def _remote_files(mapping):
+    from colab_cli.job.transport import ReadStatus
+
+    def read_json(path):
+        for suffix, payload in mapping.items():
+            if path.endswith(suffix):
+                if payload is None:
+                    return None, ReadStatus.NOT_FOUND
+                return payload, ReadStatus.OK
+        return None, ReadStatus.NOT_FOUND
+
+    return read_json
+
+
+def test_status_recovers_a_complete_result_and_releases(monkeypatch, mock_common_state):
+    from colab_cli.job.models import Cleanup, Offload
+    from colab_cli.job.transport import ReadStatus
+
+    store = _persist_running_job(mock_common_state, job_id="orphan-result")
+    transport = MagicMock()
+    transport.remove.return_value = ReadStatus.OK
+    transport.read_json.side_effect = _remote_files(
+        {
+            "result.json": {
+                "workload": "succeeded",
+                "exit_code": 0,
+                "phase": "offload",
+                "artifacts": [],
+                "offload": "ok",
+            }
+        }
+    )
+    monkeypatch.setattr(
+        "colab_cli.job.transport.JobTransport", lambda *_args: transport
+    )
+
+    result = runner.invoke(app, ["job", "status", "orphan-result"])
+
+    assert result.exit_code == 0
+    mock_common_state.client.unassign.assert_called_once_with("m-s-endpoint")
+    env = store.read_envelope("orphan-result")
+    assert env.workload is Workload.SUCCEEDED
+    assert env.offload is Offload.NOT_REQUIRED
+    assert env.cleanup is Cleanup.RELEASED
+
+
+def test_status_keeps_the_remote_result_when_cleanup_fails(
+    monkeypatch, mock_common_state
+):
+    from colab_cli.job.models import Cleanup
+    from colab_cli.job.transport import ReadStatus
+
+    store = _persist_running_job(mock_common_state, job_id="orphan-leak")
+    transport = MagicMock()
+    transport.remove.return_value = ReadStatus.OK
+    transport.read_json.side_effect = _remote_files(
+        {"result.json": {"workload": "succeeded", "exit_code": 0}}
+    )
+    mock_common_state.client.unassign.side_effect = RuntimeError("boom")
+    monkeypatch.setattr(
+        "colab_cli.job.transport.JobTransport", lambda *_args: transport
+    )
+
+    result = runner.invoke(app, ["job", "status", "orphan-leak"])
+
+    assert result.exit_code == 0
+    env = store.read_envelope("orphan-leak")
+    assert env.workload is Workload.SUCCEEDED
+    assert env.exit_code == 0
+    assert env.cleanup is Cleanup.FAILED
+
+
+def test_status_uses_launch_identity_before_declaring_a_dead_runner(
+    monkeypatch, mock_common_state
+):
+    from colab_cli.job.models import Cleanup
+    from colab_cli.job.transport import ReadStatus
+
+    store = _persist_running_job(mock_common_state, job_id="dead-runner")
+    transport = MagicMock()
+    transport.remove.return_value = ReadStatus.OK
+    transport.read_json.side_effect = _remote_files(
+        {
+            "result.json": None,
+            "launch.json": {
+                "pid": 99,
+                "starttime": "1234",
+                "boot_id": "boot",
+            },
+            "watchdog.json": {"runner_alive": False},
+        }
+    )
+    monkeypatch.setattr(
+        "colab_cli.job.transport.JobTransport", lambda *_args: transport
+    )
+
+    result = runner.invoke(app, ["job", "status", "dead-runner"])
+
+    assert result.exit_code == 0
+    mock_common_state.client.unassign.assert_called_once_with("m-s-endpoint")
+    env = store.read_envelope("dead-runner")
+    assert env.workload is Workload.UNKNOWN
+    assert env.cleanup is Cleanup.RELEASED
+    assert "dead" in (env.reason or "")
+
+
+def test_status_does_not_release_while_runner_identity_is_alive(
+    monkeypatch, mock_common_state
+):
+    from colab_cli.job.transport import ReadStatus
+
+    _persist_running_job(mock_common_state, job_id="live-runner")
+    transport = MagicMock()
+    transport.remove.return_value = ReadStatus.OK
+    transport.read_json.side_effect = _remote_files(
+        {
+            "result.json": None,
+            "launch.json": {
+                "pid": 99,
+                "starttime": "1234",
+                "boot_id": "boot",
+            },
+            "watchdog.json": {"runner_alive": True},
+        }
+    )
+    monkeypatch.setattr(
+        "colab_cli.job.transport.JobTransport", lambda *_args: transport
+    )
+
+    result = runner.invoke(app, ["job", "status", "live-runner"])
+
+    assert result.exit_code == 0
+    mock_common_state.client.unassign.assert_not_called()
+
+
+
 def test_status_forces_teardown_when_interrupted_session_state_is_missing(
     monkeypatch, mock_common_state
 ):
@@ -1060,11 +1196,50 @@ def test_unexpected_apply_exception_emits_a_terminal_envelope(
     assert env.reason == "internal supervisor failure (RuntimeError)"
 
 
-def test_status_poll_help_matches_result_observer_behavior():
+def test_status_poll_help_describes_recovery_cleanup():
     result = runner.invoke(
         app, ["job", "status", "--help"], env={"COLUMNS": "160"}
     )
     output = _clean(result.output)
     assert result.exit_code == 0
-    assert "until remote result.json is available" in output
-    assert "until the job is done" not in output
+    assert "dead runner" in output
+    assert "cleanup" in output
+
+
+def test_status_poll_finishes_cleanup_after_the_result_arrives(
+    monkeypatch, mock_common_state
+):
+    from colab_cli.job.models import Cleanup
+    from colab_cli.job.transport import ReadStatus
+
+    store = _persist_running_job(mock_common_state, job_id="poll-orphan")
+    transport = MagicMock()
+    transport.remove.return_value = ReadStatus.OK
+    calls = {"n": 0}
+
+    def read_json(path):
+        calls["n"] += 1
+        if path.endswith("result.json") and calls["n"] > 2:
+            return {"workload": "failed", "exit_code": 1}, ReadStatus.OK
+        if path.endswith("launch.json"):
+            return {"pid": 7, "starttime": "1", "boot_id": "b"}, ReadStatus.OK
+        if path.endswith("watchdog.json"):
+            return {"runner_alive": True}, ReadStatus.OK
+        return None, ReadStatus.NOT_FOUND
+
+    transport.read_json.side_effect = read_json
+    monkeypatch.setattr(
+        "colab_cli.job.transport.JobTransport", lambda *_args: transport
+    )
+    monkeypatch.setattr("colab_cli.commands.job.time.sleep", lambda _s: None)
+
+    result = runner.invoke(
+        app, ["job", "status", "poll-orphan", "--poll", "--interval", "1"]
+    )
+
+    assert result.exit_code == 0
+    env = store.read_envelope("poll-orphan")
+    assert env.workload is Workload.FAILED
+    assert env.exit_code == 1
+    assert env.cleanup is Cleanup.RELEASED
+    mock_common_state.client.unassign.assert_called_once_with("m-s-endpoint")

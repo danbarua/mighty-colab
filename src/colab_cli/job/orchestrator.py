@@ -228,12 +228,11 @@ class Orchestrator:
                 accelerator=granted,
                 machine_shape=getattr(res, "machine_shape", "STANDARD"),
             )
-            # Persist BEFORE spawning the keep-alive daemon: the daemon reads
-            # this record, and it can win the race against its parent's first
-            # write (AGENTS.md item 17).
+            # Endpoint must be durable before keep-alive or any later
+            # fallible step: a crash here is recoverable from envelope.json.
             self.env.session = session_name
-            self._start_keep_alive()
             self._persist()
+            self._start_keep_alive()
             self.emit(f"[job] provisioned {res.endpoint} accel={granted}")
             return
 

@@ -36,7 +36,12 @@ below corresponds to a tag of the same name.
 - **Unexpected supervisor exceptions could leave non-terminal job records.**
   Non-debug apply now persists and emits a terminal verdict, while status and
   destroy share complete remote result absorption including artifact/offload
-  state. `status --poll` help now states that it waits for `result.json`.
+  state.
+- **A killed `job apply` left cleanup unfinished.** Provision now persists the
+  endpoint before keep-alive. `job status` treats a dead supervisor as
+  orphaned: it absorbs a complete remote result or classifies a dead runner
+  from `launch.json` identity plus `watchdog.json`, then finishes cleanup
+  without overwriting the remote workload if teardown fails.
 
 - **`job` sessions did not retain the kernel that launched their detached
   runner.** The session record now persists the runtime's kernel and Jupyter
@@ -63,6 +68,11 @@ below corresponds to a tag of the same name.
 - **Live job keep-alive coverage** in `integration/repro_job_keep_alive/`: a
   CPU job leaves the launch kernel idle, the daemon stays alive past a
   post-preflight tick, destroy reaps it, and `sessions` is empty.
+- **Live supervisor crash recovery** in
+  `integration/repro_job_crash_recovery/`: apply is killed during `run`;
+  `status --poll` from a new process absorbs the remote success and releases
+  the assignment.
+
 
 
 ## [0.8.0] - 2026-09-11

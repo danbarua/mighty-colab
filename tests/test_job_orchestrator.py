@@ -502,6 +502,33 @@ def test_provision_starts_keep_alive_after_persisting_the_session(
     client.keep_alive_assignment.assert_called_once_with("m-s-job")
 
 
+def test_provision_persists_the_endpoint_before_keep_alive(tmp_path, keep_alive_spawn):
+    order = []
+    client = MagicMock()
+    client.assign.return_value = _cpu_assignment("m-s-job")
+    orch = _orch(
+        tmp_path,
+        spec=_spec(accelerator=Accelerator(prefer=[], accept_cpu=True)),
+        client=client,
+    )
+    original = orch._persist
+
+    def persist():
+        pid = getattr(orch.session_state, "keep_alive_pid", None)
+        order.append(("envelope", orch.env.endpoint, pid))
+        original()
+
+    orch._persist = persist
+    keep_alive_spawn.side_effect = lambda *a, **k: order.append("spawn") or 4242
+
+    orch.provision()
+
+    assert ("envelope", "m-s-job", None) in order
+    assert order.index(("envelope", "m-s-job", None)) < order.index("spawn")
+    assert orch.env.endpoint == "m-s-job"
+
+
+
 def test_provision_scope_error_releases_the_vm_without_a_daemon(
     tmp_path, keep_alive_spawn
 ):

@@ -12,6 +12,8 @@ log:
 2026-09-11: **Cancel-only live-verified.** `integration/repro_job_cancel_only/test.sh` observed a running CPU workload, issued the public `destroy --cancel-only`, observed a terminal `workload: cancelled` result while the assignment remained listed, then performed full destroy and verified the endpoint disappeared.
 2026-09-11: Fixed and live-verified [#18](https://github.com/danbarua/mighty-colab/issues/18): generated specs, plans, manifests, envelopes, events, diagnostics, and kernel launch history now contain only canonical URL identities and credential references. Full URLs remain only in caller-owned source specs, owner-mode local sidecars, and a short-lived owner-mode VM handoff that the isolated runner inherits by file descriptor and unlinks before consumer launch. Missing required handoffs fail closed; interrupted recovery scrubs or tears down; source bundles reject credential-bearing URLs from immutable snapshots. A live CPU job proved the signed data URL was consumed while the sentinel was absent from output, durable local records, remote files, and kernel history, then released the assignment.
 2026-09-11: Fixed and live-verified [#17](https://github.com/danbarua/mighty-colab/issues/17): `job apply` now starts the TFE keep-alive daemon after persisting the job session, propagates auth and `--config`, records daemon pid and last ping, stops the daemon on release or confirmed absence, and leaves it running on `--leave-up`.
+2026-09-11: Fixed and live-verified [#16](https://github.com/danbarua/mighty-colab/issues/16): provision persists the endpoint before keep-alive; a dead supervisor's `status --poll` absorbs complete runner results or classifies a dead runner from launch/watchdog identity, then finishes cleanup without overwriting a remote verdict.
+
 
 ---
 
@@ -136,9 +138,9 @@ The runner maps normal exits, exceptions, signals, cancellation intent, wall-clo
 
 The watchdog is a sibling process. It enforces wall clock and reports telemetry. Job provision starts the TFE keep-alive daemon after persisting the session, the same daemon `colab new` uses; cleanup stops it on release or confirmed absence and leaves it running when the VM is deliberately left up.
 
-The local apply supervisor polls `result.json` and `watchdog.json`; it does not poll `launch.json` or implement the launch-identity rule for a dead runner. `JobTransport` gives those polling/cancel reads connect/read deadlines and refreshes assignment metadata once after selected 401/404 failures, rate-limited to one resolution per 60 seconds. Payload staging uses a raw `ContentsClient` snapshot without those refresh and timeout wrappers. A long stage can therefore cross token expiry before the runner starts.
+The local apply supervisor polls `result.json` and `watchdog.json`. `job status` additionally reads `launch.json` identity and `watchdog.json` `runner_alive` so a dead runner without `result.json` becomes `workload: unknown`. `JobTransport` gives those polling/cancel reads connect/read deadlines and refreshes assignment metadata once after selected 401/404 failures, rate-limited to one resolution per 60 seconds. Payload staging uses a raw `ContentsClient` snapshot without those refresh and timeout wrappers. A long stage can therefore cross token expiry before the runner starts.
 
-`waitpid()` cannot always provide a Python exception. `os._exit()`, SIGKILL/OOM, and native crashes can produce `workload: failed` with exit/signal information and no exception. The runtime has identity data in `launch.json`, but the local supervisor does not currently turn "identity dead and result absent" into the earlier designed `unknown` verdict.
+`waitpid()` cannot always provide a Python exception. `os._exit()`, SIGKILL/OOM, and native crashes can produce `workload: failed` with exit/signal information and no exception.
 
 ## Data plane
 
@@ -166,7 +168,7 @@ The implemented phase order is:
 
 ```
 plan.json
-  -> provision   assign; persist the session; start keep-alive; persist endpoint/session in envelope
+  -> provision   assign; persist endpoint/session in envelope; persist the session; start keep-alive
   -> install     install pinned dependencies
   -> restart     restart the launch kernel
   -> verify      probe dependencies, device, and declared input disk need
@@ -183,7 +185,7 @@ The explicit public `restart-kernel` path is live-verified while a detached cons
 
 Apply tries one attempt. `RetryClass` is advice for the next caller action, not an automatic retry engine. Planning rejects non-default `retry.when`, `max_attempts`, and `mode` values until retry/recreate/resume exist. Some errors are classified (`fix_code`, `fix_human`, `retry_same`, `retry_different`, `refresh_urls`, `do_not_retry`); cancellation, offload failure, and cleanup failure do not all receive the earlier table's promised class.
 
-Unexpected exceptions are caught unless `--debug` is active. The supervisor persists and emits a terminal envelope: pre-run failures become `workload: failed`; failures during or after run without a remote verdict become `unknown`; terminal remote verdicts are preserved. Endpoint persistence still follows the session-store write rather than happening immediately after assignment, so there is a small allocation-without-envelope crash window. Concurrent or repeated apply of the same plan has no interprocess lock or active-apply guard and can provision twice or overwrite local state.
+Unexpected exceptions are caught unless `--debug` is active. The supervisor persists and emits a terminal envelope: pre-run failures become `workload: failed`; failures during or after run without a remote verdict become `unknown`; terminal remote verdicts are preserved. The endpoint is persisted in the envelope before keep-alive starts; a crash between `assign` returning and that write can still leak an assignment. Concurrent or repeated apply of the same plan has no interprocess lock or active-apply guard and can provision twice or overwrite local state.
 
 ## Envelope, `done`, `ok`
 
@@ -208,7 +210,7 @@ Therefore `ok` can be true while `done` is still false; consumers must poll `don
 
 `not_required` means the spec declared no artifacts. `skipped` is a terminal schema value but the current runner normally attempts declared artifacts even after failure. Per-artifact results are preserved; any recorded upload failure currently makes scalar offload fail, including a failed optional upload.
 
-`job status --poll` is an observer, not supervisor takeover. It stops when `result.json` appears and absorbs the remote phase, workload, exit/signal/exception, artifact, and offload fields, but it does not finish ordinary offload or cleanup after the original supervisor dies. It identifies that supervisor by PID, process start time, and boot identity rather than PID alone. Interrupted, finished, and cleanup-failed recovery confirms removal of any remote transfer handoff; inability to confirm forces endpoint release. A concurrently running healthy supervisor is never scrubbed.
+`job status --poll` recovers an orphaned job. It identifies the original supervisor by PID, process start time, and boot identity. If that process is gone, it absorbs a complete `result.json` when present, or classifies a dead runner from `launch.json` identity plus `watchdog.json` `runner_alive`, then finishes cleanup. A live runner is left running. Cleanup failure preserves the remote workload verdict. Deliberate `left_up` is not auto-destroyed. A concurrently running healthy supervisor is never scrubbed.
 
 Every envelope carries schema/CLI versions, phase, requested/actual accelerator, ordered string hints, timestamps, and relevant result details. The local files are:
 
@@ -245,7 +247,7 @@ The local JSON writes use atomic replacement, but the store has no cross-process
 
 The permanent suite covers model validation, plan diagnostics without reflected inputs, redacted plan/spec persistence with owner-only hydration, canonical URL identity and credential-marker hashing, source-bundle credential rejection against immutable upload snapshots, expiry revalidation, isolated descriptor handoff and unlinking, interrupted-recovery deletion/forced teardown, healthy-supervisor race exclusion, runner exit/cancel behavior, duplicate remote launch, transport refresh, phase transitions, CLI parsing, and envelope truth tables. Live integrations cover CPU and T4 jobs, signed GCS data/artifact/control-result paths, dependency restart/verify, workload failure, token refresh recovery, explicit launch-kernel restart, cancel-only termination with assignment retention, and job-owned TFE keep-alive through idle leave-up and destroy.
 
-The current gaps need regression coverage before their claims can be promoted: endpoint persist-before-side-effect; concurrent apply exclusion; status takeover through cleanup; source-content locking ([#20](https://github.com/danbarua/mighty-colab/issues/20)); long-stage refresh/timeouts; bounded restart; streamed transfer; aggregate bundle limits; optional-upload semantics; control log; and a shipped-path setsid escapee case.
+The current gaps need regression coverage before their claims can be promoted: concurrent apply exclusion; source-content locking ([#20](https://github.com/danbarua/mighty-colab/issues/20)); long-stage refresh/timeouts; bounded restart; streamed transfer; aggregate bundle limits; optional-upload semantics; control log; and a shipped-path setsid escapee case.
 
 ## Spike results (2026-09-11, live CPU VM)
 
@@ -430,7 +432,7 @@ This also reclassifies the `transport_degraded` vs `session_lost` question from
 These are current implementation limits, not hypothetical polish:
 
 - **Idle retention:** job provision owns the TFE keep-alive daemon. A multi-hour GPU run through the proxy refresh boundary has not been completed.
-- **Crash recovery:** endpoint persistence has a post-assignment crash window; `status --poll` observes and absorbs a result but does not take over cleanup; dead-runner identity classification is not wired into the local supervisor.
+- **Crash recovery:** there is still a short window between `assign` returning and the first envelope persist. Apply's own poll loop does not classify a dead remote runner from `launch.json`; `status --poll` does.
 - **Concurrency:** repeated or concurrent apply of one plan has no interprocess lock or active-job guard.
 - **Plan integrity:** `spec_hash` does not lock source bytes or a bundle manifest. Apply can run code that differs from what existed at plan time. Exact source locking is tracked by [#20](https://github.com/danbarua/mighty-colab/issues/20).
 - **Transport bounds:** source/manifests are staged with a raw `ContentsClient` that lacks `JobTransport` refresh/deadline handling. The restart request has no explicit timeout. Control-plane assignment refresh is also not bounded by the job transport's HTTP deadlines.
