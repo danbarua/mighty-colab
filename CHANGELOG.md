@@ -10,6 +10,31 @@ below corresponds to a tag of the same name.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-09-11
+
+### Fixed
+
+- **`mighty-colab` was unusable from a plain `pip`/`uv tool install`**:
+  `jupyter-kernel-client` on PyPI is a different, newer release line of the
+  same upstream project (Datalayer's), which renamed `KernelClient` to
+  `JupyterKernelClient` starting at 1.0.0. This fork needs Google's git-only
+  fork of that project, which `[tool.uv.sources]` pointed at for local
+  development only -- a mechanism stripped from published wheel metadata.
+  Every install from PyPI therefore resolved to the wrong package, and
+  `exec`/`run`/`repl` died with a bare `AttributeError` on first use. Fixed
+  by vendoring Google's fork directly into `colab_cli._vendor` (BSD-3,
+  provenance and patch log in `src/colab_cli/_vendor/jupyter_kernel_client/
+  VENDOR.md`) -- `pip install mighty-colab` now works standalone, with no
+  `--with git+...` workaround required.
+
+### Removed
+
+- **~39MB of transitive dependencies** (`pyarrow`, `jupyter-mimetypes`,
+  the git-built `jupyter-kernel-client`) that rode in on the vendored
+  package's one unused code path (`get_variable`/`set_variable`, never
+  called by this CLI) are gone; that import is now lazy inside the two
+  methods that need it. `uv sync` no longer needs a slow git clone + build.
+
 ### Added
 
 - **`--high-mem`** (merged from upstream `googlecolab/google-colab-cli`,
@@ -431,7 +456,8 @@ below corresponds to a tag of the same name.
 - The experimental `colab-mcp` git submodule, superseded by the hand-rolled
   MCP server above.
 
-[Unreleased]: https://github.com/danbarua/mighty-colab/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/danbarua/mighty-colab/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/danbarua/mighty-colab/compare/v0.7.0...v0.8.0
 [0.5.0]: https://github.com/danbarua/mighty-colab/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/danbarua/mighty-colab/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/danbarua/mighty-colab/compare/v0.3.0...v0.4.0
