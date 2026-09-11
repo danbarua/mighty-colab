@@ -37,7 +37,12 @@ class ContentsClient:
         self.token = session_state.token
 
     def _request(
-        self, method: str, path: str, params: dict = None, json_data: dict = None
+        self,
+        method: str,
+        path: str,
+        params: dict = None,
+        json_data: dict = None,
+        timeout: tuple[float, float] | None = None,
     ):
         # Quote the path, but don't encode slashes so directory paths stay intact
         quoted_path = quote(path.strip("/"), safe="/")
@@ -47,7 +52,10 @@ class ContentsClient:
         if params:
             req_params.update(params)
 
-        response = requests.request(method, url, params=req_params, json=json_data)
+        request_kwargs = {"params": req_params, "json": json_data}
+        if timeout is not None:
+            request_kwargs["timeout"] = timeout
+        response = requests.request(method, url, **request_kwargs)
 
         if get_status_code(response) == 404:
             raise FileNotFoundError(f"File or directory not found: {path}")
@@ -78,7 +86,44 @@ class ContentsClient:
     def list_dir(self, path: str):
         return self._request("GET", path)
 
-    def upload(self, local_path: str, remote_path: str):
+    def makedirs(self, remote_dir: str, timeout: tuple[float, float] | None = None):
+        """Create `remote_dir` and every missing ancestor. Idempotent.
+
+        The Jupyter Contents API will not create parents implicitly: a PUT
+        of `a/b/c.py` when `a/b` does not exist fails, and the Colab
+        backend reports it as a bare HTTP 500 rather than a 404. That
+        misleading status is why this is worth a dedicated method -- the
+        500 handler in `_request` reasonably attributes 500s to the known
+        size-limit failure, so a missing directory otherwise surfaces as
+        "your file is too big" for a 222-byte `__init__.py`.
+        """
+        parts = [p for p in remote_dir.strip("/").split("/") if p]
+        for i in range(1, len(parts) + 1):
+            path = "/".join(parts[:i])
+            try:
+                existing = self._request("GET", path, timeout=timeout)
+            except FileNotFoundError:
+                existing = None
+            if existing is not None:
+                if existing.get("type") != "directory":
+                    raise NotADirectoryError(
+                        f"Cannot create directory {remote_dir!r}: {path!r} "
+                        "already exists and is a file"
+                    )
+                continue
+            self._request(
+                "PUT",
+                path,
+                json_data={"type": "directory", "path": path},
+                timeout=timeout,
+            )
+
+    def upload(
+        self,
+        local_path: str,
+        remote_path: str,
+        timeout: tuple[float, float] | None = None,
+    ):
         file_size = os.path.getsize(local_path)
         filename = remote_path.split("/")[-1]
         base_payload = {
@@ -95,6 +140,7 @@ class ContentsClient:
                 "PUT",
                 remote_path,
                 json_data={**base_payload, "content": content_b64, "chunk": 1},
+                timeout=timeout,
             )
 
         result = None
@@ -118,7 +164,12 @@ class ContentsClient:
                 result = self._request(
                     "PUT",
                     remote_path,
-                    json_data={**base_payload, "content": content_b64, "chunk": chunk},
+                    json_data={
+                        **base_payload,
+                        "content": content_b64,
+                        "chunk": chunk,
+                    },
+                    timeout=timeout,
                 )
                 if is_last:
                     break

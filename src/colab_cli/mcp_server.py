@@ -53,7 +53,13 @@ EXCLUDED_COMMANDS = {
     "drivemount",  # can block on /dev/tty for a Drive re-auth ceremony
     "mcp",  # the MCP server command itself
     "help",  # redundant with MCP's own tool discovery,
-    "pay" # user-facing accounts + billing
+    "pay",  # user-facing accounts + billing
+    # `job apply` blocks for the job's entire wall_clock -- hours -- and
+    # returns output only at the very end. That is exactly the failure
+    # mode `log --follow` is excluded for below. An agent drives a job
+    # through `job_plan` then polls `job_status`, which is the shape the
+    # supervisor was designed for anyway.
+    "job_apply",
 }
 
 
@@ -132,8 +138,48 @@ def _param_schema(param: click.Parameter) -> Dict[str, Any]:
     return schema
 
 
+def _iter_exposable(
+    click_group: click.Group, prefix: str = ""
+) -> List[Tuple[str, click.Command]]:
+    """Walk the command tree, flattening sub-groups into `group_sub` names.
+
+    MCP has no notion of a command hierarchy: a tool name is a flat string.
+    A `click.Group` exposed directly would be a tool with no parameters and
+    no way to say which subcommand you meant, so groups are flattened into
+    one tool per leaf (`job` + `plan` -> `job_plan`).
+
+    Dispatch needs no special handling for these: `invoke_command` builds a
+    `click.Context` around whichever `Command` object it is handed, and a
+    leaf inside a group is an ordinary `Command`.
+    """
+    found: List[Tuple[str, click.Command]] = []
+    for name, cmd in sorted(click_group.commands.items()):
+        if not _is_exposable(name, cmd):
+            continue
+        # Duck-typed, NOT `isinstance(cmd, click.Group)`: Typer's
+        # `TyperGroup` does not subclass `click.Group` in the pinned
+        # version (its MRO is TyperGroup -> typer._click.core.Command),
+        # so the isinstance check silently matches nothing and the group
+        # ships as one useless parameterless tool. Verified against the
+        # actual MRO rather than assumed.
+        sub_commands = getattr(cmd, "commands", None)
+        if sub_commands:
+            for sub_name, sub_cmd in sorted(sub_commands.items()):
+                flat = f"{prefix}{name}_{sub_name}"
+                # Exclusions are matched against the FLATTENED name: the
+                # leaf's own name is ambiguous ("apply", "list") and would
+                # either miss the exclusion or blanket-exclude an unrelated
+                # top-level command that happens to share it.
+                if flat in EXCLUDED_COMMANDS or sub_cmd.hidden:
+                    continue
+                found.append((flat, sub_cmd))
+            continue
+        found.append((f"{prefix}{name}", cmd))
+    return found
+
+
 def build_tools(click_group: click.Group) -> Tuple[List[types.Tool], Dict[str, click.Command]]:
-    """Scan a flat Click group and build an MCP tool per exposable command.
+    """Scan a Click group and build an MCP tool per exposable leaf command.
 
     Returns the tool list (for `tools/list`) alongside a name -> Command
     lookup used to dispatch `tools/call` requests.
@@ -141,10 +187,7 @@ def build_tools(click_group: click.Group) -> Tuple[List[types.Tool], Dict[str, c
     tools: List[types.Tool] = []
     commands: Dict[str, click.Command] = {}
 
-    for name, cmd in sorted(click_group.commands.items()):
-        if not _is_exposable(name, cmd):
-            continue
-
+    for name, cmd in _iter_exposable(click_group):
         properties: Dict[str, Any] = {}
         required: List[str] = []
         for param in _command_params(cmd):

@@ -94,3 +94,8 @@ get_drive_source.py
 
 # OMP session config (agent-local, never committed)
 WATCHDOG.yml
+
+# Per-directory gcloud config + ADC (see .envrc). Contains
+# application_default_credentials.json -- a live refresh token. Never commit.
+.gcloud/
+.envrc

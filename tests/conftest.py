@@ -17,9 +17,17 @@ from unittest.mock import MagicMock
 
 
 @pytest.fixture(autouse=True)
-def mock_common_state(mocker):
+def mock_common_state(mocker, tmp_path):
     # Patch the state singleton in common.py
     mock_state = mocker.patch("colab_cli.common.state")
+
+    # Same auto-vivify hazard as `json_output` below, but with a worse
+    # symptom: `config_path` is fed to `Path()`, and a MagicMock satisfies
+    # `os.fspath`, so anything deriving a directory from it silently
+    # creates a literal `MagicMock/state.config_path/` tree in the repo
+    # root -- and one test's leftovers become the next test's input.
+    # Pin a real per-test path.
+    mock_state.config_path = str(tmp_path / "colab-cli" / "sessions.json")
 
     # Setup standard mocks for properties
     mock_state.store = MagicMock()
@@ -46,6 +54,11 @@ def mock_common_state(mocker):
     # Global patch for ColabRuntime to prevent network calls
     # We patch it in the modules where it is imported and used
     mocker.patch("colab_cli.commands.session.ColabRuntime")
+    # `commands/job.py` imports ColabRuntime *inside* `apply()`, so a patch
+    # on that module's namespace would be re-resolved away on every call.
+    # Patch the source module: this is the last line of defence stopping a
+    # CLI test from provisioning a real VM (it has happened).
+    mocker.patch("colab_cli.runtime.ColabRuntime")
     mocker.patch("colab_cli.commands.execution.ColabRuntime")
     mocker.patch("colab_cli.commands.automation.ColabRuntime")
     mocker.patch("colab_cli.commands.run.ColabRuntime")

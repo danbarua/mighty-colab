@@ -27,7 +27,7 @@ from colab_cli import common
 from colab_cli.auth import AuthProvider
 from colab_cli.common import build_envelope, emit_json, state, setup_logging
 from colab_cli.commands import session, execution, files, automation, run, ssh, utility
-from colab_cli.commands import adopt, mcp
+from colab_cli.commands import adopt, mcp, job
 
 # The only commands that emit a `--json` envelope. Kept as one literal set
 # (not derived from the Click tree) so both `callback()` (does this
@@ -43,6 +43,10 @@ JSON_CAPABLE_COMMANDS = {
     "stop",
     "sessions",
     "status",
+    # The whole `job` group. Its subcommands all emit the same envelope
+    # shape, and the group name is what the callback sees as the invoked
+    # subcommand, so one entry covers plan/apply/status/destroy/list.
+    "job",
 }
 
 # Every option defined on the root `@app.callback()` below -- i.e. one that
@@ -356,6 +360,7 @@ run.register(app)
 ssh.register(app)
 utility.register(app)
 mcp.register(app)
+job.register(app)
 
 
 def _command_name_from_argv(argv: List[str]) -> str:
