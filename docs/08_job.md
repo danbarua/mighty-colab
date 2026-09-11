@@ -10,7 +10,7 @@ log:
 
 # Design: `job` — Agent job supervisor
 
-**Implemented and live-verified** (2026-09-11). `mighty-colab job plan|apply|status|destroy|list` ships in `src/colab_cli/job/`; usage lives in `docs/09_job_usage.md`. This document is the design and evidence, not a proposal. Settled contract is written as MUST. The multi-hour falsifier is resolved: the loss at about one hour was proxy-token expiry, not VM loss, and the supervisor refreshes the token. Remaining untested surfaces are independent kernel restart mid-run and a GPU job spanning that refresh boundary.
+**Implemented and live-verified** (2026-09-11). `mighty-colab job plan|apply|status|destroy|list` ships in `src/colab_cli/job/`; usage lives in `docs/09_job_usage.md`. This document is the design and evidence, not a proposal. Settled contract is written as MUST. Long-run evidence proves the VM, assignment, and files survived the first Contents failure at about one hour; refreshing assignment metadata restored access. That probe did not distinguish bearer-token expiry from proxy endpoint rebinding, and the supervisor refresh covers both. Remaining untested surfaces are independent kernel restart mid-run and a GPU job spanning that refresh boundary.
 
 `run` stays the shebang (`new` + text-into-kernel + `stop`). `job` is the unit of work an unattended agent actually has: code, deps, data, artifacts, accelerator policy, two clocks, teardown.
 
