@@ -452,9 +452,19 @@ auto-refreshes never reaches the failure and observes nothing. Let it break,
 then `adopt`, then retry.
 
 - **Independent kernel restart** mid-run (step 7). Untested.
-- **GPU session.** Untested; CPU only so far.
-- The prototype has no watchdog process yet (runner enforces `wall_clock`
-  directly), no `control.*` PUT, and no data plane.
+- **GPU session.** **Verified 2026-09-11** against the shipped implementation:
+  requested `T4`, granted `T4`, `verify` gate passed, the workload ran a real
+  `torch` CUDA matmul and exited 0, watchdog reported live telemetry
+  (`Tesla T4, 15360, 14910, 0`), VM released. What remains untested on GPU is a
+  *long* run — everything so far finishes inside the token's first hour.
+- **Failure path.** **Verified 2026-09-11**: a `KeyError` in the workload
+  surfaced off-VM as `workload: failed` / `exit 1` /
+  `exception: KeyError: 'missing_key'` / `retry_class: fix_code`, with
+  `cleanup: released` and `apply` exiting 1. Teardown ran despite the failure.
+- The spike prototype in `integration/spike_job_runner/` has no watchdog
+  process (its runner enforces `wall_clock` directly) and no data plane; the
+  shipped implementation has both a watchdog and `control.*` PUT, but the
+  signed-URL data plane has still never been exercised against a real bucket.
 
 ## Known gaps
 
@@ -468,4 +478,4 @@ Apply-implementation-time, not spike-blocking. Real tradeoffs, not polish.
 
 **CLI integration:** ownership record so `adopt`/`stop` refuse a job-owned endpoint; account-scoped in-flight assignment limit; keep-alive daemon is required in provision (stated) but its `left_up` handoff is unspecified.
 
-**Transport leftovers:** Contents whole-file GET (log is replace-not-append until a chunk scheme); bundle size ceiling at plan (stated, bound not measured); Contents request timeouts (stated, not implemented).
+**Transport leftovers:** Contents whole-file GET (log is replace-not-append until a chunk scheme); bundle size ceiling at plan (enforced at 250MB, but that bound is inherited from one live 400 and has not been measured precisely). Contents request timeouts and the proxy-token refresh are now **implemented** (`src/colab_cli/job/transport.py`): explicit connect/read deadlines, one refresh-and-retry per 401/404, rate-limited to one assignment re-resolve per 60s so a routine "result.json isn't there yet" 404 does not re-resolve on every poll.

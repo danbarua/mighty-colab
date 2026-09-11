@@ -209,11 +209,22 @@ mighty-colab sessions            # the real answer about what is billing
 
 Be aware of these before trusting a long run:
 
-- **GPU sessions are untested end-to-end.** Every live run so far has been CPU.
+- **The signed-URL data plane has never been exercised against a real bucket.**
+  This is the biggest one: `data:` and `artifacts:` are implemented and unit
+  tested, but no live run has yet pulled or pushed a real signed URL. Treat
+  your first one as a test.
+- **No GPU run has yet outlived the ~60 minute token boundary.** The refresh
+  is implemented and the boundary is characterised, but the combination is
+  unproven.
 - **Independent kernel restart mid-run** is untested.
-- **The signed-URL data plane has not been exercised against a real bucket.**
 - Log offload is whole-file replace, not append.
 - Detected escapees are reported, not killed.
+
+Verified live on 2026-09-11: CPU and T4 GPU runs end to end (`done=True
+ok=True`, real CUDA matmul, clean teardown); the failure path (`KeyError` ->
+`workload: failed`, `exception` carried off-VM, `retry_class: fix_code`,
+`cleanup: released`, `apply` exits 1); and token expiry at t+61min recovering
+via re-adopt.
 
 Please report what breaks — the failure modes above were all found by running
 the thing, not by reading it.
