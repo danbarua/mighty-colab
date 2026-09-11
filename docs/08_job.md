@@ -5,13 +5,14 @@ log:
 2026-09-11: **Corrected a wrong conclusion.** The 77min token spike lost contact at 61min and the first write-up called it "runtime reset under a live assignment" with a "no activity = reclaimed" hypothesis, citing a peer field report as corroboration. Both were wrong. Issue #3 (this repo, 2026-08-12) already documents the real cause: the runtime-proxy token has a TTL the CLI never refreshes, expiry returns **401/404** (so the "404 not 401, therefore not auth" reasoning was invalid), and it reproduces "at ~60 minute intervals" — this run failed at 61. `stop: ok` proved nothing: unassign uses the Gaia token on a different host than the Contents API's proxy token. The field report is evidence *against* the activity hypothesis — their job wrote continuously and still hit 404/401, recovering via `adopt`. Retracted "watchdog is life support"; the real consequence is that the supervisor's poll loop MUST refresh the proxy token (`list_assignments()` returns a fresh one and the CLI discards it). Next experiment replaced: re-adopt at first failure and retry the read, which discriminates in one ~65min session.
 2026-09-11: **Falsifier settled by experiment, with one confound named.** `token_discriminator_spike.py` ran the same quiet workload and, at the first Contents failure (t+61min, again), re-adopted instead of concluding: the assignment was still listed, `adopt --keep-alive` returned 0, and the immediate re-read of `launch.json` succeeded. **The files were intact the whole time** — the VM was never recycled and the activity hypothesis is dead. But `adopt` mints a fresh token *and* re-resolves the proxy URL, so the run does not separate token expiry from endpoint rebinding; the script's `VERDICT=TOKEN_EXPIRY` overstates it (caught by `labkit-assistant`, who supplied the original evidence). Issue #3's documented TTL keeps expiry the leading hypothesis. The fix is robust either way: the supervisor re-resolves the assignment and rebuilds its client from the new token *and* URL. Discriminating measurement recorded in the doc for the next long run.
 2026-09-11: **Implemented** (`src/colab_cli/job/`, `mighty-colab job plan|apply|status|destroy|list`). Four-field envelope with separate `done`/`ok`; stage+run+offload behind one kernel RPC so a dropped websocket cannot lose the run; `JobTransport` refreshes the proxy token once per 401/404 (rate-limited so routine "result.json not there yet" 404s don't re-resolve every poll). Live CPU runs: `done=True ok=True`, exit 0, VM released. Three defects found by running it rather than reading it — Contents PUT into a non-existent directory returns a bare HTTP 500 that the client attributes to the size limit (now `makedirs` first); the watchdog inherits `MIGHTY_JOB_ID` and reported itself as a surviving descendant on every job (now excluded); `retry.on` is unusable in a YAML spec because YAML 1.1 resolves a bare `on:` key to boolean true (renamed `retry.when`). Still untested: GPU session, independent kernel restart mid-run, and a real signed-URL data plane.
-2026-09-11: **Signed-URL data plane live-verified and control backstop repaired.** A live run pulled a sha256-locked GCS input and pushed a byte-identical artifact. It also exposed that `Orchestrator.launch()` did not pass the declared `control.result.put_url` to the runner, so the off-VM result remained its `{}` placeholder while the primary envelope succeeded. Added the missing runner option, stamped the nested job envelope with `cli_version`, documented GCS's create-before-signing-GET order, and reran a live CPU job: the control object contained `workload: succeeded` / `exit_code: 0`, apply reported `done=true` / `ok=true`, cleanup released the VM, and no session remained.
+2026-09-11: **Signed-URL data plane live-verified and control backstop repaired.** A live run pulled a sha256-locked GCS input and pushed a byte-identical artifact. It also exposed that `Orchestrator.launch()` did not pass the declared `control.result.put_url` to the runner, so the off-VM result remained its `{}` placeholder while the primary envelope succeeded. Added the missing runner option, retained `cli_version` on the local job envelope, documented GCS's create-before-signing-GET order, and reran a live CPU job: the control object contained `workload: succeeded` / `exit_code: 0`, apply reported `done=true` / `ok=true`, cleanup released the VM, and no session remained.
 2026-09-11: **Launch-kernel restart live-verified.** The first attempt exposed that the job session record omitted the active kernel and session identifiers, so the public `restart-kernel` command could not target the kernel that launched the runner; cleanup also left the local kernel client open after the terminal envelope. Both are fixed. `integration/repro_job_kernel_restart/test.sh` now launches a detached CPU workload, restarts its recorded launch kernel through the public command, proves the consumer's process identity is unchanged while progress advances, observes `workload: succeeded` / exit 0, releases the assignment, and verifies the endpoint is absent.
+2026-09-11: Audited the implemented contract against source, executable help, tests, and five adversarial domain reviews. Corrected the public CLI and schema, current phase and persistence behavior, plan-hash scope, transport boundaries, signed-URL handling, and supervisor recovery claims. Added the load-bearing implementation gaps that remain.
 ---
 
 # Design: `job` — Agent job supervisor
 
-**Implemented and live-verified** (2026-09-11). `mighty-colab job plan|apply|status|destroy|list` ships in `src/colab_cli/job/`; usage lives in `docs/09_job_usage.md`. This document is the design and evidence, not a proposal. Settled contract is written as MUST. Long-run evidence proves the VM, assignment, and files survived the first Contents failure at about one hour; refreshing assignment metadata restored access. That probe did not distinguish bearer-token expiry from proxy endpoint rebinding, and the supervisor refresh covers both. The remaining untested load-bearing surface is a GPU job spanning that refresh boundary.
+**Implemented and live-verified in the paths identified below** (2026-09-11). `mighty-colab job plan|apply|status|destroy|list` ships in `src/colab_cli/job/`; usage lives in `docs/09_job_usage.md`. This document describes the current implementation and names its gaps. Long-run evidence proves that the VM, assignment, and files survived the first Contents failure at about one hour; `JobTransport` refreshing assignment metadata restored access. The probe did not distinguish bearer-token expiry from proxy endpoint rebinding. A multi-hour GPU job through that refresh remains untested, and the current job path does not start the TFE keep-alive daemon.
 
 `run` stays the shebang (`new` + text-into-kernel + `stop`). `job` is the unit of work an unattended agent actually has: code, deps, data, artifacts, accelerator policy, two clocks, teardown.
 
@@ -30,7 +31,7 @@ Those steps have a shape. The shape is a state machine. The machine belongs in c
 - Consumer `import mighty_runtime` as a requirement. v0 has no stall kill, so no `pulse()` either.
 - CLI-side GCS signed URL minting from ordinary user ADC (no private key; `signBlob` needs a service account).
 - A DAG of jobs. GCS/HTTP is the queue between jobs.
-- Mid-run `install`/`reinstall` issued by apply itself. Colab independently restarting the kernel is a different, still-open reliability case.
+- Mid-run `install`/`reinstall` issued by apply itself. The explicit public `restart-kernel` path is live-verified; a platform-initiated kernel replacement or crash remains unverified.
 
 ## Layers
 
@@ -50,195 +51,136 @@ agent
 
 ## User surface
 
-| command | mutates | analogue |
+| command | effects | analogue |
 |---|---|---|
-| `job plan spec.yaml --out plan.json` | no | `terraform plan -out` |
-| `job apply plan.json` | yes | `terraform apply plan` |
-| `job status [-j JOB]` | no | refresh |
-| `job destroy [-j JOB]` | yes | `terraform destroy` |
+| `job plan SPEC_FILE [--out PATH] [--no-probe]` | writes local records and optionally probes data URLs; no VM | `terraform plan -out` |
+| `job apply [PLAN_FILE] [--job-id ID] [--timeout S] [--leave-up]` | allocates and drives a VM | `terraform apply plan` |
+| `job status JOB_ID [--poll] [--interval S]` | reads the local record and, when possible, the VM result | refresh |
+| `job destroy JOB_ID [--cancel-only]` | cancels and/or unassigns | `terraform destroy` |
+| `job list` | lists local job records | local inventory |
 
-`-j`/`--job`, never `-s`. `-s` already means session name via `resolve_session`.
+The MCP server exposes `job_plan`, `job_status`, `job_destroy`, and `job_list`. It deliberately excludes the blocking `job_apply` command.
 
-Three MCP tools later: synchronous `plan`; nonblocking `apply` that returns a job id; bounded `status` snapshot (the client polls). `apply` MUST NOT be auto-exposed as a blocking MCP tool — `mcp_server.py` dispatch is synchronous.
+`provision` is a phase of apply, not another command.
 
-`provision` is a **phase of apply**, not a fourth command. Warm pool later MAY be `apply --stop-after=provision`.
-
-Apply consumes a plan file. The plan hashes the spec with URL query strings canonicalized out (re-signing the same object MUST NOT invalidate the plan). Apply MUST refuse a spec that is not that plan.
+Apply consumes a plan file directly or retrieves one by `--job-id`. It re-hashes the plan's embedded spec with URL query strings canonicalized out and refuses a plan whose embedded spec no longer matches that recorded hash. It never re-reads the original YAML. The hash does **not** include entry bytes, bundle contents, or a git commit; code can change between plan and apply without invalidating the plan.
 
 ## Spec (v0)
+
+The accepted fields are defined by `JobSpec`; unknown fields are rejected. This schema-valid baseline shows the implemented names and concrete enum values:
 
 ```yaml
 name: train-cls0
 ignore_warnings: false
-accelerator: { prefer: [A100, T4], accept_cpu: false }
+accelerator:
+  prefer: [A100, T4]
+  accept_cpu: false
 code:
-  kind: file | bundle | git
+  kind: bundle
+  root: .
   entry: train.py
   args: ["--epochs", "3"]
 deps: [torch==2.4.1]
-data:
-  - { url: "https://…", dest: /content/jobs/<id>/data/x.npy, sha256: …, size_bytes: … }
-artifacts:
-  - { path: /content/jobs/<id>/out/model.pt, url: "https://…", required: true }
-checkpoints: /content/jobs/<id>/out/ckpt-*
-budgets: { wall_clock: 3600 }   # only zero-cooperation kill in v0; stall is a warning, not a SIGTERM
-control:
-  result:
-    put_url: "https://…"    # signed PUT; runner writes result.json here
-    get_url: "https://…"    # signed GET of the same object; local supervisor/spike reads here
-  log:                      # optional
-    put_url: "https://…"
-    get_url: "https://…"
-  # both methods' expiries MUST cover retry.budget + cleanup slack
+budgets:
+  wall_clock: 3600
 retry:
-  when: [retry_same]      # `when`, not `on`: YAML 1.1 reads a bare `on:` as boolean true
-  max_attempts: 3
-  budget: 4h              # job-total from apply start; wall_clock is per attempt
-  mode: recreate | resume
-on_offload_fail: leave_up | destroy
-on_run_fail: offload_anyway | skip
+  when: [retry_same]       # `when`, not `on`: YAML 1.1 reads bare `on:` as true
+  max_attempts: 1
+  budget_seconds: 14400
+  mode: recreate
+on_offload_fail: leave_up
+on_run_fail: offload_anyway
 ```
 
-For a GCS-backed `control.result`, signing order is part of the contract. GCS
-refuses to sign GET for an object that does not exist. The caller MUST first
-sign PUT (with an explicit bucket region and no signed headers), PUT a fresh
-`{}` placeholder using `Content-Type: application/octet-stream`, and only then
-sign GET for that same object. The object name MUST be unique per job. The
-runner overwrites the placeholder with its terminal envelope; callers MUST NOT
-interpret `{}` as a verdict. Signed query strings are credentials: neither URL
-may appear in logs or serialized envelopes. Exact commands live in
-`docs/09_job_usage.md`.
+Optional `data[]` entries contain `url`, `dest`, `sha256`, and `size_bytes`. Optional `artifacts[]` entries contain `path`, `url`, `required`, and `size_bytes`. `control.result` and `control.log` each accept paired `put_url` and `get_url` values. `code.kind` is only `file` or `bundle`; there is no `git`, `checkpoints`, or `credentials` field.
 
-`resume` is an argv contract (`--resume <path>` we pass when checkpoint files exist). We do not invent a JAX training loop. No matching files → `recreate` or `stop`, never a lie. `mode: resume` on preempt/session_lost cannot use VM-local globs — those files died with the VM. v0: resume is same-VM only; lost-VM is always `recreate`. Checkpoint URL rotation is a later door.
+For a GCS-backed `control.result`, first sign PUT, PUT a fresh `{}` placeholder using `Content-Type: application/octet-stream`, and then sign GET for the same unique object. The runner replaces the placeholder with its terminal result. `{}` is not a verdict. The CLI does not automatically read `control.result.get_url`; it is a manual recovery channel.
 
-**Not implemented in v0: `apply` runs exactly one attempt.** `max_attempts`/`mode` are accepted and recorded, but no retry loop exists yet. Whoever implements it MUST handle this: `recreate` wipes the job directory, and `data[].dest`/`artifacts[].path` are validated against `/content`, not against the job dir — so declared paths like `/content/out/model.pt` **survive a recreate**. Staging re-fetches and re-verifies every `data[]` entry by sha256 on each attempt, so stale inputs are overwritten and checked; artifacts are not. An artifact left by attempt 1 that attempt 2 never rewrites would be uploaded as if attempt 2 had produced it — a silently wrong result, invisible in the envelope. **Attempt N>1 MUST delete every declared `artifacts[].path` before starting the consumer.** The containment rule deliberately allows conventional Colab paths so an unmodified script is a valid job; this is the cost of that choice, and it is paid here rather than by forcing every spec to be job-id-aware.
+Signed query strings are credentials. Current persistence does **not** redact them: `spec.json`, `plan.json`, an explicit `--out` file, remote manifests, and the launch source containing `control.result.put_url` can contain the full query. The launch source is sent through normal kernel execution history. Protect those files and kernel history accordingly. Envelopes and event messages do not intentionally include URL queries.
 
-`ignore_warnings` lives in the spec. Plan will not write `-out` while warnings exist and this is false.
+`apply` runs exactly one attempt. `retry.when`, `max_attempts`, `budget_seconds`, and `mode` are accepted and recorded, but there is no retry, recreate, resume, or checkpoint implementation. `max_attempts > 1` produces a plan warning, which apply rejects unless `ignore_warnings: true` accepts it. `on_run_fail` is accepted but currently ignored: declared artifacts are attempted after a failed run even when it is `skip`. `control.log` is accepted by the schema but is not uploaded or consumed.
 
-`data[].dest` and `artifacts[].path` MUST resolve inside `/content/jobs/<id>/` (data root / `out/`). Plan rejects anything that canonicalizes onto `mighty_runtime/`, `result.json`, `exception.json`, `watchdog.json`, or `launch.json`.
+Relative data destinations and artifact paths resolve under `/content/jobs/<id>`. Absolute paths are accepted only after canonical resolution below `/content`; launcher-owned paths below the job directory are reserved.
 
 ### Budgets
 
-`wall_clock` is per attempt, enforced by the **watchdog** (absolute epoch deadline written into `launch.json` at start). On breach: write an intent record, SIGTERM the shim's process group, grace, SIGKILL. `retry.budget` is job-total from first `apply`; an attempt is only started when remaining budget ≥ `wall_clock`.
+`wall_clock` is enforced by the watchdog. On breach it writes intent, sends SIGTERM to the shim's process group, waits through the grace period, and escalates to SIGKILL. `retry.budget_seconds` currently controls control-URL expiry validation only; it does not bound an implemented retry loop.
 
-v0 does **not** hard-kill on stall. `exec --timeout` already taught us that "stdout went quiet" murders healthy JAX/XLA. The consumer MUST NOT import us, so there is no honest zero-cooperation progress signal that isn't that wound. Watchdog still *reports* inactivity (stdout mtime, `out/` mtime, GPU util) as a non-terminal `hint` / `supervisor: degraded` warning. It does not SIGTERM. A later opt-in `mighty_runtime.pulse()` MAY turn that warning into a real stall deadline; until the consumer calls it, the field is absent, not inert-but-present. `wall_clock` is the only kill that requires nothing from their code.
+v0 does not hard-kill on stall. `exec --timeout` already taught us that "stdout went quiet" murders healthy JAX/XLA. The consumer does not import `mighty_runtime`, so there is no zero-cooperation progress signal. The watchdog reports telemetry and inactivity; `wall_clock` is the only zero-cooperation kill.
 
 ## Remote process tree
 
-A long-lived `execute_code` of the workload reintroduces the silent-kernel `--timeout` and the `jupyter-kernel-client` CPU-spin. A file heartbeat cannot unblock that wait.
-
-A bare `Popen([python, entry])` from a short kernel call is also wrong: once that call returns, nothing that can `waitpid()` remains.
-
-Launcher (settled shape; `[open]` items are alternatives the spike must choose):
-
-1. Place `mighty_runtime` on disk (before their bytes). Plan rejects a bundle above a declared, tested Contents-API ceiling (chunked PUT is not unbounded — this repo has a live 250MB 400).
-2. One short kernel call, **non-interactive execute path only** (`execute_code` with no output hook; the interactive/output-hook path is documented to CPU-spin past its timeout and is unsupported for launch), with an **explicit finite timeout**, not the 10s default:
-   `Popen([sys.executable, "-m", "mighty_runtime.runner", entry, *args], start_new_session=True)`
-   redirect runner stdout/stderr to files, return `{pid}` immediately. Kernel goes IDLE. The runner's first action is `O_EXCL` create of `launch.json` `{schema_version, pid, pgid, starttime, boot_id, attempt, deadline}`. A retried launch RPC that finds a live matching `launch.json` is a no-op that returns the recorded pid — never a second runner.
-3. The runner launches `python -m mighty_runtime.shim entry *args` as its own child, **in its own session/process group** (`start_new_session=True` on this second `Popen`). The shim runs **in the consumer's process**: sets real `sys.argv`/`__file__` (the entry's real on-disk path) and **`sys.path[0]`** to the entry's directory, then `runpy.run_path(entry, run_name="__main__")` wrapped in `try/except BaseException`. On a caught exception whose mapped exit code is nonzero, it writes `exception.json` (type, message, traceback tail trimmed to the entry's frames) **before** exiting with the matching code — same `sys.exit()` / `sys.exit(N)` / `sys.exit('msg')` mapping `run.py` already has. A clean `sys.exit()` / `sys.exit(0)` is **not** an exception: no `exception.json`. The shim is ours; the entry never imports it. **[open]** A double-fork/`setsid` descendant can escape this process group. Spike must confirm whether a cgroup or `PR_SET_CHILD_SUBREAPER` is available on a Colab VM before this is a real boundary. After `waitpid`, the runner MUST verify no surviving descendants before writing `result.json` or starting offload.
-4. Runner is the shim's **parent**: `waitpid`, `killpg`s the shim's **own** group only (never its own), atomically writes `result.json`, then **PUT**s that file to `control.result.put_url` (log tail to `control.log.put_url` if set). The shim/consumer process MUST NOT receive these URLs in env or argv — they stay in the runner. That PUT is **defence-in-depth for the case where the VM is genuinely gone**, not the primary answer to a failed poll: a 401/404 is usually an expired proxy token, which step 6's refresh fixes directly. Cancel intent is `cancel.json` via Contents; the watchdog signals the shim pgid. Signal death maps to `cancelled` only when that intent record exists (OOM SIGKILL is `failed`).
-5. Watchdog is a **sibling**, `start_new_session=True`, booted in `run` after apply's one dependency-install restart. It enforces `wall_clock` only. Inactivity is a warning in `watchdog.json`, not a kill. Liveness of the runner is **not** `kill(pid, 0)`: it is `launch.json` identity — pid exists AND `/proc/<pid>/stat` starttime matches AND boot_id matches. Apply starts the existing TFE keep-alive daemon (same path as `colab new`); an IDLE kernel with a detached runner is exactly the prune scenario keep-alive exists to prevent.
-6. Local supervisor polls `launch.json` / `watchdog.json` / `result.json` through the Contents API. It MUST NOT `execute_code` to learn whether the job is alive. Contents requests MUST have connect/read deadlines. **The runtime-proxy token is a snapshot taken at `assign` with a finite TTL (`tokenExpiresInSeconds`), and the poll loop MUST refresh it** — either periodically ahead of expiry, or on the first 401/404 by re-resolving via `list_assignments()` (which returns a fresh token on every call) and retrying once before classifying anything. Holding the assign-time snapshot loses contact with a healthy VM at ~60min, deterministically (issue #3). A 401/404 that survives one refresh-and-retry is `transport_degraded`; only an endpoint absent from the assignment list is `session_lost`.
-
-`waitpid` never yields a Python exception type/message. Detail depends on the shim surviving long enough to write `exception.json`, which it cannot for `os._exit()`, `SIGKILL`/OOM, or a native segfault. Those still produce `workload: failed` (`exit_code`/`signal` set, `exception: null`). `workload` derives from `exit_code`/`signal`/intent; `exception` is annotation.
-
-`workload: unknown` is the one terminal value an agent cannot act on, so it needs the tightest evidence, not the loosest:
+The durable workload is a runner process, not the launch kernel:
 
 ```
-unknown ≡ launch.json exists
-       AND identity (pid, starttime, boot_id) matches no live process
-       AND result.json is absent
-       AND Contents reads of launch.json succeeded (a 401/timeout is transport_degraded, not unknown)
+kernel launch RPC
+  └─ python -m mighty_runtime.runner
+       └─ python -m mighty_runtime.shim <entry>
+watchdog process (sibling)
 ```
 
-A reused PID without starttime/boot_id would report the runner alive forever. A Contents blip without this rule would report unknown on a healthy job. `launch.json` is therefore required, not polish.
+Before launch, the local stage phase uploads `mighty_runtime`, user code, and manifests through the Contents API. `kind: file` uploads only the entry file. `kind: bundle` walks the root and uploads files individually, excluding `.git`, `.venv`, `__pycache__`, and `.pyc`; it does not send a tarball.
 
-The consumer does not import `mighty_runtime`. Real `__file__`, real `sys.argv`. Stdout is their log, not pulses.
+`Orchestrator.launch()` calls `ColabRuntime.execute_code(..., timeout=120)` and starts the runner with `start_new_session=True`. Passing no output hook does not create a separate non-interactive protocol: the vendored client still uses its interactive execution loop internally. The 120-second limit covers the execute reply; kernel HTTP/WebSocket startup retains its shorter defaults. Kernel restart itself currently has no explicit deadline.
+
+The runner creates `launch.json` with `O_EXCL`, starts the shim in its own session/process group, and remains its parent so it can `waitpid()`. The shim sets the entry's real `sys.argv`, `__file__`, and `sys.path[0]`, then uses `runpy.run_path(..., run_name="__main__")`. A duplicate runner sees the existing live launch identity and exits without starting a second consumer; the launch RPC does not promise to return the original runner PID.
+
+The runner maps normal exits, exceptions, signals, cancellation intent, wall-clock expiry, and descendant-survival checks into `result.json`. It then attempts declared artifact PUTs and, when configured, `control.result.put_url`. `control.log` is not used. An optional artifact that is absent does not fail offload, but any artifact PUT recorded as `failed` currently makes scalar `offload: failed`, irrespective of `required`.
+
+The watchdog is a sibling process. It enforces wall clock and reports telemetry. The job provision path currently does **not** start the TFE keep-alive daemon used by `colab new`; an idle launch kernel therefore lacks the documented idle-pruning protection.
+
+The local apply supervisor polls `result.json` and `watchdog.json`; it does not poll `launch.json` or implement the launch-identity rule for a dead runner. `JobTransport` gives those polling/cancel reads connect/read deadlines and refreshes assignment metadata once after selected 401/404 failures, rate-limited to one resolution per 60 seconds. Payload staging uses a raw `ContentsClient` snapshot without those refresh and timeout wrappers. A long stage can therefore cross token expiry before the runner starts.
+
+`waitpid()` cannot always provide a Python exception. `os._exit()`, SIGKILL/OOM, and native crashes can produce `workload: failed` with exit/signal information and no exception. The runtime has identity data in `launch.json`, but the local supervisor does not currently turn "identity dead and result absent" into the earlier designed `unknown` verdict.
 
 ## Data plane
 
-v0: **URLs are inputs.** The caller already has GET/PUT HTTPS (signed by *their* signer, or public). `mighty_runtime` uses `urllib`. No GCS client required on the VM. Query strings MUST never appear in specs-as-logged, envelopes, history, or the pulled log.
+v0 accepts caller-supplied HTTPS GET/PUT URLs. The VM uses `urllib`; it has no GCS client or service-account-key mode.
 
-Signed URLs are HTTP-method-specific. A URL signed for GET commonly rejects `HEAD` with 403 even though the download works. `plan` MUST NOT HEAD them, and MUST NOT classify a failed HEAD as `fix_human`.
+`plan` uses a one-byte ranged GET only for `data[]` URLs. It does not issue HEAD and does not mutate artifact or control destinations. It parses recognizable signature expiry fields on all URL fields. Data and artifact URLs must cover `wall_clock + 15 minutes`; control URLs must cover `retry.budget_seconds + 15 minutes`. `control.result` is optional, and the planner does not prove that its PUT and GET URLs name the same object.
 
-GET inputs: probe with a tiny ranged GET (`Range: bytes=0-0`). Inspect status **before** reading the body. 206 → parse `Content-Range` for size; 200 → close without draining, size unknown (warn); 403/404 on **that GET** is `fix_human` / `fix_code` **before** `assign`. Cap the read at one byte; explicit connect/read timeouts. Plan parses signature expiry on every URL including `control.*.put_url` and `control.*.get_url`, and errors `fix_human` when `expiry - now < retry.budget + cleanup slack` (control) or `< wall_clock + stage/offload slack` (data/artifacts). Missing `control.result.put_url` or `control.result.get_url` is a plan error. Plan MUST treat them as different methods of the same object — a PUT-signed URL used as a GET is a 403, not IAM.
+The public-host check rejects literal private/link-local addresses that it recognizes. It does not resolve hostnames before deciding and currently misses at least IPv6 link-local forms; it is not a complete SSRF boundary.
 
-PUT / artifact URLs and `control.*` URLs: plan cannot prove they work without mutating the destination. Do not preflight them. Offload 403 from an expired signature is `retry_class: refresh_urls`, not `retry_same`.
+The runner reads each data response fully into memory before writing and hashing it, and reads each artifact fully into memory before PUT. These are not streaming paths. Source staging also uploads each file as one Contents API payload. The enforced 250 MB ceiling is per source file and is checked during apply, after provisioning; there is no aggregate bundle limit and no corresponding artifact-size ceiling.
 
-Scheme MUST be `https`. Plan rejects `file://`, link-local, RFC1918. Second door, explicit, not default:
-
-```yaml
-credentials:
-  type: service_account_json   # env or file; never in the consumer's env or job dir
-```
-
-The key is read only inside the runner for stage/offload `gs://` calls, lives outside `/content/jobs/<id>/`, is unlinked before `run` spawns the consumer, and is never used for assign/unassign/keep-alive. The CLI's own oauth2/ADC token is never placed on the VM.
+Each staged data item can carry `size_bytes` and `sha256`; the runner verifies both when present. Each artifact result records status, hash, and byte count when available. PUT failures are not retried automatically. A 403 caused by an expired signature may be labelled `refresh_urls` by some classified paths, but not every phase failure currently receives a `retry_class`.
 
 ## Plan
 
-Never calls `assign`. Numbered diagnostics, each with `retry_class` + `hint`.
+`job plan` never calls `assign`, but it is not side-effect-free: it writes `spec.json` and `plan.json` below the job store, writes `--out` when requested, and performs ranged GET probes unless `--no-probe` is set. It writes those files even when diagnostics contain warnings or errors.
 
-| severity | examples | effect |
-|---|---|---|
-| error | missing ADC scopes; sibling import in a `kind: file`; ranged-GET 403/404; `sum(data) >` anything we already know; dest escapes the job dir; URL scheme not https; signature expiry too soon | non-zero; no `plan.json` |
-| warn | artifact sizes undeclared; ranged GET returned 200 so size unknown | needs `ignore_warnings: true` |
+Errors make `plan` exit non-zero and make `apply` refuse the saved plan. Warnings make apply refuse unless the embedded spec has `ignore_warnings: true`. The current planner checks accelerator names, code-entry containment/existence, destination containment below `/content`, reserved/colliding paths, HTTPS and recognized literal private hosts, signed-URL expiry, and data ranged GETs. It does not implement several earlier design gates: aggregate bundle/data size, dependency resolution, ADC scope validation, file-mode sibling-import analysis, PUT/GET object equivalence, or artifact/control mutation probes.
 
-Plan says “will request A100+hm”. It cannot say “you will get one.” Quota is apply’s first contact with reality. Plan hashes code inputs (entry bytes / bundle manifest / git commit), not just the spec text.
-
-Plan-time expiry validation is necessary but **not sufficient**: a plan file is durable and may be applied hours later. `apply` MUST revalidate every data/artifact/`control.*` URL against `now + remaining retry budget + slack` **before** `assign` — failing there costs nothing, failing after costs a VM. Revalidation checks expiry and object identity only: a *refreshed signature for the same canonical object* (scheme://host/path unchanged) is accepted and does not invalidate the plan hash; a different object does.
+The job ID is `<name>-<UTC timestamp>-<six random hex characters>`. `spec_hash` is a canonical hash of the modeled spec with URL queries removed. It is not a content hash. `apply` revalidates URL expiry and plan self-consistency before assignment, but stages whatever code bytes are present at apply time.
 
 ## Apply phases
 
+The implemented phase order is:
+
 ```
 plan.json
-  → provision   assign + persist endpoint in envelope.json (before any other side effect)
-                + place mighty_runtime + start TFE keep-alive daemon
-  → install     pip/uv install pinned deps
-  → restart     kernel restart — the only one apply itself performs
-  → verify      deps + device, re-probed after restart so sys.modules is not stale
-  → stage       recompute free disk against post-install footprint; GET URLs;
-                verify size/sha256 per item as it lands
-  → run         boot watchdog, start runner (launch.json O_EXCL), poll files
-  → offload     PUT URLs (even on job_raised if on_run_fail: offload_anyway)
-  → cleanup     destroy | left_up
+  -> provision   assign; write the session store; then persist endpoint/session in envelope
+  -> install     install pinned dependencies
+  -> restart     restart the launch kernel
+  -> verify      probe dependencies, device, and declared input disk need
+  -> stage       upload runtime, source files, and stage/offload manifests
+  -> run         launch runner/watchdog; runner performs data GET, consumer run,
+                 artifact PUT, and optional control-result PUT
+  -> offload     absorb the runner's artifact results locally
+  -> cleanup     unassign, report already absent, or leave up
 ```
 
-`install` before `stage`: a bad pin is cheaper than a multi-GB transfer, and disk math after pip's wheels/caches have landed is the number that matters.
+`install` precedes `stage`, so a bad dependency pin fails before source upload and disk is measured after installation. Data GET is executed by the remote runner during `run`, not by the local stage phase.
 
-Watchdog and runner start in `run`, after apply's one restart. Intentionally reinstalling *during* `run` is out of scope for v0. **[open]** Colab can still restart or crash the kernel independently. Whether the detached runner/watchdog — and the Contents API (likely the Jupyter *server*, not the IPython kernel, unconfirmed) — survive that is unverified. Spike must add an independently-triggered restart while a workload runs. Supervisor lands on one of: polling continues, non-terminal `transport_degraded`, or `session_lost`.
+The explicit public `restart-kernel` path is live-verified while a detached consumer runs. A platform-initiated replacement/crash is still unverified. The restart POST used during apply has no explicit timeout.
 
-Refuse, no override: `sum(data) >` post-install free; no GPU when `accept_cpu: false`; `mighty_runtime` placement failed; local scopes missing.
+Apply tries one attempt. `RetryClass` is advice for the next caller action, not an automatic retry engine. The accepted `retry.when`, `max_attempts`, and `mode` fields do not cause a retry, a new VM, artifact deletion, or `--resume` injection. Some errors are classified (`fix_code`, `fix_human`, `retry_same`, `retry_different`, `refresh_urls`, `do_not_retry`); cancellation, offload failure, cleanup failure, and unwrapped ordinary exceptions do not all receive the earlier table's promised class.
 
-Warn (`ignore_warnings`): artifact sizes unknown and free disk tight; GPU RAM low vs unknown model.
-
-Unknown `--gpu` MUST NOT become A100. Fallback walks `prefer[]` only (this walk is the one stated exception to "auto-retry is only `retry_same`"). Silent CPU is how you publish chance-level science.
-
-Retry is classified by **reason**, not by phase:
-
-| reason | class | default |
-|---|---|---|
-| bad pin / resolver 404 / ResolutionImpossible | `fix_code` | destroy, do not loop |
-| package-index 429 / 5xx / timeout | `retry_same` | bounded; same VM |
-| restart transport timeout | `retry_same` | bounded |
-| session gone during install/restart | `retry_same` | **new** VM |
-| stage GET 403/404 | `fix_human` / `fix_code` | destroy, do not loop |
-| verify: wrong torch / device | `fix_code` / `retry_different` | do not train |
-| run: traceback | `fix_code` | no auto-retry |
-| run: wall_clock exceeded | `fix_code` | no auto-retry into the same budget |
-| run: cancelled (intent file) | `do_not_retry` | |
-| run: no result.json, identity dead (`unknown`) | `do_not_retry` until descendants proven dead; then `recreate` on a **new** VM | |
-| run: preempt / session_lost (endpoint absent from sessions listing, not a 401) | `retry_same` | recreate (lost-VM; resume is same-VM only) |
-| offload: expired signature | `refresh_urls` | not `retry_same` |
-| offload: 5xx | `retry_same` | bounded |
-| destroy fail | `do_not_retry` | leak; keep local state; endpoint in envelope |
-
-A 401/timeout on Contents is `transport_degraded` with backoff, never `session_lost`, until the endpoint is proven absent.
-
-`recreate` on the same VM (wipe job dir except `attempts/`, new runner) skips assign+pip. `recreate` on a new VM if the machine is the failure. Disk-full at epoch 3 is not `recreate` on the same disk. Each attempt stamps `attempt` into `launch.json`/`result.json`; the supervisor ignores files whose attempt is not current (same defect `execution.py` already fixed for exec-async sidecars).
+Ordinary exceptions outside `PhaseError` and `KeyboardInterrupt` can escape apply after its `finally` block, leaving a non-terminal persisted envelope and no emitted terminal verdict. Endpoint persistence also follows the session-store write rather than happening immediately after assignment, so there is a small allocation-without-envelope crash window. Concurrent or repeated apply of the same plan has no interprocess lock or active-apply guard and can provision twice or overwrite local state.
 
 ## Envelope, `done`, `ok`
 
-Three fields with closed enumerations, plus persistence. Collect/teardown MUST NOT overwrite the workload.
+Four state fields have closed enumerations:
 
 | field | non-terminal | terminal |
 |---|---|---|
@@ -247,66 +189,56 @@ Three fields with closed enumerations, plus persistence. Collect/teardown MUST N
 | `cleanup` | `pending` \| `running` | `released` \| `already_absent` \| `left_up` \| `failed` |
 | `supervisor` | `running` \| `degraded` | `finished` \| `interrupted` |
 
-`supervisor` is the fourth conjunct `done` actually needs — a filesystem path is not a value. Persist `endpoint` in `envelope.json` **immediately on assign**, before any later side effect. If apply dies, `job status` MAY observe a dead supervisor pid and set `supervisor: interrupted`, `workload: unknown` only under the identity rule above, `cleanup: left_up`.
-
-`done: true` iff `workload`, `offload`, `cleanup`, and `supervisor` are all terminal. Process exit is not `done`. Any value outside the enumerations is a protocol error.
+`done` is true only when all four fields are terminal. `ok` is calculated independently:
 
 ```
-ok ≡ workload=succeeded
-   ∧ offload ∈ {ok, not_required}
-   ∧ cleanup ∈ {released, already_absent, left_up}
+ok = workload == succeeded
+     and offload in {ok, not_required}
+     and cleanup in {released, already_absent, left_up}
 ```
 
-`not_required` is "spec declared no artifacts." `skipped` is "artifacts were declared and we chose not to upload." Partial artifact success is a per-item array in the envelope; the scalar `offload` is failed iff any `required: true` item failed.
+Therefore `ok` can be true while `done` is still false; consumers must poll `done` before interpreting `ok`. `left_up` counts as `ok` but still bills. `cleanup: failed` means release was not confirmed and the endpoint may still bill.
 
-`left_up` keeps billing. Envelope MUST carry `endpoint` and `hint: job destroy when done poking`.
+`not_required` means the spec declared no artifacts. `skipped` is a terminal schema value but the current runner normally attempts declared artifacts even after failure. Per-artifact results are preserved; any recorded upload failure currently makes scalar offload fail, including a failed optional upload.
 
-Every envelope also carries `schema_version`, `cli_version`, `phase`,
-`retry_class`, numbered `hint`s, `requested` vs `actual` accelerator,
-`next_poll_after` seconds, and artifact hashes when offload ran.
+`job status --poll` is currently an observer, not supervisor takeover. It stops when `result.json` appears, copies only workload/exit/signal/exception plus supervisor state, and does not absorb artifact/offload state or finish cleanup. It can therefore return `done: false` after finding a remote terminal result. A dead local PID is marked `supervisor: interrupted`, but status does not guarantee `cleanup: left_up` or identity-based `workload: unknown`; PID liveness is also susceptible to PID reuse.
 
-Local job dir (durable across agent death):
+Every envelope carries schema/CLI versions, phase, requested/actual accelerator, ordered string hints, timestamps, and relevant result details. The local files are:
 
 ```
 ~/.config/colab-cli/jobs/<id>/
-  spec.yaml            # query strings stripped; raw URLs in a 0600 sidecar
+  spec.json
   plan.json
   envelope.json
-  log                  # whole-file replace; Contents client has no range GET
+  events.jsonl
+  supervisor.pid       # present only while apply records one
 ```
 
-Remote job dir:
+The remote files include:
 
 ```
 /content/jobs/<id>/
   mighty_runtime/
-  entry + bundle
-  launch.json          # O_EXCL, identity + attempt + deadline
+  src/
+  spec.json
+  plan.json
+  stage.manifest.json
+  offload.manifest.json
+  launch.json
   watchdog.json
-  result.json          # atomic, stamped with attempt
+  runner.log
+  result.json
   exception.json       # optional
   cancel.json          # optional intent
-  data/
-  out/
-  attempts/<n>/        # prior result.json moved here on resume/recreate
 ```
 
-`<id>` is `spec.name` plus a short plan-hash, never the bare spec name (avoids `StateStore` overwrite-by-name).
+The local JSON writes use atomic replacement, but the store has no cross-process lock or compare-and-swap. Event appends are plain appends.
 
 ## Testing strategy
 
-Contract tests first (no VM): plan diagnostics; apply refuses a mismatched plan hash; envelope `done`/`ok` truth table including non-terminal rows and `offload: not_required`; URL query strings **and** `credentials` values absent from spec-as-logged, envelope, history, and log; unknown GPU name is an error; plan never issues `HEAD`; dest outside the job dir is a plan error; missing/short-lived `control.result.put_url` or `get_url` is a plan error; watchdog inactivity is a warning, never a SIGTERM.
+The permanent suite covers model validation, plan diagnostics, canonical spec hashing, expiry revalidation, runner exit/cancel behavior, duplicate remote launch, transport refresh, phase transitions, CLI parsing, and envelope truth tables. Live integrations cover CPU and T4 jobs, signed GCS data/artifact/control-result paths, dependency restart/verify, workload failure, token refresh recovery, and explicit launch-kernel restart.
 
-Live spike (CPU, then one GPU), always `unassign` before done (`AGENTS.md` #10, #22):
-
-1. Place `mighty_runtime`, short-launch runner of a silent 90s script, confirm the kernel RPC returns in ~1s on the non-interactive path. Assert `launch.json` exists with pid/starttime/boot_id.
-2. Poll `watchdog.json` / `result.json` via Contents API while the kernel is IDLE. Keep-alive TFE pings running.
-3. Exit 0 vs raised exception (`exception.json` present) vs `os._exit()`/`SIGKILL` (`exception: null`, `signal` set, `failed`) vs runner crash matching the `unknown` identity rule. A clean `sys.exit(0)` asserts `exception.json` absent.
-4. Cancel via `cancel.json`; consumer dies; runner survives and writes `result.json` with `cancelled`. Assert a SIGKILL *without* `cancel.json` is `failed`, not `cancelled`.
-5. Ranged-GET 403 on a data URL in plan does not `assign`. A GET-signed URL that would 403 on HEAD still plans if the ranged GET succeeds.
-6. **Token lifetime — the refresh path is the thing under test.** One job that idles past the runtime-proxy token's documented ~60min expiry (issue #3). Assert: (a) the poll's 401/404 is classified `transport_degraded`, **never** `session_lost`; (b) the supervisor re-resolves the token (`list_assignments()` returns a fresh one on every call) and the **next poll succeeds against the same still-intact files** — proving the earlier "filesystem vanished" reading was a credential artefact; (c) only then, that `result.json` is also readable from `control.result.get_url` as defence-in-depth. Do not GET the PUT URL. A spike that needs the control URL to recover a verdict has found a **missing token refresh**, not a vindicated durable-push design.
-7. **Kernel restart — verified live.** Run `integration/repro_job_kernel_restart/test.sh`: it waits until the launch kernel identity and consumer progress record are durable, invokes the public `restart-kernel` command for that job session, and asserts that PID, PPID, session ID, and start time are unchanged while the progress counter advances. It then requires a successful terminal envelope and releases the assignment.
-8. Consumer double-forks a sleeper. Assert the runner does not report a clean terminal state while descendants hold the GPU.
+The current gaps need regression coverage before their claims can be promoted: keep-alive ownership; endpoint persist-before-side-effect; ordinary-exception terminalization; concurrent apply exclusion; status takeover through offload and cleanup; code-content locking; signed-URL redaction and kernel history; long-stage refresh/timeouts; bounded restart; streamed transfer; aggregate bundle limits; optional-upload semantics; control log; and a shipped-path setsid escapee case.
 
 ## Spike results (2026-09-11, live CPU VM)
 
@@ -337,21 +269,7 @@ only**, never `execute_code`.
 reproduced locally and live. The process group is provably not a containment
 boundary.
 
-Detection has an implementation that needs no cgroups, **not yet confirmed on
-Linux**: the runner exports `MIGHTY_JOB_ID=<id>` into the shim's environment,
-and the sweep matches any process whose `/proc/<pid>/environ` carries it. An
-escapee leaves the process group (`setsid`) and is reparented to init, so pgid
-and ppid walks are both structurally blind — but **a child cannot shed the
-environment it inherited**. `result.json` reports `survivors_by_pgid`,
-`survivors_by_job_tag`, and `escapee_detection_available` separately, so a
-platform that cannot answer (no `/proc`) reports *unknown* rather than falsely
-reporting *nothing survived*.
-
-Status: the sweep has only ever executed on macOS, where it correctly returns
-"cannot answer". **It has never run on Linux**, which is the only place it can
-actually work. Unlike the table above, this is not a live-verified claim —
-re-run `live_spike.py` after the token spike finishes to confirm it, and treat
-it as unproven until then.
+The shipped Linux job-tag sweep has now executed live. It initially exposed that the watchdog inherited `MIGHTY_JOB_ID` and falsely appeared as a surviving descendant; the watchdog is now excluded. The sweep reports process-group and job-tag survivors separately. A dedicated setsid escapee case through the shipped integration path has not yet been recorded.
 
 **Killing** the escapee is still open: detection is not containment. cgroup
 `cgroup.kill` or `PR_SET_CHILD_SUBREAPER` remains required to actually reap
@@ -476,20 +394,6 @@ will lose contact with a perfectly healthy VM at the one-hour mark, every time.
 This also reclassifies the `transport_degraded` vs `session_lost` question from
 "nice to have" to load-bearing.
 
-**Next experiment — discriminating, cheap, one session (~65min), replaces the
-A/B.** Run the same quiet workload; at first Contents failure, run
-`adopt <ENDPOINT> --keep-alive` (which re-resolves the assignment and rewrites
-session state, refreshing the proxy token the CLI uses) and immediately retry
-the same read. Files reappear → token expiry, confirmed, and the A/B on
-write-activity was testing the wrong variable. Files still absent after a
-successful re-adopt → the filesystem really did go, and the activity hypothesis
-is back on the table. Record the raw HTTP status either way.
-
-**The experiment MUST NOT implement the token refresh it is testing for.** The
-refresh belongs in the supervisor contract (launcher step 6); a spike that
-auto-refreshes never reaches the failure and observes nothing. Let it break,
-then `adopt`, then retry.
-
 - **Independent kernel restart. Verified 2026-09-11** against the shipped
   command path in `integration/repro_job_kernel_restart/`: `job` persisted
   the launch kernel identity, public `restart-kernel` restarted that kernel,
@@ -516,14 +420,17 @@ then `adopt`, then retry.
 
 ## Known gaps
 
-Apply-implementation-time, not spike-blocking. Real tradeoffs, not polish.
+These are current implementation limits, not hypothetical polish:
 
-**Envelope / supervisor death:** apply dying between provision and run still needs the supervisor field + persist-before-spawn (stated above; implement).
-
-**Data plane leftovers:** redaction as a type (`SignedUrl` whose `__str__` strips query), not a comment; PUT `Content-Length` + streamed body; `job offload <id>` re-drive with fresh URLs.
-
-**Credentials:** contract test that the consumer's `os.environ` and readable files contain no SA key (rule stated above; test not written).
-
-**CLI integration:** ownership record so `adopt`/`stop` refuse a job-owned endpoint; account-scoped in-flight assignment limit; keep-alive daemon is required in provision (stated) but its `left_up` handoff is unspecified.
-
-**Transport leftovers:** Contents whole-file GET (log is replace-not-append until a chunk scheme); bundle size ceiling at plan (enforced at 250MB, but that bound is inherited from one live 400 and has not been measured precisely). Contents request timeouts and the proxy-token refresh are now **implemented** (`src/colab_cli/job/transport.py`): explicit connect/read deadlines, one refresh-and-retry per 401/404, rate-limited to one assignment re-resolve per 60s so a routine "result.json isn't there yet" 404 does not re-resolve on every poll.
+- **Idle retention:** job provision does not start or own the TFE keep-alive daemon. A detached run with an idle kernel can therefore be idle-pruned. No multi-hour GPU run through the refresh boundary has been completed.
+- **Crash recovery:** endpoint persistence has a post-assignment crash window; ordinary phase exceptions can escape without a terminal envelope; `status --poll` observes a result but does not take over offload or cleanup; dead-runner identity classification is not wired into the local supervisor.
+- **Concurrency:** repeated or concurrent apply of one plan has no interprocess lock or active-job guard.
+- **Plan integrity:** `spec_hash` does not lock source bytes or a bundle manifest. Apply can run code that differs from what existed at plan time.
+- **Transport bounds:** source/manifests are staged with a raw `ContentsClient` that lacks `JobTransport` refresh/deadline handling. The restart request has no explicit timeout. Control-plane assignment refresh is also not bounded by the job transport's HTTP deadlines.
+- **Memory and size:** data GET and artifact PUT buffer whole objects in RAM. The 250 MB source limit is per file, enforced after allocation; there is no aggregate bundle ceiling. Declared artifact size is not included in the current free-disk refusal.
+- **Signed secrets:** raw signed URLs are persisted in local spec/plan files and explicit `--out` plans, in remote manifests, and in launch source/kernel history for the control-result PUT URL. There is no redacted sidecar representation.
+- **Declared but inactive controls:** retries/recreate/resume are not implemented; `control.log` is unused; `on_run_fail: skip` is ignored; `control.result.get_url` is manual; PUT/GET object equivalence is not validated.
+- **Network containment:** host checks do not resolve DNS and miss at least IPv6 link-local forms.
+- **Process containment:** tagged escapees are reported, not killed. The dedicated shipped-path setsid case remains unverified.
+- **CLI/JSON consistency:** the job-group help summary omits `list`, and `status --poll` help promises to poll until `done` although it stops at `result.json`. Some early file/plan read failures still emit stderr rather than a JSON envelope. A failed apply can exit the process with status 1 while its outer JSON wrapper says `exit_code: 0`.
+- **Remote provenance:** the runner's off-VM control result does not carry `cli_version`; only the local job envelope does.

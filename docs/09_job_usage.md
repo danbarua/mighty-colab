@@ -3,6 +3,7 @@ log:
 2026-09-11: First version. Usage guide for `mighty-colab job`, written for an agent (or a human) running real science unattended. Design rationale lives in `docs/08_job.md`; this file is how to drive it.
 2026-09-11: Added the GCS `control.result` signing sequence after live testing exposed two requirements: pre-create the object before signing GET, and pass the signed PUT through to the remote runner. The repaired path overwrote the placeholder with a terminal result; nested job envelopes now identify their creating CLI version. Signed GCS data input and artifact output were also verified live.
 2026-09-11: Live-verified the detached boundary with `integration/repro_job_kernel_restart/`. Job sessions now retain their launch kernel identity, public `restart-kernel` targets it, the consumer survives with unchanged process identity and continued progress, and apply closes its local kernel client before returning.
+2026-09-11: Audited this guide against the implemented CLI, schema, state machine, transport, and tests. Corrected command syntax, plan and bundle behavior, envelope semantics, signed-URL persistence, and supervisor recovery; added the current operational limits.
 ---
 
 # Running a job
@@ -24,23 +25,33 @@ failure looks like `[colab] Error: Connection lost.` with no verdict at all.
 
 `job` makes **one short kernel call** that starts a detached process and
 returns. The kernel then goes idle and is no longer load-bearing. Your run's
-outcome is read back by polling files over the Contents API. Dropping the
-connection at any point after launch costs you nothing but the poll.
+outcome is read back by polling files over the Contents API. Dropping the connection after launch does not kill the consumer; recovery
+and cleanup still have the limits below.
 
-That is the whole idea. Everything below is detail.
+That is the whole idea. The detached consumer survives a dropped launch-kernel connection, but the current v0 supervisor has important limits:
 
-## Four commands
+- `job apply` does **not** start the TFE keep-alive daemon. An idle launch kernel can therefore be pruned during a long job.
+- `job status --poll` observes `result.json`; it does not take over offload or cleanup after the original supervisor dies.
+- Source staging is not resumable and has weaker timeout/token-refresh handling than result polling.
+- Signed URLs are stored unredacted in plan/spec files and remote manifests. Treat those files as credentials.
+
+Use `mighty-colab sessions` after every interrupted run and explicitly destroy any endpoint you no longer need.
+
+## Five commands
 
 ```bash
-mighty-colab job plan    spec.yaml          # free. validates. allocates nothing.
-mighty-colab job apply   --job-id <id>      # the only step that spends money
-mighty-colab job status  <id>               # asks the VM, not local memory
-mighty-colab job destroy <id>               # unconditional. safe to run twice.
+mighty-colab job plan SPEC_FILE [--out PATH] [--no-probe]
+mighty-colab job apply [PLAN_FILE] [--job-id ID] [--timeout S] [--leave-up]
+mighty-colab job status JOB_ID [--poll] [--interval S]
+mighty-colab job destroy JOB_ID [--cancel-only]
+mighty-colab job list
 ```
 
-`plan` is free and side-effect-free, deliberately: iterate on a broken spec as
-many times as you like before anything bills. Under `--json` every one of these
-emits a validated envelope.
+`plan` never allocates a VM. It does write `spec.json` and `plan.json`, writes an explicit `--out` path, and by default performs one-byte ranged GET probes of declared data URLs. `--no-probe` disables those network reads. Plans are written even when they contain warnings or errors; `apply` refuses errors and refuses warnings unless the spec sets `ignore_warnings: true`.
+
+`apply` accepts either a plan-file positional argument or `--job-id`. `--timeout` bounds the local supervisor, not the watchdog wall clock. `--leave-up` keeps the VM after completion. `destroy --cancel-only` writes cancellation intent but deliberately does not unassign the VM. `list` reads local job records.
+
+Under `--json`, normal command results use validated envelopes. Job state is nested under `.job` and the convenience `.done`/`.ok` fields are also copied to the outer wrapper. Some early unreadable-file paths still emit stderr only. A failed `apply` currently exits the process with status 1 while its outer JSON field remains `exit_code: 0`; use the process status and nested job state, not that outer field, for the workload verdict.
 
 ### Chaining them from a script
 
@@ -102,7 +113,9 @@ directory, so the same spec works from anywhere.
 There is no SDK to import, no heartbeat to emit, no callback to register.
 `runpy` executes your entry with a real `sys.argv`, a real `__file__`, and
 `sys.path[0]` set to its own directory, which is what `python train.py` gives
-you locally. Sibling imports work. `if __name__ == "__main__":` works.
+you locally. `if __name__ == "__main__":` works. With `kind: bundle`, sibling
+modules below `root` are uploaded and sibling imports work. With `kind: file`,
+only the entry file is uploaded; undeclared sibling modules are absent.
 
 Your exit code is the verdict. Raise to fail, return 0 to succeed.
 
@@ -113,66 +126,62 @@ compile looks like, and killing on it is how you lose good runs.
 
 ## Reading the result
 
-Four fields, and they are orthogonal on purpose:
+Four fields answer separate questions:
 
 | field | what it answers |
 |---|---|
-| `workload` | did your code succeed, fail, get cancelled, or is it unknown |
-| `offload` | did your declared artifacts get uploaded |
-| `cleanup` | was the VM released |
-| `supervisor` | is anything still driving this job |
+| `workload` | did your code succeed, fail, get cancelled, or become unknown |
+| `offload` | did declared artifacts upload |
+| `cleanup` | was release confirmed or was the VM left up |
+| `supervisor` | is the original supervisor terminal |
 
-Plus two derived booleans:
+The booleans are not synonyms:
 
-- **`done`** — all four are terminal. Nothing is still moving.
-- **`ok`** — `done` *and* it actually worked.
+- **`done`** — all four fields are terminal.
+- **`ok`** — workload succeeded, offload is `ok` or `not_required`, and cleanup is `released`, `already_absent`, or `left_up`.
 
-`done` is the one to poll on. `ok` is the one to branch on.
+`ok` does not include the supervisor field, so it can be true while `done` is false. Poll `done`; interpret `ok` only after the state is terminal. `left_up` counts as `ok` but still bills.
 
-Keeping these apart matters in the two cases that cost real money or real
-science:
+Examples:
 
-- `workload: succeeded` + `cleanup: failed` → your results are fine and **a VM
-  is still billing**. `done` is true; `ok` is false. Run `job destroy`.
-- `workload: failed` + `cleanup: released` → a perfectly healthy failure. Your
-  code has a bug; nothing is leaking.
-
-A single status field cannot say either of those things.
+- `workload: succeeded` + `cleanup: failed` means the result may be fine, but release was not confirmed and the VM may still bill. Run `job destroy` and check `sessions`.
+- `workload: failed` + `cleanup: released` is a cleanly reported workload failure with no confirmed allocation left behind.
 
 ### `retry_class` tells you what to do next
 
-Never guess from the message text:
+When present, treat it as advice for the next action, not an automatic retry promise:
 
 | value | meaning |
 |---|---|
-| `fix_code` | your spec or your script is wrong. Retrying unchanged will fail again. |
-| `fix_human` | credentials, quota, or grants. No amount of code editing helps. |
-| `retry_same` | transient. The same spec on a new VM should work. |
-| `retry_different` | the accelerator or shape was the problem. Ask for another. |
-| `refresh_urls` | your signed URLs expired. Re-sign and re-plan. |
-| `do_not_retry` | retrying will make it worse. |
+| `fix_code` | your spec or script is wrong; unchanged retry should fail again |
+| `fix_human` | credentials, quota, or grants need human action |
+| `retry_same` | the failure was classified as transient |
+| `retry_different` | change accelerator or machine shape |
+| `refresh_urls` | re-sign URLs and re-plan |
+| `do_not_retry` | do not retry unchanged |
+
+v0 performs one attempt. `retry.when`, `max_attempts`, and `mode` are recorded but do not drive retry, recreate, or resume. Some cancellation, offload, cleanup, and unexpected phase failures currently have no `retry_class`.
 
 ## Data and artifacts
 
-Do **not** upload a dataset through the Contents API. It is base64 inside JSON
-and there is a live 250MB ceiling; `plan` will refuse a bundle above it and
-tell you to use a URL instead.
-
-Put your data in GCS, sign a URL, and declare it:
+Large data belongs behind HTTPS GET URLs, not in the source bundle. The runner downloads each declared item and verifies `size_bytes` and `sha256` when present:
 
 ```yaml
 data:
   - url: https://storage.googleapis.com/bucket/x.npy?X-Goog-Signature=...
     dest: /content/data/x.npy
-    sha256: 7d79...          # optional, and you want it
+    sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 artifacts:
   - path: /content/out/model.pt
     url: https://storage.googleapis.com/bucket/runs/model.pt?X-Goog-Signature=...
     required: true
 ```
 
-The VM pulls and pushes these itself. The URLs never enter your process's
-environment and are never written to the session log.
+Use a full 64-hex-character SHA-256 digest. Relative destinations resolve below `/content/jobs/<id>`; absolute destinations must remain below `/content`.
+
+Source staging still uses the Contents API. `kind: bundle` uploads each included file separately, not as one archive. The 250 MB check is per source file, runs during apply after VM allocation, and has no aggregate bundle ceiling. `kind: file` uploads only the entry. Data GET and artifact PUT currently buffer each complete object in VM memory; size datasets and checkpoints accordingly.
+
+The URLs do not enter the consumer process's environment or argv. They are nevertheless persisted unredacted in local `spec.json`/`plan.json`, explicit `--out` plans, and remote manifests. The control-result PUT URL is also embedded in launch source sent through normal kernel history. Restrict permissions and never publish these files or history.
 
 ### Off-VM result backstop
 
@@ -200,16 +209,24 @@ Put those values under `control.result.put_url` and `.get_url`. Do not add
 `--headers` to `sign-url`: the runner sends
 `Content-Type: application/octet-stream`; signing a different header turns the
 later PUT into a bare 403. The object name MUST be unique per job, and `{}` is
-only a placeholder, never a completed verdict. Keep both URLs out of logs and
-ensure their duration covers the wall-clock budget plus teardown.
+only a placeholder, never a completed verdict. Control URLs must remain valid
+for `retry.budget_seconds` plus 15 minutes. The CLI does not read the GET URL
+automatically; recover it yourself with `curl --fail "$GET_URL"` when the VM
+result cannot be reached. Treat both URLs and the files containing them as
+credentials.
 
-**Artifacts are uploaded even when your run fails.** A crashed job's last
-checkpoint is usually the thing you most want, and `on_run_fail:
-offload_anyway` is the default.
+**Artifacts are attempted even when your run fails.** `on_run_fail:
+offload_anyway` is the default, and the accepted `skip` value is currently
+ignored. A missing optional artifact does not fail offload, but a failed PUT
+currently fails scalar offload even when that artifact is optional.
 
 `sha256` is worth the trouble: it is the only thing that distinguishes your
 dataset from a truncated copy of your dataset, and a silently truncated input
 produces a result that looks plausible and is wrong.
+
+The plan's `spec_hash` does not hash code bytes. If source changes after plan,
+apply stages the changed bytes without a hash mismatch. Re-run `job plan` after
+every source change.
 
 ## Things that will bite you
 
@@ -241,61 +258,43 @@ not containment: it tells you, it does not currently kill them.
 
 ## If the supervisor dies
 
-Closing the laptop does not kill the job — that is the point. The VM keeps
-running and `supervisor` becomes `interrupted`. Reattach with:
+Closing the laptop after the launch RPC normally leaves the detached consumer running, but v0 does not implement full supervisor takeover.
 
 ```bash
 mighty-colab job status <id> --poll
 ```
 
-The VM is deliberately left up in this case, and the envelope says so, because
-silently tearing down a run you are still paying for would be worse.
+This command observes the remote `result.json`. It stops when that file appears and updates workload/exit/exception plus supervisor state. It does **not** absorb artifact/offload results or perform cleanup, so the returned envelope can remain `done: false`. A dead local supervisor PID is marked `interrupted`, but the command does not guarantee `cleanup: left_up` or classify a dead runner from `launch.json` identity.
+
+After an interrupted apply, inspect both the job and the account, retrieve any manual `control.result` object if needed, and destroy the allocation explicitly.
 
 ## Cost discipline
 
-Teardown is not a phase the job reaches, it is how the job leaves — including
-when it fails early at `verify`. But two cases deliberately leave a VM running:
-an interrupted supervisor, and `on_offload_fail: leave_up` (so you can rescue
-artifacts that failed to upload). Both report `cleanup: left_up` and carry the
-endpoint.
+Normal apply paths attempt cleanup in a `finally` block, including many failures before the run. `--leave-up`, an interrupted local supervisor, and `on_offload_fail: leave_up` can leave an allocation. Ordinary unwrapped exceptions and hard process death can also leave a non-terminal record; local state is not proof of release.
 
 When in doubt:
 
 ```bash
-mighty-colab job destroy <id>    # exits 0 even if already gone
-mighty-colab sessions            # the real answer about what is billing
+mighty-colab job destroy <id>    # exits 0 if the local record says already gone
+mighty-colab sessions            # server-side assignment inventory
 ```
+
+`destroy --cancel-only` is different: it asks the runner to stop but intentionally keeps the VM. A cleanup failure means release was not confirmed, not that the VM is certainly live; `sessions` is the final check.
 
 ## Known gaps
 
 Be aware of these before trusting a long run:
 
-- **No GPU run has yet outlived the ~60 minute token boundary.** The refresh
-  is implemented and the boundary is characterised, but the combination is
-  unproven.
-- Log offload is whole-file replace, not append.
-- Detected escapees are reported, not killed.
+- Job apply does not start the TFE keep-alive daemon; idle pruning is not protected.
+- No GPU run has yet outlived the approximately 60-minute proxy refresh boundary.
+- Status polling is observation, not supervisor takeover; it does not complete offload or cleanup.
+- Endpoint persistence is not the first post-assignment write, and concurrent/repeated apply has no lock.
+- Source bytes are not part of `spec_hash`.
+- Stage uploads lack the result poller's refresh/deadline wrapper; restart has no explicit timeout.
+- Data GET and artifact PUT buffer whole objects; source size is limited per file only after allocation.
+- Signed URLs remain in durable local/remote files and control-result launch history.
+- Retry/recreate/resume, `control.log`, and `on_run_fail: skip` are not implemented behavior.
+- Detected tagged escapees are reported, not killed; the dedicated shipped-path setsid case is still unverified.
+- Job-group help omits `list`, `status --poll` help overstates takeover, and some early `--json` errors and failed-apply outer exit fields are inconsistent with actual behavior.
 
-Verified live on 2026-09-11: CPU and T4 GPU runs end to end (`done=True
-ok=True`, real CUDA matmul, clean teardown); the full
-`install -> restart -> verify` sequence with a real pin, where the workload's
-own `assert numpy.__version__ == "2.1.0"` passed, proving the pin was live
-after the restart; the failure path (`KeyError` ->
-`workload: failed`, `exception` carried off-VM, `retry_class: fix_code`,
-`cleanup: released`, `apply` exits 1); and token expiry at t+61min recovering
-via re-adopt.
-
-The launch-kernel boundary is verified live by
-`integration/repro_job_kernel_restart/test.sh`. The test invokes the public
-`restart-kernel` command while a detached workload is running, observes the
-same consumer process identity with later progress after the restart, then
-requires `workload: succeeded` / exit 0 and releases the assignment.
-
-The signed-URL paths are also verified against a real GCS bucket: a declared
-input passed sha256 validation, a declared artifact was recovered
-byte-identically, and `control.result` replaced its `{}` placeholder with the
-runner's terminal result. The first control run exposed a missing launch
-argument; the successful result above is from the repaired path.
-
-Please report what breaks — the failure modes above were all found by running
-the thing, not by reading it.
+Verified live on 2026-09-11: CPU and T4 GPU runs end to end; install/restart/verify with a real dependency pin; the workload failure path with cleanup; proxy access recovery after the approximately 60-minute failure; explicit public launch-kernel restart while a detached consumer continued; and signed GCS data GET, artifact PUT, and control-result PUT. These runs do not verify platform-initiated kernel replacement, keep-alive retention, or the gaps above.
