@@ -214,3 +214,30 @@ def test_repeated_missing_poll_does_not_refresh_every_time(
     assert first == (None, ReadStatus.NOT_FOUND)
     assert second == (None, ReadStatus.NOT_FOUND)
     client.list_assignments.assert_called_once_with()
+
+
+def test_remove_deletes_and_confirms_the_remote_file_is_absent(
+    mocker, session_state
+):
+    contents = MagicMock()
+    contents._request.side_effect = [None, FileNotFoundError("gone")]
+    client = MagicMock()
+    store = MagicMock()
+    transport, _factory, _refreshed = make_transport(
+        mocker, session_state, contents, client, store
+    )
+    transport._last_404_refresh_at = float("inf")
+
+    status = transport.remove("content/jobs/x/mighty_runtime/.secrets/transfer.json")
+
+    assert status is ReadStatus.OK
+    assert contents._request.call_args_list[0].args == (
+        "DELETE",
+        "content/jobs/x/mighty_runtime/.secrets/transfer.json",
+    )
+    assert contents._request.call_args_list[0].kwargs["timeout"] == (2, 7)
+    assert contents._request.call_args_list[1].args == (
+        "GET",
+        "content/jobs/x/mighty_runtime/.secrets/transfer.json",
+    )
+    assert contents._request.call_args_list[1].kwargs["params"] == {"content": "0"}

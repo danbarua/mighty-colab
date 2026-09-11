@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import resource
 import signal
 import subprocess
 import sys
@@ -80,7 +81,8 @@ def _split_consumer_args(argv):
 def _parse_args(argv):
     job_dir = None
     deadline_secs = None
-    result_put_url = None
+    secrets_fd = None
+    secrets_required = False
     stage_manifest = None
     offload_manifest = None
     entry_option = None
@@ -93,9 +95,12 @@ def _parse_args(argv):
         elif argv[i] == "--deadline":
             deadline_secs = float(_option_value(argv, i, "--deadline"))
             i += 2
-        elif argv[i] == "--result-put-url":
-            result_put_url = _option_value(argv, i, "--result-put-url")
+        elif argv[i] == "--secrets-fd":
+            secrets_fd = int(_option_value(argv, i, "--secrets-fd"))
             i += 2
+        elif argv[i] == "--secrets-required":
+            secrets_required = True
+            i += 1
         elif argv[i] == "--entry":
             entry_option = _option_value(argv, i, "--entry")
             i += 2
@@ -110,15 +115,11 @@ def _parse_args(argv):
             break
     if entry_option and not rest:
         rest = [entry_option]
-    if result_put_url is None:
-        for name in _URL_ENV_NAMES:
-            result_put_url = os.environ.get(name)
-            if result_put_url:
-                break
     return (
         job_dir,
         deadline_secs,
-        result_put_url,
+        secrets_fd,
+        secrets_required,
         stage_manifest,
         offload_manifest,
         rest,
@@ -136,11 +137,75 @@ def _load_manifest(path):
 
 
 def _url_id(url):
-    """Return a query-free stable identifier for a signed URL."""
-    parts = urlsplit(url)
-    public = f"{parts.scheme}://{parts.netloc}{parts.path}"
+    """Return the planner's query-free, userinfo-free URL identity."""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        public = url.split("?", 1)[0].split("#", 1)[0]
+    else:
+        host = parts.hostname or ""
+        try:
+            port = parts.port
+        except ValueError:
+            port = None
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        if port is not None:
+            host = f"{host}:{port}"
+        public = f"{parts.scheme}://{host}{parts.path}"
     digest = hashlib.sha256(url.encode("utf-8")).hexdigest()[:12]
     return f"{public}#{digest}"
+
+
+def _disable_core_dumps():
+    try:
+        resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    except (OSError, ValueError):
+        pass
+
+
+def _load_transfer_secrets(fd):
+    if fd is None:
+        return {}, None
+    try:
+        with os.fdopen(fd, encoding="utf-8") as stream:
+            payload = json.load(stream)
+    except (OSError, ValueError):
+        raise ValueError("invalid transfer credential channel") from None
+    if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+        raise ValueError("invalid transfer credential channel")
+    urls = payload.get("urls")
+    if not isinstance(urls, dict):
+        raise ValueError("invalid transfer credential channel")
+    for reference, url in urls.items():
+        if (
+            not isinstance(reference, str)
+            or len(reference) != 64
+            or any(c not in "0123456789abcdef" for c in reference)
+            or not isinstance(url, str)
+            or hashlib.sha256(url.encode("utf-8")).hexdigest() != reference
+        ):
+            raise ValueError("invalid transfer credential channel")
+    result_ref = payload.get("result_put_ref")
+    if result_ref is not None and result_ref not in urls:
+        raise ValueError("invalid transfer credential channel")
+    return urls, urls.get(result_ref)
+
+
+def _resolve_transfer_url(item, urls):
+    reference = item.get("url_ref")
+    declared_id = item.get("url_id")
+    if reference is not None:
+        if not isinstance(reference, str) or reference not in urls:
+            raise ValueError("manifest credential reference is unavailable")
+        url = urls[reference]
+        if _url_id(url) != declared_id:
+            raise ValueError("manifest credential reference does not match")
+        return url
+    url = item.get("url")
+    if not isinstance(url, str) or urlsplit(url).query:
+        raise ValueError("manifest contains an unsafe credential URL")
+    return url
 
 
 def _http_get(url):
@@ -166,13 +231,13 @@ def _resolve_job_path(job_dir, path):
     return os.path.join(job_dir, path)
 
 
-def _stage_one(job_dir, item):
+def _stage_one(job_dir, item, urls):
     if not isinstance(item, dict):
         raise ValueError("stage item must be an object")
-    url = item.get("url")
+    url = _resolve_transfer_url(item, urls)
     dest = item.get("dest")
-    if not isinstance(url, str) or not isinstance(dest, str):
-        raise ValueError("stage item requires url and dest")
+    if not isinstance(dest, str):
+        raise ValueError("stage item requires dest")
     data = _http_get(url)
     expected_size = item.get("size_bytes")
     if expected_size is not None and len(data) != expected_size:
@@ -194,29 +259,27 @@ def _stage_one(job_dir, item):
     os.replace(tmp, target)
 
 
-def _stage(job_dir, manifest_path):
+def _stage(job_dir, manifest_path, urls):
     for item in _load_manifest(manifest_path):
-        _stage_one(job_dir, item)
+        _stage_one(job_dir, item, urls)
 
 
-def _artifact_record(job_dir, item):
+def _artifact_record(job_dir, item, urls):
     if not isinstance(item, dict):
         raise ValueError("offload item must be an object")
     path = item.get("path")
-    url = item.get("url")
-    if not isinstance(path, str) or not isinstance(url, str):
-        raise ValueError("offload item requires path and url")
+    url = _resolve_transfer_url(item, urls)
+    if not isinstance(path, str):
+        raise ValueError("offload item requires path")
     record = {
         "path": path,
-        "url_id": _url_id(url),
+        "url_id": item.get("url_id") or _url_id(url),
         "status": "missing",
         "sha256": None,
         "bytes": None,
     }
     local_path = _resolve_job_path(job_dir, path)
     try:
-        # Read immediately before the PUT. This intentionally avoids stale
-        # metadata and ensures the hash describes exactly the bytes uploaded.
         with open(local_path, "rb") as f:
             data = f.read()
     except OSError:
@@ -234,7 +297,7 @@ def _artifact_record(job_dir, item):
     return record
 
 
-def _offload(job_dir, manifest_path):
+def _offload(job_dir, manifest_path, urls):
     records = []
     failed = False
     try:
@@ -243,13 +306,13 @@ def _offload(job_dir, manifest_path):
         return records, True
     for item in manifest:
         try:
-            record = _artifact_record(job_dir, item)
+            record = _artifact_record(job_dir, item, urls)
         except Exception:  # noqa: BLE001 - preserve remaining artifact attempts
             path = item.get("path", "") if isinstance(item, dict) else ""
-            url = item.get("url", "") if isinstance(item, dict) else ""
+            declared_id = item.get("url_id", "") if isinstance(item, dict) else ""
             record = {
                 "path": path,
-                "url_id": _url_id(url) if isinstance(url, str) else "",
+                "url_id": declared_id if isinstance(declared_id, str) else "",
                 "status": "failed",
                 "sha256": None,
                 "bytes": None,
@@ -359,22 +422,25 @@ def _stage_failure(
 
 
 def main(argv):
+    _disable_core_dumps()
     runner_argv, consumer_args = _split_consumer_args(argv)
     try:
         (
             job_dir,
             deadline_secs,
-            result_put_url,
+            secrets_fd,
+            secrets_required,
             stage_manifest,
             offload_manifest,
             rest,
         ) = _parse_args(runner_argv)
-    except (TypeError, ValueError) as e:
-        print(f"runner: {e}", file=sys.stderr)
+        urls, result_put_url = _load_transfer_secrets(secrets_fd)
+    except (TypeError, ValueError):
+        print("runner: invalid private transfer configuration", file=sys.stderr)
         return 2
     if not job_dir or not rest:
         print(
-            "usage: runner --job-dir DIR [--deadline S] "
+            "usage: runner --job-dir DIR [--deadline S] [--secrets-fd FD] "
             "[--stage-manifest PATH] [--offload-manifest PATH] entry.py",
             file=sys.stderr,
         )
@@ -426,7 +492,9 @@ def main(argv):
         os.fsync(f.fileno())
 
     try:
-        _stage(job_dir, stage_manifest)
+        if secrets_required and secrets_fd is None:
+            raise ValueError("required transfer credential channel is missing")
+        _stage(job_dir, stage_manifest, urls)
     except BaseException as e:  # noqa: BLE001 - stage verdict must land
         _stage_failure(
             result_path=result_path,
@@ -570,7 +638,7 @@ def main(argv):
         workload = "failed"
 
     if offload_manifest:
-        artifacts, offload_failed = _offload(job_dir, offload_manifest)
+        artifacts, offload_failed = _offload(job_dir, offload_manifest, urls)
         phase = "offload" if offload_failed else "run"
         offload_status = "failed" if offload_failed else "ok"
     else:

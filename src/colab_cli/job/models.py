@@ -27,12 +27,30 @@ workload's verdict: a job that raised and then tore down cleanly is
 Folding those into one status field loses the distinction an agent needs.
 """
 
+import re
+import urllib.parse
 from enum import Enum
 from typing import Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from colab_cli.job import SCHEMA_VERSION
+
+
+_HTTP_URL = re.compile(r"https?://[^\s]+", re.IGNORECASE)
+
+
+def _contains_query_url(values: List[str]) -> bool:
+    for value in values:
+        for candidate in _HTTP_URL.findall(value):
+            candidate = candidate.rstrip("'\")]}>,;")
+            try:
+                if urllib.parse.urlsplit(candidate).query:
+                    return True
+            except ValueError:
+                if "?" in candidate:
+                    return True
+    return False
 
 
 class Workload(str, Enum):
@@ -168,6 +186,13 @@ class CodeSpec(BaseModel):
     entry: str
     args: List[str] = Field(default_factory=list)
 
+    @field_validator("args")
+    @classmethod
+    def _args_do_not_embed_signed_urls(cls, values: List[str]) -> List[str]:
+        if _contains_query_url(values):
+            raise ValueError("code arguments must not contain URLs with query credentials")
+        return values
+
     @field_validator("entry")
     @classmethod
     def _entry_is_relative_for_bundles(cls, v: str) -> str:
@@ -274,6 +299,13 @@ class JobSpec(BaseModel):
     on_offload_fail: Literal["leave_up", "destroy"] = "leave_up"
     on_run_fail: Literal["offload_anyway", "skip"] = "offload_anyway"
 
+    @field_validator("deps")
+    @classmethod
+    def _deps_do_not_embed_signed_urls(cls, values: List[str]) -> List[str]:
+        if _contains_query_url(values):
+            raise ValueError("dependencies must not contain URLs with query credentials")
+        return values
+
     @field_validator("name")
     @classmethod
     def _name_is_path_safe(cls, v: str) -> str:
@@ -313,6 +345,7 @@ class Plan(BaseModel):
     # re-probing. A durable plan applied hours later may carry URLs that
     # have since expired -- cheaper to catch before `assign` than after.
     url_expiry: Dict[str, Optional[str]] = Field(default_factory=dict)
+    source_spec_path: Optional[str] = None
 
     @property
     def has_errors(self) -> bool:

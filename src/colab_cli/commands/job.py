@@ -52,7 +52,8 @@ from colab_cli.job.models import (
     Workload,
 )
 from colab_cli.job.orchestrator import Orchestrator, PhaseError
-from colab_cli.job.store import JobStore
+from colab_cli.job.runtime_payload import ident
+from colab_cli.job.store import JobStore, load_plan_file, write_plan_file
 
 job_app = typer.Typer(
     help="Run an unattended job on a Colab VM: plan, apply, status, destroy.",
@@ -145,12 +146,31 @@ def _human(env: JobEnvelope) -> str:
 # --------------------------------------------------------------------------
 
 
+def _safe_error_location(parts) -> str:
+    safe = []
+    for part in parts:
+        if isinstance(part, int):
+            safe.append(str(part))
+        elif (
+            isinstance(part, str)
+            and part.isascii()
+            and part.isidentifier()
+            and len(part) <= 64
+        ):
+            safe.append(part)
+        else:
+            safe.append("<field>")
+    return ".".join(safe) or "<spec>"
+
+
 def _emit_spec_errors(exc) -> None:
-    """Render pydantic validation failures in the plan-diagnostic shape."""
+    """Render pydantic validation failures without reflecting spec values."""
     from colab_cli.common import state
     diags = []
-    for err in exc.errors():
-        loc = ".".join(str(p) for p in err.get("loc", ())) or "<spec>"
+    for err in exc.errors(
+        include_input=False, include_context=False, include_url=False
+    ):
+        loc = _safe_error_location(err.get("loc", ()))
         diags.append(
             {
                 "severity": "error",
@@ -195,7 +215,7 @@ def plan(
     from pydantic import ValidationError
 
     from colab_cli.job.planner import build_plan
-    from colab_cli.job.spec_io import load_spec
+    from colab_cli.job.spec_io import load_spec, plan_hash
 
     try:
         spec = load_spec(spec_file)
@@ -209,16 +229,21 @@ def plan(
         _emit_spec_errors(e)
         raise typer.Exit(1) from None
     except (OSError, ValueError) as e:
-        typer.echo(f"[colab] Could not read spec {spec_file!r}: {e}", err=True)
+        typer.echo(
+            f"[colab] Could not read spec {spec_file!r} ({type(e).__name__}).",
+            err=True,
+        )
         raise typer.Exit(1) from None
     job_id = _new_job_id(spec.name)
     p = build_plan(spec, job_id, probe=not no_probe)
+    p.source_spec_path = str(Path(spec_file).expanduser().resolve(strict=False))
+    p.spec_hash = plan_hash(p.spec, p.source_spec_path)
 
     store = _store()
     store.write_spec(job_id, spec)
     store.write_plan(p)
     if out:
-        Path(out).write_text(p.model_dump_json(indent=2))
+        write_plan_file(out, p)
 
     errors = [d for d in p.diagnostics if d.severity == "error"]
     warnings = [d for d in p.diagnostics if d.severity == "warn"]
@@ -274,22 +299,25 @@ def apply(
     recorded hash.
     """
     from colab_cli.common import state
-    from colab_cli.job.models import Plan
     from colab_cli.job.planner import revalidate_expiry
-    from colab_cli.job.spec_io import spec_hash
+    from colab_cli.job.spec_io import plan_hash, spec_hash
     from colab_cli.job.transport import JobTransport
 
     store = _store()
-    if plan_file:
-        p = Plan.model_validate_json(Path(plan_file).read_text())
-    elif job_id_opt:
-        p = store.read_plan(job_id_opt)
-        if p is None:
-            typer.echo(f"[colab] No plan found for job {job_id_opt!r}.", err=True)
+    try:
+        if plan_file:
+            p = load_plan_file(plan_file, hydrate=True)
+        elif job_id_opt:
+            p = store.read_plan_for_apply(job_id_opt)
+            if p is None:
+                typer.echo(f"[colab] No plan found for job {job_id_opt!r}.", err=True)
+                raise typer.Exit(1)
+        else:
+            typer.echo("[colab] Pass a plan file or --job-id.", err=True)
             raise typer.Exit(1)
-    else:
-        typer.echo("[colab] Pass a plan file or --job-id.", err=True)
-        raise typer.Exit(1)
+    except ValueError as e:
+        typer.echo(f"[colab] Could not load protected plan ({type(e).__name__}).", err=True)
+        raise typer.Exit(1) from None
 
     # Integrity of `plan.json` itself -- NOT drift from the user's YAML.
     # `apply` never re-reads the spec file: the plan embeds the spec it
@@ -304,7 +332,19 @@ def apply(
     # document certifies nothing. The hash canonicalises URL query strings
     # out, so re-signing the same object does not trip this, while
     # pointing at a different object does.
-    actual = spec_hash(p.spec)
+    if p.spec.code.kind == "bundle" and p.source_spec_path is None:
+        typer.echo(
+            "[colab] This bundle plan lacks its protected source exclusion. "
+            "Re-run job plan to produce a fresh one.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    actual = (
+        plan_hash(p.spec, p.source_spec_path)
+        if p.source_spec_path is not None
+        else spec_hash(p.spec)
+    )
     if actual != p.spec_hash:
         typer.echo(
             "[colab] This plan file is inconsistent: its spec does not match "
@@ -361,18 +401,25 @@ def apply(
         session_store=state.store,
         emit=lambda m: typer.echo(m),
     )
-    store.write_supervisor_pid(p.job_id, os.getpid())
+    store.write_supervisor_identity(
+        p.job_id,
+        pid=os.getpid(),
+        starttime=ident.starttime(os.getpid()),
+        boot_id=ident.boot_id(),
+    )
 
     budget = timeout or (p.spec.budgets.wall_clock + 600)
     deadline = time.time() + budget
-
+    secret_handoff = False
     try:
         orch.provision()
         orch.install()
         orch.restart()
         orch.verify()
         _stage_payload(orch, p)
+        orch.seal_secret_channel()
         orch.launch(f"{orch.remote_dir}/src")
+        secret_handoff = True
         transport = orch.transport_factory(orch.session_state)
         orch.poll(transport, deadline=deadline)
     except PhaseError as e:
@@ -417,24 +464,33 @@ def apply(
         orch.env.retry_class = RetryClass.DO_NOT_RETRY
         orch.env.hints.append("re-run with --debug to inspect the local traceback")
     finally:
+        secret_removed = secret_handoff or orch.cleanup_secret_channel()
         # Teardown is how you leave, not a phase you reach: an early
         # failure must still release the VM, or the cost of a typo is an
-        # A100 left assigned.
+        # A100 left assigned. An unconfirmed credential deletion also
+        # overrides every leave-up request.
         keep = leave_up or p.spec.on_offload_fail == "leave_up" and (
             orch.env.offload is Offload.FAILED
         )
-        if orch.env.supervisor is Supervisor.INTERRUPTED:
+        if not secret_removed:
+            keep = False
+            orch.env.reason = "transfer credential deletion could not be confirmed"
+            orch.env.retry_class = RetryClass.DO_NOT_RETRY
+            orch.env.hints.append(
+                "credential cleanup failed; forced VM teardown to remove the secret"
+            )
+        if orch.env.supervisor is Supervisor.INTERRUPTED and secret_removed:
             # Deliberately not torn down: the run is still going on the VM
-            # and the caller can reattach. Recorded as `left_up` so the
+            # and the caller can reattach. Recorded as left_up so the
             # envelope still says it is billing.
             orch.env.cleanup = Cleanup.LEFT_UP
             orch.env.hints.append(
-                f"VM still running and billing: `mighty-colab job destroy {p.job_id}`"
+                f"VM still running and billing: mighty-colab job destroy {p.job_id}"
             )
             store.write_envelope(orch.env)
         else:
             orch.cleanup(force_leave_up=keep)
-        store.clear_supervisor_pid(p.job_id)
+        store.clear_supervisor_identity(p.job_id)
 
     _emit(orch.env, "apply")
     if not orch.env.ok:
@@ -442,22 +498,53 @@ def apply(
 
 
 def _stage_payload(orch: Orchestrator, p) -> None:
-    """Upload runtime, code, manifests, and the control-result secret file.
+    """Upload public payload files, then the private transfer channel."""
 
-    The manifests are written here rather than on the VM so that signed
-    URLs never pass through `execute_code` -- kernel input is echoed into
-    the session log, and a signature in a log is a credential in a log.
-    """
     from colab_cli.job.payload_bundle import stage_payload
 
     orch._set_phase(Phase.STAGE)
+    result_channel = p.spec.control.result
+    if p.spec.data or p.spec.artifacts or (result_channel and result_channel.put_url):
+        orch.prepare_secret_channel()
     stage_payload(
         spec=p.spec,
         job_id=p.job_id,
         session=orch.session_state,
         remote_dir=orch.remote_dir,
+        source_spec_path=p.source_spec_path,
     )
 
+
+
+def _scrub_transfer_secret(transport, job_id: str) -> bool:
+    path = f"/content/jobs/{job_id}/mighty_runtime/.secrets/transfer.json"
+    try:
+        return transport.remove(path).name == "OK"
+    except Exception:  # noqa: BLE001 - callers enforce teardown on uncertainty
+        return False
+
+def _force_release_unconfirmed_secret(env, state, store, action: str) -> None:
+    if env.endpoint:
+        try:
+            state.client.unassign(env.endpoint)
+            env.cleanup = Cleanup.RELEASED
+        except Exception as error:  # noqa: BLE001
+            env.cleanup = Cleanup.FAILED
+            env.hints.append(f"forced unassign failed: {type(error).__name__}")
+    else:
+        env.cleanup = Cleanup.ALREADY_ABSENT
+    if env.session and env.cleanup is not Cleanup.FAILED:
+        try:
+            state.store.remove(env.session)
+        except Exception:  # noqa: BLE001
+            pass
+    env.workload = Workload.UNKNOWN
+    env.supervisor = Supervisor.FINISHED
+    env.reason = "forced teardown because transfer credential deletion could not be confirmed"
+    env.retry_class = RetryClass.DO_NOT_RETRY
+    store.write_envelope(env)
+    _emit(env, action)
+    raise typer.Exit(1)
 
 def status(
     job_id: Annotated[str, typer.Argument(help="Job id")],
@@ -484,58 +571,66 @@ def status(
         typer.echo(f"[colab] No local record of job {job_id!r}.", err=True)
         raise typer.Exit(1)
 
-    # A supervisor that is no longer running cannot be `running`. Without
-    # this the envelope claims someone is driving long after the laptop
-    # slept, and `done` never becomes true.
-    pid = store.supervisor_pid(job_id)
-    if env.supervisor is Supervisor.RUNNING and (pid is None or not _pid_alive(pid)):
+    # A PID alone is not identity: after reuse, status could mistake an unrelated
+    # process for the supervisor and leave a credential-bearing VM alive.
+    identity = store.supervisor_identity(job_id)
+    supervisor_alive = bool(
+        identity
+        and ident.alive(
+            identity["pid"], identity["starttime"], identity["boot_id"]
+        )
+    )
+    if env.supervisor is Supervisor.RUNNING and not supervisor_alive:
         env.supervisor = Supervisor.INTERRUPTED
         env.reason = "the supervisor process that started this job is gone"
 
-    if env.session and not env.workload.terminal:
+    cleanup_pending = env.cleanup not in {Cleanup.RELEASED, Cleanup.ALREADY_ABSENT}
+    must_scrub = env.supervisor is not Supervisor.RUNNING or env.cleanup is Cleanup.FAILED
+    if env.session and cleanup_pending:
         s = state.store.get(env.session)
+        if s is None and must_scrub:
+            _force_release_unconfirmed_secret(env, state, store, "status")
         if s is not None:
             transport = JobTransport(s, state.client, state.store)
-            while True:
-                result, st = transport.read_json(
-                    f"/content/jobs/{job_id}/result.json"
-                )
-                if st.name == "OK" and result:
-                    saved_plan = store.read_plan(job_id)
-                    if saved_plan is not None:
-                        Orchestrator.absorb_result(env, saved_plan.spec, result)
-                    else:
-                        env.workload = Workload(result.get("workload", "unknown"))
-                        env.exit_code = result.get("exit_code")
-                        env.signal = result.get("signal")
-                        env.exception = result.get("exception")
-                    env.supervisor = Supervisor.FINISHED
-                    break
-                if st.name == "SESSION_LOST":
-                    env.workload = Workload.UNKNOWN
-                    env.reason = "the assignment is gone from the server"
-                    env.supervisor = Supervisor.FINISHED
-                    break
-                if st.name == "DEGRADED":
-                    env.supervisor = Supervisor.DEGRADED
-                    env.reason = (
-                        "transport failing; the assignment is still listed, "
-                        "so the job is not known dead"
+            if must_scrub and not _scrub_transfer_secret(transport, job_id):
+                _force_release_unconfirmed_secret(env, state, store, "status")
+            if must_scrub and env.workload.terminal:
+                store.write_envelope(env)
+                _emit(env, "status")
+                return
+            if not env.workload.terminal:
+                while True:
+                    result, st = transport.read_json(
+                        f"/content/jobs/{job_id}/result.json"
                     )
-                if not poll:
-                    break
-                time.sleep(interval)
+                    if st.name == "OK" and result:
+                        saved_plan = store.read_plan(job_id)
+                        if saved_plan is not None:
+                            Orchestrator.absorb_result(env, saved_plan.spec, result)
+                        else:
+                            env.workload = Workload(result.get("workload", "unknown"))
+                            env.exit_code = result.get("exit_code")
+                            env.signal = result.get("signal")
+                            env.exception = result.get("exception")
+                        env.supervisor = Supervisor.FINISHED
+                        break
+                    if st.name == "SESSION_LOST":
+                        env.workload = Workload.UNKNOWN
+                        env.reason = "the assignment is gone from the server"
+                        env.supervisor = Supervisor.FINISHED
+                        break
+                    if st.name == "DEGRADED":
+                        env.supervisor = Supervisor.DEGRADED
+                        env.reason = (
+                            "transport failing; the assignment is still listed, "
+                            "so the job is not known dead"
+                        )
+                    if not poll:
+                        break
+                    time.sleep(interval)
             store.write_envelope(env)
 
     _emit(env, "status")
-
-
-def _pid_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except OSError:
-        return False
-    return True
 
 
 def destroy(
@@ -586,6 +681,29 @@ def destroy(
                     err=True,
                 )
 
+
+    secret_removed = transport is not None and _scrub_transfer_secret(
+        transport, job_id
+    )
+    if cancel_only and not secret_removed:
+        try:
+            state.client.unassign(env.endpoint)
+            env.cleanup = Cleanup.RELEASED
+            if env.session:
+                state.store.remove(env.session)
+        except Exception as error:  # noqa: BLE001
+            env.cleanup = Cleanup.FAILED
+            env.hints.append(f"forced unassign failed: {type(error).__name__}")
+        env.workload = Workload.UNKNOWN
+        env.supervisor = Supervisor.FINISHED
+        env.reason = (
+            "cancel-only retention overridden because transfer credential "
+            "deletion could not be confirmed"
+        )
+        env.retry_class = RetryClass.DO_NOT_RETRY
+        store.write_envelope(env)
+        _emit(env, "destroy")
+        raise typer.Exit(1)
     if not env.workload.terminal and transport is not None:
         try:
             intent_status = transport.write_json(

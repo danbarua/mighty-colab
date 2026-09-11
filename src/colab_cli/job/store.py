@@ -28,27 +28,31 @@ about to exist.
 
 import json
 import os
+import stat
 import tempfile
 from pathlib import Path
 from typing import List, Optional
 
 from colab_cli.job.models import JobEnvelope, JobSpec, Plan
+from colab_cli.job.spec_io import has_url_query, is_redacted_url, redacted_url
 
 PLAN_FILE = "plan.json"
 ENVELOPE_FILE = "envelope.json"
 SPEC_FILE = "spec.json"
-SUPERVISOR_PID_FILE = "supervisor.pid"
+SUPERVISOR_IDENTITY_FILE = "supervisor.json"
 
 
-def _atomic_write(path: Path, payload: str) -> None:
-    """Write via a same-directory temp file + `os.replace`.
+SECRET_SIDECAR_SUFFIX = ".mighty-colab-secrets.json"
+SECRET_TEMP_PREFIX = ".mighty-colab-secret-tmp-"
 
-    A `job status` racing a mid-flight write must never observe a truncated
-    envelope: a half-written `done: true` is worse than no answer at all.
-    """
+
+def _atomic_write(path: Path, payload: str, mode: int = 0o600) -> None:
+    """Atomically publish a complete owner-only record."""
+
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".tmp-")
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=SECRET_TEMP_PREFIX)
     try:
+        os.fchmod(fd, mode)
         with os.fdopen(fd, "w") as f:
             f.write(payload)
             f.flush()
@@ -62,6 +66,128 @@ def _atomic_write(path: Path, payload: str) -> None:
         raise
 
 
+def plan_secrets_path(plan_path: str | Path) -> Path:
+    path = Path(plan_path)
+    return path.with_name(path.name + SECRET_SIDECAR_SUFFIX)
+
+
+def _url_field(key: str | None) -> bool:
+    return key is not None and (key == "url" or key.endswith("_url"))
+
+
+def _redact(value, key=None, secrets=None):
+    secrets = {} if secrets is None else secrets
+    if isinstance(value, dict):
+        return {name: _redact(item, name, secrets) for name, item in value.items()}
+    if isinstance(value, list):
+        return [_redact(item, key, secrets) for item in value]
+    if isinstance(value, str) and _url_field(key) and has_url_query(value):
+        marker = redacted_url(value)
+        secrets[marker] = value
+        return marker
+    return value
+
+
+def _marker_set(value, key=None):
+    if isinstance(value, dict):
+        markers = set()
+        for name, item in value.items():
+            markers.update(_marker_set(item, name))
+        return markers
+    if isinstance(value, list):
+        markers = set()
+        for item in value:
+            markers.update(_marker_set(item, key))
+        return markers
+    if isinstance(value, str) and _url_field(key) and is_redacted_url(value):
+        return {value}
+    return set()
+
+
+def _hydrate(value, secrets, key=None):
+    if isinstance(value, dict):
+        return {name: _hydrate(item, secrets, name) for name, item in value.items()}
+    if isinstance(value, list):
+        return [_hydrate(item, secrets, key) for item in value]
+    if isinstance(value, str) and _url_field(key):
+        if is_redacted_url(value):
+            try:
+                return secrets[value]
+            except KeyError:
+                raise ValueError("plan secret sidecar is missing a URL reference") from None
+        if has_url_query(value):
+            raise ValueError("plan file contains an unprotected signed URL")
+    return value
+
+
+def _read_secret_map(path: Path, markers: set[str]) -> dict[str, str]:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError:
+        raise ValueError("plan secret sidecar is missing or unsafe") from None
+    try:
+        info = os.fstat(fd)
+    except OSError:
+        os.close(fd)
+        raise ValueError("plan secret sidecar is invalid") from None
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+        os.close(fd)
+        raise ValueError("plan secret sidecar is not an owner-controlled file")
+    if stat.S_IMODE(info.st_mode) & 0o077:
+        os.close(fd)
+        raise ValueError("plan secret sidecar has unsafe permissions")
+    try:
+        with os.fdopen(fd) as f:
+            payload = json.load(f)
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        raise ValueError("plan secret sidecar is invalid") from None
+    urls = payload.get("urls") if isinstance(payload, dict) else None
+    if not isinstance(urls, dict) or set(urls) != markers:
+        raise ValueError("plan secret sidecar does not match the plan")
+    for marker, raw in urls.items():
+        if not isinstance(raw, str) or redacted_url(raw) != marker:
+            raise ValueError("plan secret sidecar does not match the plan")
+    return urls
+
+
+def _validate_plan(payload) -> Plan:
+    try:
+        return Plan.model_validate(payload)
+    except Exception:
+        raise ValueError("plan file is invalid") from None
+
+
+def load_plan_file(path: str | Path, *, hydrate: bool = False) -> Plan:
+    plan_path = Path(path)
+    try:
+        payload = json.loads(plan_path.read_text())
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        raise ValueError("plan file is unreadable or invalid") from None
+    metadata = _validate_plan(payload)
+    if not hydrate:
+        return metadata
+    markers = _marker_set(payload)
+    secrets = _read_secret_map(plan_secrets_path(plan_path), markers) if markers else {}
+    return _validate_plan(_hydrate(payload, secrets))
+
+
+def write_plan_file(path: str | Path, plan: Plan) -> Path:
+    plan_path = Path(path)
+    secrets = {}
+    payload = _redact(plan.model_dump(mode="json"), secrets=secrets)
+    secret_path = plan_secrets_path(plan_path)
+    if secrets:
+        _atomic_write(secret_path, json.dumps({"urls": secrets}, indent=2))
+    _atomic_write(plan_path, json.dumps(payload, indent=2))
+    if not secrets:
+        secret_path.unlink(missing_ok=True)
+    return plan_path
+
+
+def redacted_model_json(model) -> str:
+    return json.dumps(_redact(model.model_dump(mode="json")), indent=2)
+
 class JobStore:
     """Filesystem-backed store for job records."""
 
@@ -74,21 +200,29 @@ class JobStore:
     # -- plan ------------------------------------------------------------
 
     def write_plan(self, plan: Plan) -> Path:
-        path = self.job_dir(plan.job_id) / PLAN_FILE
-        _atomic_write(path, plan.model_dump_json(indent=2))
-        return path
+        return write_plan_file(self.job_dir(plan.job_id) / PLAN_FILE, plan)
+
+    @staticmethod
+    def plan_secrets_path(plan_path: str | Path) -> Path:
+        return plan_secrets_path(plan_path)
 
     def read_plan(self, job_id: str) -> Optional[Plan]:
         path = self.job_dir(job_id) / PLAN_FILE
         if not path.exists():
             return None
-        return Plan.model_validate_json(path.read_text())
+        return load_plan_file(path)
+
+    def read_plan_for_apply(self, job_id: str) -> Optional[Plan]:
+        path = self.job_dir(job_id) / PLAN_FILE
+        if not path.exists():
+            return None
+        return load_plan_file(path, hydrate=True)
 
     # -- spec ------------------------------------------------------------
 
     def write_spec(self, job_id: str, spec: JobSpec) -> Path:
         path = self.job_dir(job_id) / SPEC_FILE
-        _atomic_write(path, spec.model_dump_json(indent=2))
+        _atomic_write(path, redacted_model_json(spec))
         return path
 
     # -- envelope --------------------------------------------------------
@@ -106,21 +240,33 @@ class JobStore:
 
     # -- supervisor liveness ---------------------------------------------
 
-    def write_supervisor_pid(self, job_id: str, pid: int) -> None:
-        _atomic_write(self.job_dir(job_id) / SUPERVISOR_PID_FILE, str(pid))
+    def write_supervisor_identity(
+        self, job_id: str, *, pid: int, starttime: str, boot_id: str
+    ) -> None:
+        _atomic_write(
+            self.job_dir(job_id) / SUPERVISOR_IDENTITY_FILE,
+            json.dumps({"pid": pid, "starttime": starttime, "boot_id": boot_id}),
+        )
 
-    def supervisor_pid(self, job_id: str) -> Optional[int]:
-        path = self.job_dir(job_id) / SUPERVISOR_PID_FILE
+    def supervisor_identity(self, job_id: str) -> Optional[dict]:
+        path = self.job_dir(job_id) / SUPERVISOR_IDENTITY_FILE
         if not path.exists():
             return None
         try:
-            return int(path.read_text().strip())
-        except ValueError:
+            value = json.loads(path.read_text())
+            if not isinstance(value["pid"], int):
+                return None
+            if not isinstance(value["starttime"], str):
+                return None
+            if not isinstance(value["boot_id"], str):
+                return None
+            return value
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
             return None
 
-    def clear_supervisor_pid(self, job_id: str) -> None:
+    def clear_supervisor_identity(self, job_id: str) -> None:
         try:
-            (self.job_dir(job_id) / SUPERVISOR_PID_FILE).unlink()
+            (self.job_dir(job_id) / SUPERVISOR_IDENTITY_FILE).unlink()
         except OSError:
             pass
 

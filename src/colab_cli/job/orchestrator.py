@@ -37,6 +37,7 @@ from typing import Callable, List, Optional, Tuple
 
 
 from colab_cli.auto_update import get_app_version
+from colab_cli.contents import ContentsClient
 from colab_cli.job.models import (
     ArtifactResult,
     Cleanup,
@@ -126,6 +127,13 @@ class Orchestrator:
         )
         self.session_state = None
         self._runtime = None
+        result_channel = getattr(getattr(self.spec, "control", None), "result", None)
+        self._secrets_required = bool(
+            self.spec.data
+            or self.spec.artifacts
+            or getattr(result_channel, "put_url", None)
+        )
+        self._secret_channel_prepared = False
 
     # -- envelope bookkeeping -------------------------------------------
 
@@ -398,54 +406,156 @@ class Orchestrator:
                 ["request a high-RAM/larger-disk shape, or reduce staged data/output"],
             )
 
-    def launch(self, payload_remote_path: str) -> int:
-        """One short kernel RPC. Returns the runner pid.
+    def prepare_secret_channel(self) -> None:
+        """Create the credential directory without transmitting credentials."""
+        secret_dir = f"{self.remote_dir}/mighty_runtime/.secrets"
+        code = (
+            "import os\n"
+            f"p = {secret_dir!r}\n"
+            "os.makedirs(p, mode=0o700, exist_ok=True)\n"
+            "os.chmod(p, 0o700)\n"
+            "print('SECRET_CHANNEL_READY=1')\n"
+        )
+        outputs = self._execute_code(code, timeout=LAUNCH_TIMEOUT)
+        if "SECRET_CHANNEL_READY=1" not in _outputs_text(outputs):
+            raise PhaseError(
+                Phase.STAGE,
+                "credential channel preparation failed",
+                RetryClass.RETRY_SAME,
+            )
+        self._secret_channel_prepared = True
 
-        Uses the non-interactive `execute_code` path with an explicit finite
-        timeout: the interactive/output-hook path is documented in this repo
-        to CPU-spin past its deadline, which is exactly the failure a launch
-        must not inherit.
-        """
+    def seal_secret_channel(self) -> None:
+        """Set uploaded credentials owner-only before launch can consume them."""
+        secret_path = f"{self.remote_dir}/mighty_runtime/.secrets/transfer.json"
+        code = (
+            "import os, stat\n"
+            f"p = {secret_path!r}\n"
+            f"required = {self._secrets_required!r}\n"
+            "if required and not os.path.exists(p):\n"
+            "    raise RuntimeError('required transfer credential file is missing')\n"
+            "if os.path.exists(p):\n"
+            "    fd = os.open(p, os.O_RDONLY | os.O_NOFOLLOW)\n"
+            "    try:\n"
+            "        s = os.fstat(fd)\n"
+            "        if not stat.S_ISREG(s.st_mode) or s.st_uid != os.getuid():\n"
+            "            raise RuntimeError('unsafe transfer credential file')\n"
+            "        os.fchmod(fd, 0o600)\n"
+            "    finally:\n"
+            "        os.close(fd)\n"
+            "print('SECRET_CHANNEL_SEALED=1')\n"
+        )
+        outputs = self._execute_code(code, timeout=LAUNCH_TIMEOUT)
+        if "SECRET_CHANNEL_SEALED=1" not in _outputs_text(outputs):
+            raise PhaseError(
+                Phase.STAGE,
+                "credential channel sealing failed",
+                RetryClass.RETRY_SAME,
+            )
+
+    def cleanup_secret_channel(self) -> bool:
+        """Remove an unconsumed credential file and prove it is absent."""
+        if not self._secret_channel_prepared:
+            return True
+        if self.session_state is None:
+            return False
+        secret_path = f"{self.remote_dir}/mighty_runtime/.secrets/transfer.json"
+        secret_dir = secret_path.rsplit("/", 1)[0]
+        kernel_absent = False
+        code = (
+            "import os\n"
+            f"p = {secret_path!r}\n"
+            "try:\n"
+            "    os.unlink(p)\n"
+            "except FileNotFoundError:\n"
+            "    pass\n"
+            f"try:\n    os.rmdir({secret_dir!r})\nexcept OSError:\n    pass\n"
+            "print('SECRET_CHANNEL_ABSENT=%d' % (not os.path.lexists(p)))\n"
+        )
+        try:
+            outputs = self._execute_code(code, timeout=LAUNCH_TIMEOUT)
+            kernel_absent = "SECRET_CHANNEL_ABSENT=1" in _outputs_text(outputs)
+        except Exception:  # noqa: BLE001 - use the independent Contents path
+            pass
+
+        contents_absent = False
+        contents = ContentsClient(self.session_state)
+        try:
+            contents.rm(secret_path)
+        except FileNotFoundError:
+            contents_absent = True
+        except Exception:  # noqa: BLE001 - absence check below is authoritative
+            pass
+        try:
+            contents.list_dir(secret_path)
+        except FileNotFoundError:
+            contents_absent = True
+        except Exception:  # noqa: BLE001 - kernel proof may still be available
+            pass
+        else:
+            contents_absent = False
+
+        removed = kernel_absent or contents_absent
+        if removed:
+            self._secret_channel_prepared = False
+        return removed
+
+    def launch(self, payload_remote_path: str) -> int:
+        """Start the runner after unlinking its owner-only credential file."""
+        del payload_remote_path
         self._set_phase(Phase.RUN)
         args = json.dumps(self.spec.code.args)
         code = (
-            "import json, os, subprocess, sys\n"
-            f"d = {self.remote_dir!r}\n"
-            "os.makedirs(d, exist_ok=True)\n"
-            "env = dict(os.environ)\n"
-            "for name in ('MIGHTY_CONTROL_RESULT_PUT_URL', "
+            "import os, stat, subprocess, sys\n"
+            "def _launch_job():\n"
+            f"    d = {self.remote_dir!r}\n"
+            "    os.makedirs(d, exist_ok=True)\n"
+            "    secret_fd = None\n"
+            "    log = None\n"
+            "    try:\n"
+            "        env = dict(os.environ)\n"
+            "        for name in ('MIGHTY_CONTROL_RESULT_PUT_URL', "
             "'MIGHTY_RESULT_PUT_URL', 'CONTROL_RESULT_PUT_URL'): "
             "env.pop(name, None)\n"
-            f"env['MIGHTY_JOB_ID'] = {self.job_id!r}\n"
-            "cmd = [sys.executable, '-m', 'mighty_runtime.runner',\n"
-            "       '--job-dir', d,\n"
-            f"      '--deadline', str({self.spec.budgets.wall_clock}),\n"
-            f"      '--entry', os.path.join(d, 'src', {self.spec.code.entry!r})]\n"
-            "control_path = os.path.join(d, 'mighty_runtime', 'result.put-url')\n"
-            "if os.path.exists(control_path):\n"
-            "    os.chmod(control_path, 0o600)\n"
-            "    with open(control_path, encoding='utf-8') as f:\n"
-            "        result_put_url = f.read().strip()\n"
-            "    os.unlink(control_path)\n"
-            "    if not result_put_url: raise RuntimeError('empty result control file')\n"
-            "    env['MIGHTY_CONTROL_RESULT_PUT_URL'] = result_put_url\n"
-            "if os.path.exists(os.path.join(d, 'stage.manifest.json')):\n"
-            "    cmd += ['--stage-manifest', os.path.join(d, 'stage.manifest.json')]\n"
-            "if os.path.exists(os.path.join(d, 'offload.manifest.json')):\n"
-            "    cmd += ['--offload-manifest', os.path.join(d, 'offload.manifest.json')]\n"
-            # `--` first: everything after it is the consumer's own argv and
-            # the runner must not parse it. Without the separator a training
-            # script that legitimately takes `--deadline` would have it
-            # swallowed by the runner's parser.
-            f"cmd += ['--'] + {args}\n"
-            "log = open(os.path.join(d, 'runner.log'), 'ab')\n"
-            "try:\n"
-            "    p = subprocess.Popen(cmd, cwd=d, env=env, stdout=log, stderr=log,\n"
-            "                         stdin=subprocess.DEVNULL, start_new_session=True)\n"
-            "finally:\n"
-            "    env.pop('MIGHTY_CONTROL_RESULT_PUT_URL', None)\n"
-            "    if 'result_put_url' in locals(): del result_put_url\n"
-            "print('LAUNCHED_PID=%d' % p.pid)\n"
+            f"        env['MIGHTY_JOB_ID'] = {self.job_id!r}\n"
+            '        bootstrap = ("import runpy,sys;sys.path.insert(0,%r);" '
+            '% d + "runpy.run_module(\'mighty_runtime.runner\',run_name=\'__main__\')")\n'
+            "        cmd = [sys.executable, '-I', '-S', '-c', bootstrap,\n"
+            "               '--job-dir', d,\n"
+            f"              '--deadline', str({self.spec.budgets.wall_clock}),\n"
+            f"              '--entry', os.path.join(d, 'src', {self.spec.code.entry!r})]\n"
+            "        secret_path = os.path.join(d, 'mighty_runtime', '.secrets', 'transfer.json')\n"
+            f"        secrets_required = {self._secrets_required!r}\n"
+            "        pass_fds = ()\n"
+            "        if secrets_required and not os.path.exists(secret_path):\n"
+            "            raise RuntimeError('required transfer credential file is missing')\n"
+            "        if os.path.exists(secret_path):\n"
+            "            secret_fd = os.open(secret_path, os.O_RDONLY | os.O_NOFOLLOW)\n"
+            "            secret_stat = os.fstat(secret_fd)\n"
+            "            if not stat.S_ISREG(secret_stat.st_mode) or secret_stat.st_uid != os.getuid():\n"
+            "                raise RuntimeError('unsafe transfer credential file')\n"
+            "            os.fchmod(secret_fd, 0o600)\n"
+            "            os.unlink(secret_path)\n"
+            "            cmd += ['--secrets-fd', str(secret_fd)]\n"
+            "            pass_fds = (secret_fd,)\n"
+            "        if secrets_required:\n"
+            "            cmd += ['--secrets-required']\n"
+            "        if os.path.exists(os.path.join(d, 'stage.manifest.json')):\n"
+            "            cmd += ['--stage-manifest', os.path.join(d, 'stage.manifest.json')]\n"
+            "        if os.path.exists(os.path.join(d, 'offload.manifest.json')):\n"
+            "            cmd += ['--offload-manifest', os.path.join(d, 'offload.manifest.json')]\n"
+            f"        cmd += ['--'] + {args}\n"
+            "        log = open(os.path.join(d, 'runner.log'), 'ab')\n"
+            "        p = subprocess.Popen(cmd, cwd=d, env=env, stdout=log, stderr=log,\n"
+            "                             stdin=subprocess.DEVNULL, start_new_session=True,\n"
+            "                             pass_fds=pass_fds)\n"
+            "        return p.pid\n"
+            "    finally:\n"
+            "        if log is not None: log.close()\n"
+            "        if secret_fd is not None: os.close(secret_fd)\n"
+            "pid = _launch_job()\n"
+            "del _launch_job\n"
+            "print('LAUNCHED_PID=%d' % pid)\n"
         )
         outputs = self._execute_code(code, timeout=LAUNCH_TIMEOUT)
         text = _outputs_text(outputs)

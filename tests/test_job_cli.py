@@ -204,18 +204,180 @@ def test_plan_json_carries_the_job_id_so_apply_can_be_chained(
 # --------------------------------------------------------------------------
 
 
+def test_plan_out_redacts_signed_urls_and_apply_uses_protected_sidecar(
+    tmp_path, monkeypatch, mock_common_state
+):
+    from colab_cli.job.orchestrator import Orchestrator
+    from colab_cli.job.store import plan_secrets_path
+
+    sentinel = "ISSUE18_PLAN_SENTINEL"
+    (tmp_path / "train.py").write_text("print(1)")
+    spec = tmp_path / "job.yaml"
+    spec.write_text(
+        f"""name: secrets
+accelerator:
+  prefer: []
+  accept_cpu: true
+code:
+  kind: bundle
+  entry: train.py
+data:
+  - url: https://storage.example/input?signature={sentinel}
+    dest: input.bin
+    size_bytes: 1
+"""
+    )
+    out = tmp_path / "explicit-plan.json"
+
+    planned = runner.invoke(
+        app, ["job", "plan", str(spec), "--no-probe", "--out", str(out)]
+    )
+
+    assert planned.exit_code == 0
+    assert sentinel not in planned.output
+    assert sentinel not in out.read_text()
+    sidecar = plan_secrets_path(out)
+    assert sentinel in sidecar.read_text()
+    assert sidecar.stat().st_mode & 0o777 == 0o600
+
+    captured = {}
+
+    def fail_after_loading(self):
+        captured["url"] = self.spec.data[0].url
+        raise RuntimeError("stop before provisioning")
+
+    monkeypatch.setattr(Orchestrator, "provision", fail_after_loading)
+    mock_common_state.debug = False
+    applied = runner.invoke(app, ["job", "apply", str(out)])
+
+    assert applied.exit_code == 1
+    assert captured["url"].endswith(sentinel)
+    assert sentinel not in applied.output
+
+
+def test_plan_debug_error_does_not_echo_signed_query(tmp_path):
+    sentinel = "ISSUE18_DEBUG_SENTINEL"
+    spec = tmp_path / "bad.yaml"
+    spec.write_text(f"name: [https://storage.example/x?signature={sentinel}")
+
+    result = runner.invoke(app, ["--debug", "job", "plan", str(spec)])
+
+    assert result.exit_code == 1
+    assert sentinel not in result.output
+    assert sentinel not in repr(result.exception)
+
+
+def test_plan_validation_location_does_not_echo_a_signed_mapping_key(tmp_path):
+    sentinel = "ISSUE18_LOCATION_SENTINEL"
+    spec = tmp_path / "bad-map.yaml"
+    spec.write_text(
+        "name: bad-map\naccelerator:\n  prefer: []\n  accept_cpu: true\n"
+        "code:\n  kind: file\n  entry: train.py\n"
+        f"data:\n  - https://storage.example/x?signature={sentinel}: input.bin\n"
+    )
+
+    human = runner.invoke(app, ["job", "plan", str(spec), "--no-probe"])
+    structured = runner.invoke(
+        app, ["--json", "job", "plan", str(spec), "--no-probe"]
+    )
+
+    assert human.exit_code == 1
+    assert structured.exit_code == 1
+    assert sentinel not in human.output
+    assert sentinel not in structured.output
+
+
+def test_apply_rejects_a_plan_with_its_credential_marker_removed(
+    tmp_path, monkeypatch, mock_common_state
+):
+    from colab_cli.job.orchestrator import Orchestrator
+    from colab_cli.job.store import plan_secrets_path
+
+    (tmp_path / "train.py").write_text("print(1)")
+    spec = tmp_path / "job.yaml"
+    spec.write_text(
+        "name: marker\naccelerator:\n  prefer: []\n  accept_cpu: true\n"
+        "code:\n  kind: bundle\n  entry: train.py\n"
+        "data:\n  - url: https://storage.example/input?signature=secret\n"
+        "    dest: input.bin\n    size_bytes: 1\n"
+    )
+    out = tmp_path / "plan.json"
+    assert runner.invoke(
+        app, ["job", "plan", str(spec), "--no-probe", "--out", str(out)]
+    ).exit_code == 0
+    payload = json.loads(out.read_text())
+    payload["spec"]["data"][0]["url"] = "https://storage.example/input"
+    out.write_text(json.dumps(payload))
+    plan_secrets_path(out).unlink()
+
+    monkeypatch.setattr(
+        Orchestrator,
+        "provision",
+        lambda _self: pytest.fail("tampered plan reached provisioning"),
+    )
+    result = runner.invoke(app, ["job", "apply", str(out)])
+
+    assert result.exit_code == 1
+    assert "its own recorded hash" in _clean(result.output)
+
+
+
+def test_unconfirmed_credential_cleanup_overrides_leave_up(
+    tmp_path, monkeypatch, mock_common_state
+):
+    import colab_cli.commands.job as job_command
+    from colab_cli.job.models import Cleanup, Phase, RetryClass
+    from colab_cli.job.orchestrator import Orchestrator, PhaseError
+    from types import SimpleNamespace
+
+    (tmp_path / "train.py").write_text("print(1)")
+    spec = tmp_path / "job.yaml"
+    spec.write_text(
+        "name: cleanup\naccelerator:\n  prefer: []\n  accept_cpu: true\n"
+        "code:\n  kind: bundle\n  entry: train.py\n"
+        "data:\n  - url: https://storage.example/input?signature=secret\n"
+        "    dest: input.bin\n    size_bytes: 1\n"
+    )
+    out = tmp_path / "plan.json"
+    assert runner.invoke(
+        app, ["job", "plan", str(spec), "--no-probe", "--out", str(out)]
+    ).exit_code == 0
+    forced = {}
+
+    def provision(self):
+        self.session_state = SimpleNamespace(name="cleanup", url="https://vm", token="x")
+        self.env.endpoint = "m-test"
+
+    def launch(_self, _path):
+        raise PhaseError(Phase.RUN, "launch failed", RetryClass.RETRY_SAME)
+
+    def cleanup(self, force_leave_up=False):
+        forced["leave_up"] = force_leave_up
+        self.env.cleanup = Cleanup.FAILED
+
+    monkeypatch.setattr(Orchestrator, "provision", provision)
+    for name in ("install", "restart", "verify", "seal_secret_channel"):
+        monkeypatch.setattr(Orchestrator, name, lambda _self: None)
+    monkeypatch.setattr(job_command, "_stage_payload", lambda _orch, _plan: None)
+    monkeypatch.setattr(Orchestrator, "launch", launch)
+    monkeypatch.setattr(Orchestrator, "cleanup_secret_channel", lambda _self: False)
+    monkeypatch.setattr(Orchestrator, "cleanup", cleanup)
+
+    result = runner.invoke(app, ["job", "apply", str(out), "--leave-up"])
+
+    assert result.exit_code == 1
+    assert forced == {"leave_up": False}
+    assert "transfer credential deletion could not be confirmed" in _clean(result.output)
+
 def test_apply_refuses_a_plan_whose_spec_hash_no_longer_matches(
     tmp_path, mock_common_state
 ):
-    """A plan is a durable file that can be hand-edited between `plan` and
-    `apply`. `apply` does not re-run the plan-time gates, so a tampered
-    plan would otherwise smuggle an unknown accelerator or an escaping
-    path straight past them."""
+    """A durable plan must refuse a spec edited after planning."""
     from colab_cli.job.models import Plan
 
     plan = Plan(
         job_id="tampered",
-        spec_hash="0" * 64,  # not the hash of the spec below
+        spec_hash="0" * 64,
         created_at="now",
         spec=JobSpec(
             name="tampered",
@@ -233,7 +395,6 @@ def test_apply_refuses_a_plan_whose_spec_hash_no_longer_matches(
     out = _clean(result.output)
     assert "its own recorded hash" in out
     assert "job plan" in out, "must tell the caller how to recover"
-
 
 def test_apply_accepts_a_plan_whose_spec_is_untouched(tmp_path, mock_common_state):
     """The guard must not reject honest plans -- otherwise the first thing
@@ -428,26 +589,116 @@ def test_the_suite_does_not_write_job_records_into_the_repo():
 
 
 
-def test_stage_payload_uploads_the_control_put_url_outside_kernel_code(
+def test_stage_payload_keeps_signed_queries_only_in_private_channel(
     tmp_path, monkeypatch
 ):
     from pathlib import Path
 
-    from colab_cli.job.models import Control, ControlChannel
+    from colab_cli.job.models import Control, ControlChannel, DataItem
 
+    sentinel = "ISSUE18_REMOTE_SENTINEL"
     entry = tmp_path / "train.py"
-    entry.write_text("print('ok')\n")
-    put_url = "https://storage.example/result?secret=signature"
-    get_url = "https://storage.example/result?secret=reader"
+    entry.write_text("print('ok')")
+    source_spec = tmp_path / "job.yaml"
+    source_spec.write_text(f"url: https://storage.example/spec?sig={sentinel}")
+    generated_secret = tmp_path / "plan.json.mighty-colab-secrets.json"
+    generated_secret.write_text(sentinel)
+    (tmp_path / ".mighty-colab-secret-tmp-orphan").write_text(sentinel)
+    (tmp_path / "ordinary.json").write_text("{}")
+    put_url = f"https://storage.example/result?sig={sentinel}-put"
+    get_url = f"https://storage.example/result?sig={sentinel}-get"
+    data_url = f"https://storage.example/input?sig={sentinel}-data"
+    artifact_url = f"https://storage.example/output?sig={sentinel}-artifact"
     spec = JobSpec(
         name="staged-control",
-        code=CodeSpec(root=str(tmp_path), entry="train.py"),
+        code=CodeSpec(kind="bundle", root=str(tmp_path), entry="train.py"),
+        data=[DataItem(url=data_url, dest="input.bin", size_bytes=1)],
+        artifacts=[ArtifactItem(path="output.bin", url=artifact_url)],
         control=Control(
-            result=ControlChannel(
-                put_url=put_url,
-                get_url=get_url,
-            )
+            result=ControlChannel(put_url=put_url, get_url=get_url)
         ),
+    )
+    client = MagicMock()
+    uploads = []
+
+    def capture(local_path, remote_path):
+        path = Path(local_path)
+        uploads.append((remote_path, path.read_bytes(), path.stat().st_mode & 0o777))
+
+    client.upload.side_effect = capture
+    monkeypatch.setattr(payload_bundle, "ContentsClient", lambda _session: client)
+
+    payload_bundle.stage_payload(
+        spec=spec,
+        job_id="staged-control",
+        session=MagicMock(),
+        remote_dir="/content/jobs/staged-control",
+        source_spec_path=source_spec,
+    )
+
+    secret_upload = uploads[-1]
+    assert secret_upload[0].endswith("/.secrets/transfer.json")
+    assert secret_upload[2] == 0o600
+    assert sentinel.encode() in secret_upload[1]
+    for remote_path, content, _mode in uploads[:-1]:
+        assert sentinel.encode() not in content, remote_path
+    uploaded_paths = {path for path, _content, _mode in uploads}
+    assert not any(path.endswith("/src/job.yaml") for path in uploaded_paths)
+    assert not any("mighty-colab-secrets.json" in path for path in uploaded_paths)
+    assert not any("mighty-colab-secret-tmp-" in path for path in uploaded_paths)
+    assert any(path.endswith("/src/ordinary.json") for path in uploaded_paths)
+    assert get_url.encode() not in secret_upload[1]
+
+
+def test_stage_payload_rejects_a_sibling_job_spec_with_signed_queries(
+    tmp_path, monkeypatch
+):
+    from pathlib import Path
+
+    sentinel = "ISSUE18_SIBLING_SPEC_SENTINEL"
+    entry = tmp_path / "train.py"
+    entry.write_text("print('safe')")
+    source_spec = tmp_path / "train.yaml"
+    source_spec.write_text(f"url: https://storage.example/current?sig={sentinel}")
+    (tmp_path / "eval.spec").write_text(
+        f"data: [{{url: 'HTTPS://[2001:db8::1]/sibling?auth={sentinel}'}}]"
+    )
+    spec = JobSpec(
+        name="sibling-spec",
+        code=CodeSpec(kind="bundle", root=str(tmp_path), entry="train.py"),
+    )
+    client = MagicMock()
+    uploaded = []
+
+    def capture(local_path, remote_path):
+        uploaded.append((remote_path, Path(local_path).read_bytes()))
+
+    client.upload.side_effect = capture
+    monkeypatch.setattr(payload_bundle, "ContentsClient", lambda _session: client)
+
+    with pytest.raises(ValueError, match="credential-bearing URL"):
+        payload_bundle.stage_payload(
+            spec=spec,
+            job_id="sibling-spec",
+            session=MagicMock(),
+            remote_dir="/content/jobs/sibling-spec",
+            source_spec_path=source_spec,
+        )
+
+    assert all(sentinel.encode() not in content for _path, content in uploaded)
+    assert not any(path.endswith("/src/train.yaml") for path, _content in uploaded)
+    assert not any(path.endswith("/src/eval.spec") for path, _content in uploaded)
+
+
+def test_stage_payload_allows_benign_http_query_parameters(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    entry = tmp_path / "train.py"
+    source = "import requests\nrequests.get('https://api.example/items?page=1')\n"
+    entry.write_text(source)
+    spec = JobSpec(
+        name="benign-query",
+        code=CodeSpec(kind="file", root=str(tmp_path), entry="train.py"),
     )
     client = MagicMock()
     uploaded = {}
@@ -460,16 +711,30 @@ def test_stage_payload_uploads_the_control_put_url_outside_kernel_code(
 
     payload_bundle.stage_payload(
         spec=spec,
-        job_id="staged-control",
+        job_id="benign-query",
         session=MagicMock(),
-        remote_dir="/content/jobs/staged-control",
+        remote_dir="/content/jobs/benign-query",
     )
 
-    assert uploaded[
-        "/content/jobs/staged-control/mighty_runtime/result.put-url"
-    ] == put_url
-    assert all(get_url not in content for content in uploaded.values())
+    assert uploaded["/content/jobs/benign-query/src/train.py"] == source
 
+
+@pytest.mark.parametrize("kind", ["file", "bundle"])
+def test_payload_rejects_symlink_aliases_to_local_secrets(tmp_path, kind):
+    root = tmp_path / "src"
+    root.mkdir()
+    secret = tmp_path / "plan.json.mighty-colab-secrets.json"
+    secret.write_text("SIGNED_QUERY_SENTINEL")
+    alias = root / "leak.json"
+    alias.symlink_to(secret)
+    entry = "leak.json"
+    if kind == "bundle":
+        entry = "train.py"
+        (root / entry).write_text("print('safe')")
+    spec = JobSpec(name="links", code=CodeSpec(kind=kind, root=str(root), entry=entry))
+
+    with pytest.raises(ValueError, match="symbolic links"):
+        list(payload_bundle._iter_user_files(spec))
 
 def _persist_running_job(mock_common_state, job_id="destroy-me"):
     from colab_cli.commands.job import _store
@@ -516,6 +781,7 @@ def test_destroy_reconciles_remote_success_before_unassign(
         events.append("read") or ({"workload": "succeeded", "exit_code": 0}, ReadStatus.OK)
     )
     transport.write_json.return_value = ReadStatus.OK
+    transport.remove.return_value = ReadStatus.OK
     mock_common_state.client.unassign.side_effect = lambda _endpoint: events.append(
         "unassign"
     )
@@ -542,6 +808,7 @@ def test_destroy_without_remote_verdict_records_unknown(
     transport = MagicMock()
     transport.read_json.return_value = (None, ReadStatus.NOT_FOUND)
     transport.write_json.return_value = ReadStatus.OK
+    transport.remove.return_value = ReadStatus.OK
     monkeypatch.setattr(
         "colab_cli.job.transport.JobTransport", lambda *_args: transport
     )
@@ -562,6 +829,7 @@ def test_cancel_only_writes_intent_without_unassign(monkeypatch, mock_common_sta
     transport = MagicMock()
     transport.read_json.return_value = (None, ReadStatus.NOT_FOUND)
     transport.write_json.return_value = ReadStatus.OK
+    transport.remove.return_value = ReadStatus.OK
     monkeypatch.setattr(
         "colab_cli.job.transport.JobTransport", lambda *_args: transport
     )
@@ -575,6 +843,9 @@ def test_cancel_only_writes_intent_without_unassign(monkeypatch, mock_common_sta
     assert env.workload is Workload.RUNNING
     assert "intent written" in env.reason
     transport.write_json.assert_called_once()
+    transport.remove.assert_called_once_with(
+        "/content/jobs/destroy-me/mighty_runtime/.secrets/transfer.json"
+    )
     mock_common_state.client.unassign.assert_not_called()
 
 
@@ -585,6 +856,7 @@ def test_cancel_only_reports_when_intent_write_failed(monkeypatch, mock_common_s
     transport = MagicMock()
     transport.read_json.return_value = (None, ReadStatus.DEGRADED)
     transport.write_json.return_value = ReadStatus.DEGRADED
+    transport.remove.return_value = ReadStatus.OK
     monkeypatch.setattr(
         "colab_cli.job.transport.JobTransport", lambda *_args: transport
     )
@@ -597,6 +869,96 @@ def test_cancel_only_reports_when_intent_write_failed(monkeypatch, mock_common_s
     assert "could not be confirmed" in store.read_envelope("destroy-me").reason
     mock_common_state.client.unassign.assert_not_called()
 
+
+
+def test_status_scrubs_an_interrupted_prelaunch_secret(monkeypatch, mock_common_state):
+    from colab_cli.job.transport import ReadStatus
+
+    _persist_running_job(mock_common_state, job_id="interrupted")
+    transport = MagicMock()
+    transport.remove.return_value = ReadStatus.OK
+    transport.read_json.return_value = (None, ReadStatus.NOT_FOUND)
+    monkeypatch.setattr(
+        "colab_cli.job.transport.JobTransport", lambda *_args: transport
+    )
+
+    result = runner.invoke(app, ["job", "status", "interrupted"])
+
+    assert result.exit_code == 0
+    transport.remove.assert_called_once_with(
+        "/content/jobs/interrupted/mighty_runtime/.secrets/transfer.json"
+    )
+
+
+def test_status_does_not_scrub_a_live_supervisor_before_launch(
+    monkeypatch, mock_common_state
+):
+    import os
+
+    from colab_cli.job.models import Supervisor
+    from colab_cli.job.runtime_payload import ident
+    from colab_cli.job.transport import ReadStatus
+
+    store = _persist_running_job(mock_common_state, job_id="live-supervisor")
+    env = store.read_envelope("live-supervisor")
+    env.supervisor = Supervisor.RUNNING
+    store.write_envelope(env)
+    store.write_supervisor_identity(
+        "live-supervisor",
+        pid=os.getpid(),
+        starttime=ident.starttime(os.getpid()),
+        boot_id=ident.boot_id(),
+    )
+    transport = MagicMock()
+    transport.read_json.return_value = (None, ReadStatus.NOT_FOUND)
+    monkeypatch.setattr(
+        "colab_cli.job.transport.JobTransport", lambda *_args: transport
+    )
+
+    result = runner.invoke(app, ["job", "status", "live-supervisor"])
+
+    assert result.exit_code == 0
+    transport.remove.assert_not_called()
+
+
+def test_status_forces_teardown_when_interrupted_session_state_is_missing(
+    monkeypatch, mock_common_state
+):
+    from colab_cli.job.models import Cleanup
+    store = _persist_running_job(mock_common_state, job_id="lost-session")
+    mock_common_state.store.get.return_value = None
+
+    result = runner.invoke(app, ["job", "status", "lost-session"])
+
+    assert result.exit_code == 1
+    mock_common_state.client.unassign.assert_called_once_with("m-s-endpoint")
+    env = store.read_envelope("lost-session")
+    assert env.cleanup is Cleanup.RELEASED
+    assert "credential deletion" in env.reason
+
+
+def test_destroy_scrubs_secret_before_a_failed_unassign(
+    monkeypatch, mock_common_state
+):
+    from colab_cli.job.transport import ReadStatus
+
+    _persist_running_job(mock_common_state)
+    transport = MagicMock()
+    events = []
+    transport.read_json.return_value = (None, ReadStatus.NOT_FOUND)
+    transport.write_json.return_value = ReadStatus.OK
+    transport.remove.side_effect = lambda _path: events.append("scrub") or ReadStatus.OK
+    mock_common_state.client.unassign.side_effect = lambda _endpoint: (
+        events.append("unassign") or (_ for _ in ()).throw(RuntimeError("failed"))
+    )
+    monkeypatch.setattr(
+        "colab_cli.job.transport.JobTransport", lambda *_args: transport
+    )
+
+    result = runner.invoke(app, ["job", "destroy", "destroy-me"])
+
+    assert result.exit_code == 1
+    assert events == ["scrub", "unassign"]
 
 def test_unexpected_apply_exception_emits_a_terminal_envelope(
     tmp_path, monkeypatch, mock_common_state

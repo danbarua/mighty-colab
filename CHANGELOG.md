@@ -17,9 +17,13 @@ below corresponds to a tag of the same name.
   escalation, and leave the VM assigned. Full destroy now reads and preserves
   any remote workload verdict before unassigning; an absent verdict becomes
   `unknown` instead of an invented cancellation.
-- **Control-result PUT credentials entered kernel history.** Apply now stages the
-  URL in a mode-0600 remote file that launch reads and unlinks, keeps it out of
-  launch source and runner argv, and clears inherited control URL variables.
+- **Signed URL credentials leaked into durable job records and kernel history.**
+  Generated specs, plans, manifests, envelopes, events, diagnostics, and launch
+  history now carry canonical URL identities and opaque references only. Full
+  URLs remain in mode-0600 local plan sidecars and a short-lived mode-0600 VM
+  handoff consumed through an inherited descriptor by an isolated runner.
+  Interrupted recovery confirms deletion or forces assignment teardown; source
+  bundles exclude secret records and reject signed-credential query parameters.
 - **Invalid or inactive job inputs could pass planning.** Data SHA-256 values now
   require exactly 64 hexadecimal characters; unsupported retry, resume,
   `control.log`, and `on_run_fail: skip` settings are plan errors; declared
@@ -46,6 +50,11 @@ below corresponds to a tag of the same name.
   `integration/repro_job_kernel_restart/`: a detached CPU consumer retains
   its process identity, advances after the public kernel restart, exits 0, and
   is followed by verified assignment teardown.
+
+- **Live signed URL secrecy coverage** in
+  `integration/repro_job_signed_url_redaction/`: a CPU job consumes a signed
+  data URL while a unique sentinel is absent from plan/apply output, durable
+  records, remote files, and kernel history; teardown leaves no active session.
 
 ## [0.8.0] - 2026-09-11
 
