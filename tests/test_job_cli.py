@@ -400,16 +400,20 @@ def test_retry_when_is_usable_from_yaml(tmp_path):
 
 
 def test_the_shipped_example_spec_still_plans_clean():
-    """The first thing the labkit team copies. It planned with three errors
-    once already."""
+    """The first thing the labkit team copies. It planned with three
+    errors once, then with three warnings once -- and warnings are not
+    cosmetic here: `apply` refuses them without `ignore_warnings: true`,
+    so a warning in the example is as blocking as an error. Assert both."""
     from colab_cli.job.planner import build_plan
     from colab_cli.job.spec_io import load_spec
 
     spec = load_spec("examples/job/train_cls.yaml")
     plan = build_plan(spec, "example-check", probe=False)
 
-    errors = [d for d in plan.diagnostics if d.severity == "error"]
-    assert not errors, f"the shipped example must plan without errors: {errors}"
+    assert not plan.diagnostics, (
+        "the shipped example must plan with no errors AND no warnings: "
+        f"{[(d.severity, d.code) for d in plan.diagnostics]}"
+    )
 
 
 def test_the_suite_does_not_write_job_records_into_the_repo():

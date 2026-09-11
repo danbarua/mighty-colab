@@ -550,16 +550,27 @@ class Orchestrator:
             # `ok` false; a hint an agent can skip past is not a guard.
             if self.env.surviving_descendants:
                 self.env.cleanup = Cleanup.FAILED
-                self.env.reason = (
-                    f"VM left up with {len(self.env.surviving_descendants)} "
-                    "surviving descendant(s) still holding its resources"
-                )
-                self.env.retry_class = RetryClass.FIX_HUMAN
+                # `cleanup = FAILED` is on its own enough to make `ok`
+                # false, so the escapee never needs to overwrite the
+                # workload's verdict to be actionable. Writing `reason` or
+                # `retry_class` unconditionally here would replace
+                # "a required artifact was not produced" / `fix_code` with
+                # `fix_human`, and send an agent to a human about a broken
+                # script. Fill them only when the workload left them empty;
+                # the detail always lands in `hints`.
                 self.env.hints.append(
-                    f"pids {self.env.surviving_descendants} outlived the "
-                    f"workload; `mighty-colab job destroy {self.job_id}` "
+                    f"cleanup: VM left up with pids "
+                    f"{self.env.surviving_descendants} still holding its "
+                    f"resources; `mighty-colab job destroy {self.job_id}` "
                     "releases the VM and everything on it"
                 )
+                if self.env.reason is None:
+                    self.env.reason = (
+                        f"VM left up with {len(self.env.surviving_descendants)} "
+                        "surviving descendant(s) still holding its resources"
+                    )
+                if self.env.retry_class is None:
+                    self.env.retry_class = RetryClass.FIX_HUMAN
             else:
                 self.env.cleanup = Cleanup.LEFT_UP
                 self.env.hints.append(
