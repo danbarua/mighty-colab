@@ -231,7 +231,7 @@ def test_apply_refuses_a_plan_whose_spec_hash_no_longer_matches(
 
     assert result.exit_code == 1
     out = _clean(result.output)
-    assert "does not match its recorded hash" in out
+    assert "its own recorded hash" in out
     assert "job plan" in out, "must tell the caller how to recover"
 
 
@@ -258,7 +258,7 @@ def test_apply_accepts_a_plan_whose_spec_is_untouched(tmp_path, mock_common_stat
 
     result = runner.invoke(app, ["job", "apply", str(plan_file)])
 
-    assert "does not match its recorded hash" not in _clean(result.output)
+    assert "its own recorded hash" not in _clean(result.output)
 
 
 # --------------------------------------------------------------------------
@@ -293,7 +293,11 @@ def test_a_stage_failure_is_not_classified_as_a_code_bug(tmp_path):
 
     orch._absorb_result({"workload": "failed", "exit_code": 1, "phase": "stage"})
 
-    assert orch.env.retry_class is RetryClass.REFRESH_URLS
+    # `fix_human`, not `refresh_urls`: the runner redacts the error text
+    # (it can embed a signed query string), so the surviving evidence
+    # cannot separate an expired signature from a checksum mismatch --
+    # and re-signing does not fix the latter.
+    assert orch.env.retry_class is RetryClass.FIX_HUMAN
     assert orch.env.phase is Phase.STAGE
     assert "consumer never started" in orch.env.reason
 
@@ -406,3 +410,14 @@ def test_the_shipped_example_spec_still_plans_clean():
 
     errors = [d for d in plan.diagnostics if d.severity == "error"]
     assert not errors, f"the shipped example must plan without errors: {errors}"
+
+
+def test_the_suite_does_not_write_job_records_into_the_repo():
+    """`state` is a MagicMock and `state.config_path` satisfies
+    `os.fspath`, so an unpinned value lands job directories in the repo
+    root -- and one test's leftover envelope becomes the next test's
+    input. conftest pins it; this fails loudly if that pin is ever lost."""
+    from pathlib import Path as _Path
+
+    assert not _Path("MagicMock").exists()
+    assert not _Path("jobs").exists()

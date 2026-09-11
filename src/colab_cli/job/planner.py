@@ -42,6 +42,7 @@ DESTINATION_OUTSIDE_JOB_DIR = "destination_outside_job_dir"
 RESERVED_PATH = "reserved_path"
 DUPLICATE_DESTINATION = "duplicate_destination"
 DATA_DEST_COLLIDES_WITH_ARTIFACT = "data_dest_collides_with_artifact"
+RETRY_NOT_IMPLEMENTED = "retry_not_implemented"
 CODE_ENTRY_MISSING = "code_entry_missing"
 ENTRY_NOT_UNDER_BUNDLE = "entry_not_under_bundle"
 URL_EXPIRY_TOO_SOON = "url_expiry_too_soon"
@@ -427,7 +428,16 @@ def build_plan(spec: JobSpec, job_id: str, probe: bool = True) -> Plan:
 
     diagnostics: list[Diagnostic] = []
 
-    unknown = sorted(set(spec.accelerator.prefer) - KNOWN_ACCELERATORS)
+    # Case-insensitive on purpose. The canonical spellings are mixed case
+    # (GPUs upper, TPUs lower: `T4`, `A100`, `v5e1`), which nobody will
+    # remember, and the orchestrator already case-folds on the way to
+    # `resolve_runtime_options`. Rejecting `t4` here would make the spec
+    # quietly case-sensitive in a way nothing else about it is.
+    canonical = {a.casefold(): a for a in KNOWN_ACCELERATORS}
+    unknown = sorted(
+        name for name in set(spec.accelerator.prefer)
+        if name.casefold() not in canonical
+    )
     if unknown:
         diagnostics.append(
             _diagnostic(
@@ -436,6 +446,23 @@ def build_plan(spec: JobSpec, job_id: str, probe: bool = True) -> Plan:
                 f"Unknown accelerator name(s): {', '.join(unknown)}",
                 RetryClass.FIX_CODE,
                 f"Use only one of: {', '.join(sorted(KNOWN_ACCELERATORS))}.",
+            )
+        )
+
+    # `max_attempts` is accepted by the model but `apply` runs exactly one
+    # attempt. Surfacing that here is the only free place to discover it:
+    # otherwise a spec asking for 3 attempts silently gets 1, and the
+    # caller learns only by not seeing a retry that never comes.
+    if spec.retry.max_attempts > 1:
+        diagnostics.append(
+            _diagnostic(
+                "warn",
+                RETRY_NOT_IMPLEMENTED,
+                f"retry.max_attempts={spec.retry.max_attempts} but `apply` "
+                "runs exactly one attempt; retry is not implemented yet",
+                RetryClass.DO_NOT_RETRY,
+                "Remove retry.max_attempts, or re-run `job apply` yourself "
+                "after inspecting the envelope's retry_class.",
             )
         )
 

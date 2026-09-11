@@ -491,23 +491,33 @@ class Orchestrator:
         else:
             self.env.offload = Offload.OK
 
-        # A stage failure is not a code failure, and telling an agent to
-        # "fix your code" when a signature expired sends it editing a
-        # perfectly good script. `phase` distinguishes them: the runner
-        # records where it died, and the retry class follows from that,
-        # never from the phase the supervisor happened to be in.
+        # A stage failure is not a code failure: telling an agent to "fix
+        # your code" when a fetch was refused sends it editing a script
+        # that was never wrong. `phase` distinguishes them -- the runner
+        # records where it died, and the class follows from that, never
+        # from the phase the supervisor happened to be in.
+        #
+        # `fix_human`, not `refresh_urls`: the runner deliberately discards
+        # the error text (urllib messages can embed a signed query string,
+        # and a signature in a durable record is a leaked credential), so
+        # all that survives is the exception class. That cannot separate an
+        # expired signature from a wrong object path from a checksum
+        # mismatch -- and only the first of those is fixed by re-signing.
+        # Claiming `refresh_urls` would send an agent re-signing URLs for a
+        # sha256 mismatch, forever. Narrowing this needs a redacted
+        # structured field (http_status + a reason enum) set at the raise
+        # site; recorded in the design's known gaps.
         phase = result.get("phase")
         if phase == "stage" and self.env.workload is Workload.FAILED:
             self.env.phase = Phase.STAGE
-            self.env.retry_class = RetryClass.REFRESH_URLS
+            self.env.retry_class = RetryClass.FIX_HUMAN
             self.env.reason = (
-                "staging failed: an input could not be fetched or failed its "
-                "sha256 check. The consumer never started."
+                "staging failed: a declared input could not be fetched, or "
+                "failed its sha256 check. The consumer never started."
             )
             self.env.hints.append(
-                "if the URL is still valid, this is a checksum mismatch and "
-                "`refresh_urls` will not help -- compare data[].sha256 "
-                "against the object"
+                "check, in order: the URL has not expired; the object exists "
+                "and the grant covers it; data[].sha256 matches the object"
             )
         elif self.env.workload is Workload.FAILED and self.env.retry_class is None:
             self.env.retry_class = RetryClass.FIX_CODE
@@ -531,11 +541,31 @@ class Orchestrator:
             self._persist()
             return
         if leave:
-            self.env.cleanup = Cleanup.LEFT_UP
-            self.env.hints.append(
-                f"VM left running deliberately and is still billing: "
-                f"`mighty-colab job destroy {self.job_id}` when done"
-            )
+            # A surviving descendant only matters while the VM lives: an
+            # `unassign` takes the whole machine, escapee included. But if
+            # we are deliberately leaving it up, cleanup did not do its job
+            # -- there is now an unbounded GPU consumer the caller never
+            # asked for, on a machine that keeps billing. That is a cleanup
+            # failure in substance, and recording it as one is what makes
+            # `ok` false; a hint an agent can skip past is not a guard.
+            if self.env.surviving_descendants:
+                self.env.cleanup = Cleanup.FAILED
+                self.env.reason = (
+                    f"VM left up with {len(self.env.surviving_descendants)} "
+                    "surviving descendant(s) still holding its resources"
+                )
+                self.env.retry_class = RetryClass.FIX_HUMAN
+                self.env.hints.append(
+                    f"pids {self.env.surviving_descendants} outlived the "
+                    f"workload; `mighty-colab job destroy {self.job_id}` "
+                    "releases the VM and everything on it"
+                )
+            else:
+                self.env.cleanup = Cleanup.LEFT_UP
+                self.env.hints.append(
+                    f"VM left running deliberately and is still billing: "
+                    f"`mighty-colab job destroy {self.job_id}` when done"
+                )
             self._persist()
             return
         try:

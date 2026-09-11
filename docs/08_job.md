@@ -3,9 +3,11 @@ log:
 2026-09-09: Draft architecture for an agent-facing `job` supervisor (`plan`/`apply`/`status`/`destroy`). Does not grow `run`. Remote `mighty_runtime` package; runner is parent of a shim that `runpy`s the entry; caller-supplied HTTPS URLs as the v0 data plane. Six adversarial reviews folded in; remaining `[open]` items and apply-time gaps are listed at the end. Not implemented.
 2026-09-11: Spiked the launcher for real (`integration/spike_job_runner/`). Live CPU VM: kernel RPC returns in 3.9s, kernel IDLE, verdict read back via Contents API only, all nine exit/cancel/duplicate cases correct, clean teardown. Confirmed the descendant-escape hole (setsid grandchild outlived a `succeeded` verdict, invisible to the group scan). Caught two runner-cleanup bugs before implementation: `killpg` EPERM on an empty group killed the runner before it wrote `result.json` (spurious `unknown`), and an escapee inheriting the runner's stdout pipe blocks any reader keying off stream EOF. Token lifetime >1h, independent kernel restart, and GPU remain untested — the first is still the falsifier.
 2026-09-11: **Corrected a wrong conclusion.** The 77min token spike lost contact at 61min and the first write-up called it "runtime reset under a live assignment" with a "no activity = reclaimed" hypothesis, citing a peer field report as corroboration. Both were wrong. Issue #3 (this repo, 2026-08-12) already documents the real cause: the runtime-proxy token has a TTL the CLI never refreshes, expiry returns **401/404** (so the "404 not 401, therefore not auth" reasoning was invalid), and it reproduces "at ~60 minute intervals" — this run failed at 61. `stop: ok` proved nothing: unassign uses the Gaia token on a different host than the Contents API's proxy token. The field report is evidence *against* the activity hypothesis — their job wrote continuously and still hit 404/401, recovering via `adopt`. Retracted "watchdog is life support"; the real consequence is that the supervisor's poll loop MUST refresh the proxy token (`list_assignments()` returns a fresh one and the CLI discards it). Next experiment replaced: re-adopt at first failure and retry the read, which discriminates in one ~65min session.
-2026-09-11: **Falsifier settled by experiment.** `token_discriminator_spike.py` ran the same quiet workload and, at the first Contents failure (t+61min, again), re-adopted instead of concluding: the assignment was still listed, `adopt --keep-alive` returned 0, and the immediate re-read of `launch.json` succeeded. `VERDICT=TOKEN_EXPIRY` — the files were intact the whole time. The activity hypothesis is dead and the planned 75-minute A/B would have measured the wrong variable. The supervisor's poll loop MUST refresh the proxy token; that is now implemented, not just specified.
+2026-09-11: **Falsifier settled by experiment, with one confound named.** `token_discriminator_spike.py` ran the same quiet workload and, at the first Contents failure (t+61min, again), re-adopted instead of concluding: the assignment was still listed, `adopt --keep-alive` returned 0, and the immediate re-read of `launch.json` succeeded. **The files were intact the whole time** — the VM was never recycled and the activity hypothesis is dead. But `adopt` mints a fresh token *and* re-resolves the proxy URL, so the run does not separate token expiry from endpoint rebinding; the script's `VERDICT=TOKEN_EXPIRY` overstates it (caught by `labkit-assistant`, who supplied the original evidence). Issue #3's documented TTL keeps expiry the leading hypothesis. The fix is robust either way: the supervisor re-resolves the assignment and rebuilds its client from the new token *and* URL. Discriminating measurement recorded in the doc for the next long run.
 2026-09-11: **Implemented** (`src/colab_cli/job/`, `mighty-colab job plan|apply|status|destroy|list`). Four-field envelope with separate `done`/`ok`; stage+run+offload behind one kernel RPC so a dropped websocket cannot lose the run; `JobTransport` refreshes the proxy token once per 401/404 (rate-limited so routine "result.json not there yet" 404s don't re-resolve every poll). Live CPU runs: `done=True ok=True`, exit 0, VM released. Three defects found by running it rather than reading it — Contents PUT into a non-existent directory returns a bare HTTP 500 that the client attributes to the size limit (now `makedirs` first); the watchdog inherits `MIGHTY_JOB_ID` and reported itself as a surviving descendant on every job (now excluded); `retry.on` is unusable in a YAML spec because YAML 1.1 resolves a bare `on:` key to boolean true (renamed `retry.when`). Still untested: GPU session, independent kernel restart mid-run, and a real signed-URL data plane.
 ---
+
+# Design: `job` — Agent job supervisor
 
 **Implemented and live-verified** (2026-09-11). `mighty-colab job plan|apply|status|destroy|list` ships in `src/colab_cli/job/`; usage lives in `docs/09_job_usage.md`. This document is the design and the evidence behind it, not a proposal. Settled contract is written as MUST. The falsifier that gated the design — whether an unattended multi-hour job can keep a verdict without a long-lived kernel execute — is **resolved**: the loss at ~61min was proxy-token expiry, not VM loss, and the supervisor refreshes the token. Remaining `[open]` items and untested surfaces are listed at the end; the largest is that the signed-URL data plane has never run against a real bucket.
 
@@ -398,14 +400,37 @@ concluding:
 | 61 min | `adopt <ENDPOINT> --keep-alive` → rc=0 |
 | 61 min | **immediate re-read: OK** |
 
-`VERDICT=TOKEN_EXPIRY`. **The files were intact all along.** `/content` never
-vanished, the VM was never recycled, and the only thing that had died was the
-credential. Failure at 61 minutes on both runs, matching issue #3's documented
-~60-minute reproduction interval.
+**What this establishes, and what it does not.** Established: the files were
+intact all along. `/content` never vanished, the VM was never recycled, and a
+credential/binding refresh restored access to the *same* endpoint. That kills
+the activity hypothesis outright — the discriminating variable was never
+write-activity, and the originally-planned 75-minute A/B would have measured
+nothing.
 
-This kills the activity hypothesis outright: the discriminating variable was
-never write-activity, and the originally-planned 75-minute A/B would have
-measured nothing. One ~65-minute session answered it for the cost of a CPU box.
+**Not established: which half of `adopt` fixed it.** Flagged by
+`labkit-assistant`, who supplied the original evidence and did not want to hand
+over a second wrong conclusion. `adopt` does two things at once — it mints a
+fresh proxy **token** and re-resolves the assignment's proxy **URL**. Token
+expiry and endpoint rebinding predict identical observations here, so the
+script's `VERDICT=TOKEN_EXPIRY` label overstates what the run measured. The
+endpoint *id* was unchanged (we re-adopted the same one), which rules out
+reassignment to a different VM, but not a changed proxy URL.
+
+Issue #3's documented TTL makes token expiry the better-supported reading, and
+61 minutes on both runs matches its ~60-minute interval. It remains the leading
+hypothesis, not a measurement.
+
+**Why the fix is correct either way:** `JobTransport` rebuilds its
+`ContentsClient` from a freshly-resolved assignment, taking the new token *and*
+the new URL. It is refresh-and-retry and re-resolve-and-retry in one step, so
+both mechanisms are covered. The open question is explanatory, not operational.
+
+**The discriminating measurement, for whoever runs the next long job:** at the
+first failure, before re-adopting, capture the stored `(token, url)` and the
+pair returned by a fresh `list_assignments()`. Token differs and URL identical
+→ expiry. URL differs → rebinding. Retrying the failing read with the old token
+against the new URL (and vice versa) separates them outright. Cost: one GET on
+a session you already hold.
 
 **The field report is evidence *against* the activity hypothesis, not for it.**
 The earlier revision of this section cited it backwards. Their job wrote

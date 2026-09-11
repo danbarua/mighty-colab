@@ -270,9 +270,8 @@ def apply(
 ):
     """Execute a plan: provision through teardown.
 
-    Refuses a spec whose hash does not match the plan's. A plan is a
-    durable artifact that may be applied hours after it was written, and
-    "the thing I reviewed" must be the thing that runs.
+    Refuses a `plan.json` whose embedded spec disagrees with its own
+    recorded hash.
     """
     from colab_cli.common import state
     from colab_cli.job.models import Plan
@@ -292,23 +291,26 @@ def apply(
         typer.echo("[colab] Pass a plan file or --job-id.", err=True)
         raise typer.Exit(1)
 
-    # The thing that was reviewed must be the thing that runs. A plan is a
-    # durable file: it can be edited, or hand-written, between `plan` and
-    # `apply`. Re-derive the hash rather than trusting the one recorded
-    # inside the same file -- a self-certifying document certifies nothing.
+    # Integrity of `plan.json` itself -- NOT drift from the user's YAML.
+    # `apply` never re-reads the spec file: the plan embeds the spec it
+    # captured, so editing `spec.yaml` afterwards cannot affect this run.
+    # What can happen is the plan file being hand-edited or truncated, and
+    # then `spec` and `spec_hash` disagree. That matters because `apply`
+    # does not re-run the plan-time gates (unknown accelerator, path
+    # escape, non-HTTPS URL), so an edited plan would walk straight past
+    # them.
     #
-    # The hash canonicalises URL query strings out, so re-signing the same
-    # object does NOT invalidate a plan, while pointing at a different
-    # object does. That is the distinction worth enforcing: it is also what
-    # stops a hand-edited plan from bypassing the plan-time gates (unknown
-    # accelerator, path escape, non-HTTPS URL) that `apply` itself does not
-    # re-run.
+    # Re-derive rather than trust the recorded value: a self-certifying
+    # document certifies nothing. The hash canonicalises URL query strings
+    # out, so re-signing the same object does not trip this, while
+    # pointing at a different object does.
     actual = spec_hash(p.spec)
     if actual != p.spec_hash:
         typer.echo(
-            "[colab] This plan's spec does not match its recorded hash "
-            f"(plan says {p.spec_hash[:12]}, spec hashes to {actual[:12]}). "
-            "The spec was changed after planning. Re-run `job plan`.",
+            "[colab] This plan file is inconsistent: its spec does not match "
+            f"its own recorded hash (recorded {p.spec_hash[:12]}, spec hashes "
+            f"to {actual[:12]}). The plan was modified or truncated after it "
+            "was written. Re-run `job plan` to produce a fresh one.",
             err=True,
         )
         raise typer.Exit(1)
