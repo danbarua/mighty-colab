@@ -16,6 +16,7 @@ log:
 2026-09-11: Fixed [#20](https://github.com/danbarua/mighty-colab/issues/20): plans record each source file's relative path, size, and SHA-256; apply refuses added, removed, renamed, or changed files before assignment and stages only locked bytes. Signed-URL query canonicalization is unchanged.
 2026-09-11: Fixed [#19](https://github.com/danbarua/mighty-colab/issues/19): apply claims a job ID with an exclusive lock before assignment; a live second owner fails before `assign`; a dead owner's lock is taken over; a job that already has an endpoint is refused.
 2026-09-11: Fixed [#22](https://github.com/danbarua/mighty-colab/issues/22): apply stages, polls, cancels, and recovers through one JobTransport; Contents requests and assignment re-resolution use connect/read deadlines; kernel restart has an explicit timeout; timed-out writes confirm before retry; exhausted transport stalls stay degraded unless the assignment is proven gone.
+2026-09-11: Fixed [#25](https://github.com/danbarua/mighty-colab/issues/25): untrusted job URLs are resolved; any non-public IPv4/IPv6 answer is rejected, including mixed DNS; each request connects to an address from that lookup; redirects are re-checked; HTTPS remains required.
 
 
 
@@ -153,9 +154,8 @@ v0 accepts caller-supplied HTTPS GET/PUT URLs. The VM uses `urllib`; it has no G
 
 `plan` uses a one-byte ranged GET only for `data[]` URLs. It does not issue HEAD and does not mutate artifact or control destinations. It parses recognizable signature expiry fields on all URL fields. Data and artifact URLs must cover `wall_clock + 15 minutes`; control URLs must cover `retry.budget_seconds + 15 minutes`. `control.result` is optional, and the planner does not prove that its PUT and GET URLs name the same object.
 
-The public-host check rejects literal private/link-local addresses that it recognizes. It does not resolve hostnames before deciding and currently misses at least IPv6 link-local forms; it is not a complete SSRF boundary.
 
-The runner reads each data response fully into memory before writing and hashing it, and reads each artifact fully into memory before PUT. These are not streaming paths. Source staging also uploads each file as one Contents API payload. The enforced 250 MB ceiling is per source file and is checked during apply, after provisioning; there is no aggregate bundle limit and no corresponding artifact-size ceiling.
+The public-host check resolves DNS and rejects a destination unless every IPv4 and IPv6 answer is global unicast. Mixed public/non-public answers fail closed. Each Contents-independent GET/PUT connects to an address from that lookup with the original hostname as SNI/Host, so DNS cannot be rebound between check and connect. Redirect targets are resolved and checked the same way. HTTPS remains required.
 
 Each staged data item can carry `size_bytes` and an exact 64-hex-character `sha256`; the model normalizes the digest to lowercase and the runner verifies both fields when present. Declared data and artifact sizes both contribute to the free-disk refusal. Each artifact result records status, hash, and byte count when available. PUT failures are not retried automatically. A 403 caused by an expired signature may be labelled `refresh_urls` by some classified paths, but not every phase failure currently receives a `retry_class`.
 
@@ -442,7 +442,6 @@ These are current implementation limits, not hypothetical polish:
 - **Memory and size:** data GET and artifact PUT buffer whole objects in RAM. The 250 MB source limit is per file, enforced after allocation; there is no aggregate bundle ceiling.
 - **Signed secrets:** generated specs, plans, manifests, envelopes, events, diagnostics, and kernel launch history contain query-free URL identities and opaque credential references only. Caller-owned source specs and generated owner-mode `.mighty-colab-secrets.json` sidecars still contain full URLs and require credential handling.
 - **Declared but inactive controls:** planning rejects non-default retry/recreate/resume settings, `control.log`, and `on_run_fail: skip`. `control.result.get_url` remains manual, and PUT/GET object equivalence is not validated.
-- **Network containment:** host checks do not resolve DNS and miss at least IPv6 link-local forms.
 - **Process containment:** tagged escapees are reported, not killed. The dedicated shipped-path setsid case remains unverified.
 - **CLI/JSON consistency:** the job-group help summary omits `list`. Some early file/plan read failures still emit stderr rather than a JSON envelope. A failed apply can exit the process with status 1 while its outer JSON wrapper says `exit_code: 0`.
 - **Remote provenance:** the runner's off-VM control result does not carry `cli_version`; only the local job envelope does.

@@ -55,6 +55,10 @@ below corresponds to a tag of the same name.
   requests and assignment re-resolution use connect/read deadlines, kernel
   restart has an explicit timeout, timed-out writes confirm before retry,
   and exhausted stalls stay degraded unless the assignment is proven gone.
+- **Job URL checks only inspected literal hosts.** Untrusted data, artifact,
+  and control URLs are now resolved. Any non-public IPv4/IPv6 answer is
+  rejected, including mixed DNS. Each request connects to an address from
+  that lookup; redirects are re-checked; HTTPS remains required.
 
 - **`job` sessions did not retain the kernel that launched their detached
   runner.** The session record now persists the runtime's kernel and Jupyter
