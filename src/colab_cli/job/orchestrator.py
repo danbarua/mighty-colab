@@ -35,6 +35,8 @@ import time
 import uuid
 from typing import Callable, List, Optional, Tuple
 
+
+from colab_cli.auto_update import get_app_version
 from colab_cli.job.models import (
     ArtifactResult,
     Cleanup,
@@ -119,7 +121,9 @@ class Orchestrator:
         self.session_store = session_store
         self.emit = emit or (lambda _m: None)
 
-        self.env = JobEnvelope(job_id=self.job_id, phase=Phase.PLAN)
+        self.env = JobEnvelope(
+            cli_version=get_app_version(), job_id=self.job_id, phase=Phase.PLAN
+        )
         self.session_state = None
         self._runtime = None
 
@@ -375,6 +379,9 @@ class Orchestrator:
         """
         self._set_phase(Phase.RUN)
         args = json.dumps(self.spec.code.args)
+        result_put_url = (
+            self.spec.control.result.put_url if self.spec.control.result else None
+        )
         code = (
             "import json, os, subprocess, sys\n"
             f"d = {self.remote_dir!r}\n"
@@ -385,6 +392,9 @@ class Orchestrator:
             "       '--job-dir', d,\n"
             f"      '--deadline', str({self.spec.budgets.wall_clock}),\n"
             f"      '--entry', os.path.join(d, 'src', {self.spec.code.entry!r})]\n"
+            f"result_put_url = {result_put_url!r}\n"
+            "if result_put_url is not None:\n"
+            "    cmd += ['--result-put-url', result_put_url]\n"
             "if os.path.exists(os.path.join(d, 'stage.manifest.json')):\n"
             "    cmd += ['--stage-manifest', os.path.join(d, 'stage.manifest.json')]\n"
             "if os.path.exists(os.path.join(d, 'offload.manifest.json')):\n"

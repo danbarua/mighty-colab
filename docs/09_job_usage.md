@@ -1,6 +1,7 @@
 ---
 log:
 2026-09-11: First version. Usage guide for `mighty-colab job`, written for an agent (or a human) running real science unattended. Design rationale lives in `docs/08_job.md`; this file is how to drive it.
+2026-09-11: Added the GCS `control.result` signing sequence after live testing exposed two requirements: pre-create the object before signing GET, and pass the signed PUT through to the remote runner. The repaired path overwrote the placeholder with a terminal result; nested job envelopes now identify their creating CLI version. Signed GCS data input and artifact output were also verified live.
 ---
 
 # Running a job
@@ -172,6 +173,35 @@ artifacts:
 The VM pulls and pushes these itself. The URLs never enter your process's
 environment and are never written to the session log.
 
+### Off-VM result backstop
+
+`control.result` is optional defence-in-depth: the runner PUTs its terminal
+`result.json` to an object that remains readable if the VM later disappears.
+GCS cannot sign a GET for an object that does not exist, so create a fresh
+placeholder **before** signing the GET URL:
+
+```bash
+OBJECT=gs://your-job-bucket/runs/$JOB_ID/result.json
+SIGNER=your-job-signer@your-project.iam.gserviceaccount.com
+REGION=US
+
+PUT_URL="$(gcloud storage sign-url "$OBJECT" \
+  --impersonate-service-account="$SIGNER" --region="$REGION" \
+  --http-verb=PUT --duration=8h --format='value(signed_url)')"
+printf '{}\n' | curl --fail --silent --show-error -X PUT \
+  -H 'Content-Type: application/octet-stream' --data-binary @- "$PUT_URL"
+GET_URL="$(gcloud storage sign-url "$OBJECT" \
+  --impersonate-service-account="$SIGNER" --region="$REGION" \
+  --http-verb=GET --duration=8h --format='value(signed_url)')"
+```
+
+Put those values under `control.result.put_url` and `.get_url`. Do not add
+`--headers` to `sign-url`: the runner sends
+`Content-Type: application/octet-stream`; signing a different header turns the
+later PUT into a bare 403. The object name MUST be unique per job, and `{}` is
+only a placeholder, never a completed verdict. Keep both URLs out of logs and
+ensure their duration covers the wall-clock budget plus teardown.
+
 **Artifacts are uploaded even when your run fails.** A crashed job's last
 checkpoint is usually the thing you most want, and `on_run_fail:
 offload_anyway` is the default.
@@ -239,10 +269,6 @@ mighty-colab sessions            # the real answer about what is billing
 
 Be aware of these before trusting a long run:
 
-- **The signed-URL data plane has never been exercised against a real bucket.**
-  This is the biggest one: `data:` and `artifacts:` are implemented and unit
-  tested, but no live run has yet pulled or pushed a real signed URL. Treat
-  your first one as a test.
 - **No GPU run has yet outlived the ~60 minute token boundary.** The refresh
   is implemented and the boundary is characterised, but the combination is
   unproven.
@@ -258,6 +284,12 @@ after the restart; the failure path (`KeyError` ->
 `workload: failed`, `exception` carried off-VM, `retry_class: fix_code`,
 `cleanup: released`, `apply` exits 1); and token expiry at t+61min recovering
 via re-adopt.
+
+The signed-URL paths are also verified against a real GCS bucket: a declared
+input passed sha256 validation, a declared artifact was recovered
+byte-identically, and `control.result` replaced its `{}` placeholder with the
+runner's terminal result. The first control run exposed a missing launch
+argument; the successful result above is from the repaired path.
 
 Please report what breaks — the failure modes above were all found by running
 the thing, not by reading it.

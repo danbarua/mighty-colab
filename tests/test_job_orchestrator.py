@@ -21,18 +21,23 @@ value of the envelope is that an unattended agent can act on it without
 reading the implementation.
 """
 
+from contextlib import redirect_stdout
 from enum import Enum
+from io import StringIO
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, mock_open, patch
 
 import pytest
 
+from colab_cli.auto_update import get_app_version
 from colab_cli.job.models import (
     Accelerator,
     ArtifactItem,
     Budgets,
     Cleanup,
     CodeSpec,
+    Control,
+    ControlChannel,
     DataItem,
     JobEnvelope,
     JobSpec,
@@ -80,6 +85,58 @@ def _orch(tmp_path, spec=None, client=None, runtime=None):
         session_store=MagicMock(),
     )
 
+
+class _LaunchRuntime:
+    """Execute the launch cell while capturing what the runner receives."""
+
+    def __init__(self):
+        self.argv = None
+
+    def execute_code(self, code, timeout):
+        def capture(argv, **_kwargs):
+            self.argv = argv
+            return SimpleNamespace(pid=4312)
+
+        stdout = StringIO()
+        with (
+            patch("os.makedirs"),
+            patch("os.path.exists", return_value=False),
+            patch("builtins.open", mock_open()),
+            patch("subprocess.Popen", side_effect=capture),
+            redirect_stdout(stdout),
+        ):
+            exec(code, {})
+        return [{"text": stdout.getvalue()}]
+
+
+
+def test_launch_delivers_control_result_url_before_consumer_args(tmp_path):
+    put_url = "https://storage.example/result.json?secret=signature"
+    spec = _spec(
+        code=CodeSpec(kind="file", entry="train.py", args=["--deadline", "user"]),
+        control=Control(
+            result=ControlChannel(
+                put_url=put_url,
+                get_url="https://storage.example/result.json?secret=reader",
+            )
+        ),
+    )
+    runtime = _LaunchRuntime()
+    orch = _orch(tmp_path, spec=spec, runtime=runtime)
+    orch.session_state = SimpleNamespace(url="https://vm", token="token")
+
+    assert orch.launch("/content/jobs/unit-job/mighty_runtime") == 4312
+    separator = runtime.argv.index("--")
+    result_option = runtime.argv.index("--result-put-url")
+    assert runtime.argv[result_option + 1] == put_url
+    assert result_option < separator
+    assert runtime.argv[separator + 1 :] == ["--deadline", "user"]
+
+
+def test_job_envelope_identifies_the_cli_that_created_it(tmp_path):
+    orch = _orch(tmp_path)
+
+    assert orch.env.cli_version == get_app_version()
 
 # --------------------------------------------------------------------------
 # Envelope predicates

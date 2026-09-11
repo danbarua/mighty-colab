@@ -5,11 +5,12 @@ log:
 2026-09-11: **Corrected a wrong conclusion.** The 77min token spike lost contact at 61min and the first write-up called it "runtime reset under a live assignment" with a "no activity = reclaimed" hypothesis, citing a peer field report as corroboration. Both were wrong. Issue #3 (this repo, 2026-08-12) already documents the real cause: the runtime-proxy token has a TTL the CLI never refreshes, expiry returns **401/404** (so the "404 not 401, therefore not auth" reasoning was invalid), and it reproduces "at ~60 minute intervals" — this run failed at 61. `stop: ok` proved nothing: unassign uses the Gaia token on a different host than the Contents API's proxy token. The field report is evidence *against* the activity hypothesis — their job wrote continuously and still hit 404/401, recovering via `adopt`. Retracted "watchdog is life support"; the real consequence is that the supervisor's poll loop MUST refresh the proxy token (`list_assignments()` returns a fresh one and the CLI discards it). Next experiment replaced: re-adopt at first failure and retry the read, which discriminates in one ~65min session.
 2026-09-11: **Falsifier settled by experiment, with one confound named.** `token_discriminator_spike.py` ran the same quiet workload and, at the first Contents failure (t+61min, again), re-adopted instead of concluding: the assignment was still listed, `adopt --keep-alive` returned 0, and the immediate re-read of `launch.json` succeeded. **The files were intact the whole time** — the VM was never recycled and the activity hypothesis is dead. But `adopt` mints a fresh token *and* re-resolves the proxy URL, so the run does not separate token expiry from endpoint rebinding; the script's `VERDICT=TOKEN_EXPIRY` overstates it (caught by `labkit-assistant`, who supplied the original evidence). Issue #3's documented TTL keeps expiry the leading hypothesis. The fix is robust either way: the supervisor re-resolves the assignment and rebuilds its client from the new token *and* URL. Discriminating measurement recorded in the doc for the next long run.
 2026-09-11: **Implemented** (`src/colab_cli/job/`, `mighty-colab job plan|apply|status|destroy|list`). Four-field envelope with separate `done`/`ok`; stage+run+offload behind one kernel RPC so a dropped websocket cannot lose the run; `JobTransport` refreshes the proxy token once per 401/404 (rate-limited so routine "result.json not there yet" 404s don't re-resolve every poll). Live CPU runs: `done=True ok=True`, exit 0, VM released. Three defects found by running it rather than reading it — Contents PUT into a non-existent directory returns a bare HTTP 500 that the client attributes to the size limit (now `makedirs` first); the watchdog inherits `MIGHTY_JOB_ID` and reported itself as a surviving descendant on every job (now excluded); `retry.on` is unusable in a YAML spec because YAML 1.1 resolves a bare `on:` key to boolean true (renamed `retry.when`). Still untested: GPU session, independent kernel restart mid-run, and a real signed-URL data plane.
+2026-09-11: **Signed-URL data plane live-verified and control backstop repaired.** A live run pulled a sha256-locked GCS input and pushed a byte-identical artifact. It also exposed that `Orchestrator.launch()` did not pass the declared `control.result.put_url` to the runner, so the off-VM result remained its `{}` placeholder while the primary envelope succeeded. Added the missing runner option, stamped the nested job envelope with `cli_version`, documented GCS's create-before-signing-GET order, and reran a live CPU job: the control object contained `workload: succeeded` / `exit_code: 0`, apply reported `done=true` / `ok=true`, cleanup released the VM, and no session remained.
 ---
 
 # Design: `job` — Agent job supervisor
 
-**Implemented and live-verified** (2026-09-11). `mighty-colab job plan|apply|status|destroy|list` ships in `src/colab_cli/job/`; usage lives in `docs/09_job_usage.md`. This document is the design and the evidence behind it, not a proposal. Settled contract is written as MUST. The falsifier that gated the design — whether an unattended multi-hour job can keep a verdict without a long-lived kernel execute — is **resolved**: the loss at ~61min was proxy-token expiry, not VM loss, and the supervisor refreshes the token. Remaining `[open]` items and untested surfaces are listed at the end; the largest is that the signed-URL data plane has never run against a real bucket.
+**Implemented and live-verified** (2026-09-11). `mighty-colab job plan|apply|status|destroy|list` ships in `src/colab_cli/job/`; usage lives in `docs/09_job_usage.md`. This document is the design and evidence, not a proposal. Settled contract is written as MUST. The multi-hour falsifier is resolved: the loss at about one hour was proxy-token expiry, not VM loss, and the supervisor refreshes the token. Remaining untested surfaces are independent kernel restart mid-run and a GPU job spanning that refresh boundary.
 
 `run` stays the shebang (`new` + text-into-kernel + `stop`). `job` is the unit of work an unattended agent actually has: code, deps, data, artifacts, accelerator policy, two clocks, teardown.
 
@@ -96,6 +97,16 @@ retry:
 on_offload_fail: leave_up | destroy
 on_run_fail: offload_anyway | skip
 ```
+
+For a GCS-backed `control.result`, signing order is part of the contract. GCS
+refuses to sign GET for an object that does not exist. The caller MUST first
+sign PUT (with an explicit bucket region and no signed headers), PUT a fresh
+`{}` placeholder using `Content-Type: application/octet-stream`, and only then
+sign GET for that same object. The object name MUST be unique per job. The
+runner overwrites the placeholder with its terminal envelope; callers MUST NOT
+interpret `{}` as a verdict. Signed query strings are credentials: neither URL
+may appear in logs or serialized envelopes. Exact commands live in
+`docs/09_job_usage.md`.
 
 `resume` is an argv contract (`--resume <path>` we pass when checkpoint files exist). We do not invent a JAX training loop. No matching files → `recreate` or `stop`, never a lie. `mode: resume` on preempt/session_lost cannot use VM-local globs — those files died with the VM. v0: resume is same-VM only; lost-VM is always `recreate`. Checkpoint URL rotation is a later door.
 
@@ -249,7 +260,9 @@ ok ≡ workload=succeeded
 
 `left_up` keeps billing. Envelope MUST carry `endpoint` and `hint: job destroy when done poking`.
 
-Every envelope also carries `phase`, `retry_class`, numbered `hint`s, `requested` vs `actual` accelerator, `next_poll_after` seconds, artifact hashes when offload ran.
+Every envelope also carries `schema_version`, `cli_version`, `phase`,
+`retry_class`, numbered `hint`s, `requested` vs `actual` accelerator,
+`next_poll_after` seconds, and artifact hashes when offload ran.
 
 Local job dir (durable across agent death):
 
@@ -487,9 +500,12 @@ then `adopt`, then retry.
   `exception: KeyError: 'missing_key'` / `retry_class: fix_code`, with
   `cleanup: released` and `apply` exiting 1. Teardown ran despite the failure.
 - The spike prototype in `integration/spike_job_runner/` has no watchdog
-  process (its runner enforces `wall_clock` directly) and no data plane; the
-  shipped implementation has both a watchdog and `control.*` PUT, but the
-  signed-URL data plane has still never been exercised against a real bucket.
+  process (its runner enforces `wall_clock` directly) and no data plane. The
+  shipped implementation's signed GCS data GET and artifact PUT were verified
+  live, including sha256 input validation and byte-identical artifact recovery.
+  A second live CPU run verified `control.result.put_url`: the runner replaced a
+  pre-created `{}` object with its terminal `workload: succeeded` / `exit_code:
+  0` result, while apply reported cleanup released and no session remained.
 
 ## Known gaps
 
