@@ -53,7 +53,7 @@ from colab_cli.job.models import (
 )
 from colab_cli.job.orchestrator import Orchestrator, PhaseError, stop_session_keep_alive
 from colab_cli.job.runtime_payload import ident
-from colab_cli.job.store import JobStore, load_plan_file, write_plan_file
+from colab_cli.job.store import ApplyInProgress, JobStore, load_plan_file, write_plan_file
 
 job_app = typer.Typer(
     help="Run an unattended job on a Colab VM: plan, apply, status, destroy.",
@@ -401,6 +401,27 @@ def apply(
 
     from colab_cli.runtime import ColabRuntime
 
+    try:
+        claim = store.claim_apply(
+            p.job_id,
+            pid=os.getpid(),
+            starttime=ident.starttime(os.getpid()),
+            boot_id=ident.boot_id(),
+        )
+    except ApplyInProgress as error:
+        typer.echo(f"[colab] {error}", err=True)
+        raise typer.Exit(1) from None
+
+    existing = store.read_envelope(p.job_id)
+    if existing is not None and existing.endpoint:
+        claim.release()
+        typer.echo(
+            f"[colab] Job {p.job_id} already has endpoint {existing.endpoint}. "
+            "Use `mighty-colab job status --poll` instead of a second apply.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
     orch = Orchestrator(
         plan=p,
         store=store,
@@ -412,12 +433,7 @@ def apply(
         auth_provider=state.auth_provider,
         config_path=state.config_path,
     )
-    store.write_supervisor_identity(
-        p.job_id,
-        pid=os.getpid(),
-        starttime=ident.starttime(os.getpid()),
-        boot_id=ident.boot_id(),
-    )
+
 
     budget = timeout or (p.spec.budgets.wall_clock + 600)
     deadline = time.time() + budget
@@ -502,6 +518,7 @@ def apply(
         else:
             orch.cleanup(force_leave_up=keep)
         store.clear_supervisor_identity(p.job_id)
+        claim.release()
 
     _emit(orch.env, "apply")
     if not orch.env.ok:

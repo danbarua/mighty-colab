@@ -46,6 +46,10 @@ below corresponds to a tag of the same name.
   relative path, size, and SHA-256. Apply refuses added, removed, renamed, or
   changed files before assignment and stages only locked bytes. Signed-URL
   query canonicalization is unchanged.
+- **Two `job apply` processes could provision the same job twice.** Apply
+  now claims the job ID with an exclusive lock before assignment. A live
+  second owner fails before `assign`; a dead owner's lock is taken over;
+  a job that already has an endpoint is refused.
 
 - **`job` sessions did not retain the kernel that launched their detached
   runner.** The session record now persists the runtime's kernel and Jupyter

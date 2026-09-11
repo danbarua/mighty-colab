@@ -14,6 +14,8 @@ log:
 2026-09-11: Fixed and live-verified [#17](https://github.com/danbarua/mighty-colab/issues/17): `job apply` now starts the TFE keep-alive daemon after persisting the job session, propagates auth and `--config`, records daemon pid and last ping, stops the daemon on release or confirmed absence, and leaves it running on `--leave-up`.
 2026-09-11: Fixed and live-verified [#16](https://github.com/danbarua/mighty-colab/issues/16): provision persists the endpoint before keep-alive; a dead supervisor's `status --poll` absorbs complete runner results or classifies a dead runner from launch/watchdog identity, then finishes cleanup without overwriting a remote verdict.
 2026-09-11: Fixed [#20](https://github.com/danbarua/mighty-colab/issues/20): plans record each source file's relative path, size, and SHA-256; apply refuses added, removed, renamed, or changed files before assignment and stages only locked bytes. Signed-URL query canonicalization is unchanged.
+2026-09-11: Fixed [#19](https://github.com/danbarua/mighty-colab/issues/19): apply claims a job ID with an exclusive lock before assignment; a live second owner fails before `assign`; a dead owner's lock is taken over; a job that already has an endpoint is refused.
+
 
 
 
@@ -187,7 +189,7 @@ The explicit public `restart-kernel` path is live-verified while a detached cons
 
 Apply tries one attempt. `RetryClass` is advice for the next caller action, not an automatic retry engine. Planning rejects non-default `retry.when`, `max_attempts`, and `mode` values until retry/recreate/resume exist. Some errors are classified (`fix_code`, `fix_human`, `retry_same`, `retry_different`, `refresh_urls`, `do_not_retry`); cancellation, offload failure, and cleanup failure do not all receive the earlier table's promised class.
 
-Unexpected exceptions are caught unless `--debug` is active. The supervisor persists and emits a terminal envelope: pre-run failures become `workload: failed`; failures during or after run without a remote verdict become `unknown`; terminal remote verdicts are preserved. The endpoint is persisted in the envelope before keep-alive starts; a crash between `assign` returning and that write can still leak an assignment. Concurrent or repeated apply of the same plan has no interprocess lock or active-apply guard and can provision twice or overwrite local state.
+Unexpected exceptions are caught unless `--debug` is active. The supervisor persists and emits a terminal envelope: pre-run failures become `workload: failed`; failures during or after run without a remote verdict become `unknown`; terminal remote verdicts are preserved. The endpoint is persisted in the envelope before keep-alive starts; a crash between `assign` returning and that write can still leak an assignment. Apply claims an exclusive lock on the job ID before assignment; a live second owner fails before `assign`, a dead owner is taken over, and a job that already has an endpoint is refused.
 
 ## Envelope, `done`, `ok`
 
@@ -249,7 +251,7 @@ The local JSON writes use atomic replacement, but the store has no cross-process
 
 The permanent suite covers model validation, plan diagnostics without reflected inputs, redacted plan/spec persistence with owner-only hydration, canonical URL identity and credential-marker hashing, source-bundle credential rejection against immutable upload snapshots, expiry revalidation, isolated descriptor handoff and unlinking, interrupted-recovery deletion/forced teardown, healthy-supervisor race exclusion, runner exit/cancel behavior, duplicate remote launch, transport refresh, phase transitions, CLI parsing, and envelope truth tables. Live integrations cover CPU and T4 jobs, signed GCS data/artifact/control-result paths, dependency restart/verify, workload failure, token refresh recovery, explicit launch-kernel restart, cancel-only termination with assignment retention, and job-owned TFE keep-alive through idle leave-up and destroy.
 
-The current gaps need regression coverage before their claims can be promoted: concurrent apply exclusion; long-stage refresh/timeouts; bounded restart; streamed transfer; aggregate bundle limits; optional-upload semantics; control log; and a shipped-path setsid escapee case.
+The current gaps need regression coverage before their claims can be promoted: long-stage refresh/timeouts; bounded restart; streamed transfer; aggregate bundle limits; optional-upload semantics; control log; and a shipped-path setsid escapee case.
 
 ## Spike results (2026-09-11, live CPU VM)
 
@@ -435,7 +437,6 @@ These are current implementation limits, not hypothetical polish:
 
 - **Idle retention:** job provision owns the TFE keep-alive daemon. A multi-hour GPU run through the proxy refresh boundary has not been completed.
 - **Crash recovery:** there is still a short window between `assign` returning and the first envelope persist. Apply's own poll loop does not classify a dead remote runner from `launch.json`; `status --poll` does.
-- **Concurrency:** repeated or concurrent apply of one plan has no interprocess lock or active-job guard.
 - **Transport bounds:** source/manifests are staged with a raw `ContentsClient` that lacks `JobTransport` refresh/deadline handling. The restart request has no explicit timeout. Control-plane assignment refresh is also not bounded by the job transport's HTTP deadlines.
 - **Memory and size:** data GET and artifact PUT buffer whole objects in RAM. The 250 MB source limit is per file, enforced after allocation; there is no aggregate bundle ceiling.
 - **Signed secrets:** generated specs, plans, manifests, envelopes, events, diagnostics, and kernel launch history contain query-free URL identities and opaque credential references only. Caller-owned source specs and generated owner-mode `.mighty-colab-secrets.json` sidecars still contain full URLs and require credential handling.

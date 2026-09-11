@@ -26,6 +26,7 @@ its parent's first write, and then reports `not_found` for a job that is
 about to exist.
 """
 
+import fcntl
 import json
 import os
 import stat
@@ -40,6 +41,7 @@ PLAN_FILE = "plan.json"
 ENVELOPE_FILE = "envelope.json"
 SPEC_FILE = "spec.json"
 SUPERVISOR_IDENTITY_FILE = "supervisor.json"
+APPLY_LOCK_FILE = "apply.lock"
 
 
 SECRET_SIDECAR_SUFFIX = ".mighty-colab-secrets.json"
@@ -185,6 +187,40 @@ def write_plan_file(path: str | Path, plan: Plan) -> Path:
     return plan_path
 
 
+
+class ApplyInProgress(Exception):
+    """Another live apply already owns this job ID."""
+
+    def __init__(self, job_id: str, pid: int | None = None):
+        self.job_id = job_id
+        self.pid = pid
+        message = f"job {job_id} is already being applied"
+        if pid is not None:
+            message += f" by pid {pid}"
+        message += "; wait for it to finish or kill that process, then re-run"
+        super().__init__(message)
+
+
+class ApplyClaim:
+    """Held exclusive apply lock. Release on every apply exit path."""
+
+    def __init__(self, path: Path, fd: int):
+        self.path = path
+        self.fd = fd
+
+    def release(self) -> None:
+        if self.fd >= 0:
+            try:
+                fcntl.flock(self.fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            os.close(self.fd)
+            self.fd = -1
+        try:
+            self.path.unlink()
+        except OSError:
+            pass
+
 def redacted_model_json(model) -> str:
     return json.dumps(_redact(model.model_dump(mode="json")), indent=2)
 
@@ -247,6 +283,50 @@ class JobStore:
             self.job_dir(job_id) / SUPERVISOR_IDENTITY_FILE,
             json.dumps({"pid": pid, "starttime": starttime, "boot_id": boot_id}),
         )
+
+    def claim_apply(
+        self, job_id: str, *, pid: int, starttime: str, boot_id: str
+    ) -> ApplyClaim:
+        """Own this job ID until `ApplyClaim.release`. Fails if another apply is live."""
+        directory = self.job_dir(job_id)
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / APPLY_LOCK_FILE
+        fd = os.open(str(path), os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            owner = self._lock_identity(fd) or self.supervisor_identity(job_id)
+            os.close(fd)
+            raise ApplyInProgress(
+                job_id, owner.get("pid") if owner else None
+            ) from error
+        payload = json.dumps(
+            {"pid": pid, "starttime": starttime, "boot_id": boot_id}
+        ).encode()
+        os.ftruncate(fd, 0)
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.write(fd, payload)
+        os.fsync(fd)
+        self.write_supervisor_identity(
+            job_id, pid=pid, starttime=starttime, boot_id=boot_id
+        )
+        return ApplyClaim(path, fd)
+
+    @staticmethod
+    def _lock_identity(fd: int) -> Optional[dict]:
+        try:
+            os.lseek(fd, 0, os.SEEK_SET)
+            raw = os.read(fd, 4096)
+            value = json.loads(raw.decode())
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError):
+            return None
+        if not isinstance(value, dict):
+            return None
+        pid = value.get("pid")
+        if not isinstance(pid, int):
+            return None
+        return value
+
 
     def supervisor_identity(self, job_id: str) -> Optional[dict]:
         path = self.job_dir(job_id) / SUPERVISOR_IDENTITY_FILE

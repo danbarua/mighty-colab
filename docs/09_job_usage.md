@@ -9,6 +9,8 @@ log:
 2026-09-11: Fixed and live-verified [#18](https://github.com/danbarua/mighty-colab/issues/18): generated records and remote manifests redact signed URL queries; owner-mode sidecars and an ephemeral descriptor handoff hold the credentials; missing required handoffs fail closed; recovery scrubs or tears down; credential-bearing source files are rejected. The live CPU regression proved a signed data URL remained usable while its sentinel stayed absent from command output, durable job records, remote files, and kernel history, then confirmed teardown.
 2026-09-11: Fixed and live-verified [#16](https://github.com/danbarua/mighty-colab/issues/16): `status --poll` recovers an orphaned supervisor by absorbing a complete remote result or classifying a dead runner, then finishing cleanup.
 2026-09-11: Fixed [#20](https://github.com/danbarua/mighty-colab/issues/20): plans lock source path/size/SHA-256; apply refuses drift before assignment and stages only locked bytes.
+2026-09-11: Fixed [#19](https://github.com/danbarua/mighty-colab/issues/19): apply claims the job ID before assignment; a live second owner fails closed; a stale lock is taken over; a job that already has an endpoint is refused.
+
 
 
 2026-09-11: Fixed and live-verified [#17](https://github.com/danbarua/mighty-colab/issues/17): `job apply` starts and owns the TFE keep-alive daemon; destroy/cleanup stop it except on deliberate leave-up.
@@ -286,7 +288,6 @@ mighty-colab sessions            # server-side assignment inventory
 Be aware of these before trusting a long run:
 
 - No GPU run has yet outlived the approximately 60-minute proxy refresh boundary.
-- Concurrent or repeated apply of one plan has no lock.
 - Stage uploads lack the result poller's refresh/deadline wrapper; restart has no explicit timeout.
 - Data GET and artifact PUT buffer whole objects; source size is limited per file only after allocation, with no aggregate bundle ceiling.
 - Caller-owned source specs and generated `.mighty-colab-secrets.json` sidecars still contain full signed URLs and require credential handling.
