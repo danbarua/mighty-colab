@@ -180,6 +180,60 @@ class JobTransport:
 
         return self._write(remote_path, value)
 
+    def remove(self, remote_path: str) -> ReadStatus:
+        """Delete a remote file and confirm it cannot still be read."""
+        refresh_attempted = False
+        transient_retries = 0
+
+        while True:
+            try:
+                self._contents._request("DELETE", remote_path, timeout=self.timeout)
+                break
+            except FileNotFoundError:
+                break
+            except Exception as error:  # Contents and Requests expose several exception types.
+                status_code = self._status_code(error)
+                if status_code in (401, 404) and not refresh_attempted:
+                    refresh_attempted = True
+                    refresh_status = self._refresh_token()
+                    if refresh_status is not ReadStatus.OK:
+                        return refresh_status
+                    continue
+                if self._is_transient(error) and transient_retries < self.max_retries:
+                    self._sleep(self.backoff_factor * (2**transient_retries))
+                    transient_retries += 1
+                    continue
+                return self._classify_endpoint()
+
+        confirmation_refresh_attempted = False
+        transient_retries = 0
+        while True:
+            try:
+                self._contents._request(
+                    "GET",
+                    remote_path,
+                    params={"content": "0"},
+                    timeout=self.timeout,
+                )
+                return ReadStatus.DEGRADED
+            except FileNotFoundError:
+                return ReadStatus.OK
+            except Exception as error:  # Contents and Requests expose several exception types.
+                status_code = self._status_code(error)
+                if status_code in (401, 404) and not confirmation_refresh_attempted:
+                    confirmation_refresh_attempted = True
+                    refresh_status = self._refresh_token()
+                    if refresh_status is ReadStatus.SESSION_LOST:
+                        return ReadStatus.OK
+                    if refresh_status is not ReadStatus.OK:
+                        return ReadStatus.DEGRADED
+                    continue
+                if self._is_transient(error) and transient_retries < self.max_retries:
+                    self._sleep(self.backoff_factor * (2**transient_retries))
+                    transient_retries += 1
+                    continue
+                return ReadStatus.DEGRADED
+
     def _write(self, remote_path: str, payload: str) -> ReadStatus:
         refresh_attempted = False
         transient_retries = 0

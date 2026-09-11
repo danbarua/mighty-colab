@@ -2,15 +2,51 @@
 
 from __future__ import annotations
 
-import gzip
-import io
+import hashlib
 import json
 import os
-import tarfile
+import shutil
+import stat
 import tempfile
+import urllib.parse
 from pathlib import Path
 
+import yaml
+
 from colab_cli.contents import ContentsClient
+from colab_cli.job.spec_io import url_id
+from colab_cli.job.store import SECRET_SIDECAR_SUFFIX, SECRET_TEMP_PREFIX
+
+
+def _contains_typed_url_query(value) -> bool:
+    if isinstance(value, list):
+        return any(_contains_typed_url_query(item) for item in value)
+    if not isinstance(value, dict):
+        return False
+    for key, item in value.items():
+        normalized = key.casefold() if isinstance(key, str) else ""
+        if (
+            (normalized == "url" or normalized.endswith("_url"))
+            and isinstance(item, str)
+            and urllib.parse.urlsplit(item).scheme.casefold() in {"http", "https"}
+            and urllib.parse.urlsplit(item).query
+        ):
+            return True
+        if _contains_typed_url_query(item):
+            return True
+    return False
+
+
+def _reject_structured_url_queries(snapshot: Path) -> None:
+    try:
+        value = yaml.safe_load(snapshot.read_text(encoding="utf-8"))
+    except (UnicodeDecodeError, yaml.YAMLError):
+        return
+    if _contains_typed_url_query(value):
+        raise ValueError("code payload contains a credential-bearing URL query")
+
+
+
 _RUNTIME_DIR = Path(__file__).with_name("runtime_payload")
 CONTENTS_UPLOAD_CEILING = 250 * 1024 * 1024
 
@@ -24,79 +60,6 @@ def _code_value(spec, name, default=None):
     if isinstance(code, dict):
         return code.get(name, default)
     return getattr(code, name, default)
-
-
-def _normalise_info(info):
-    """Strip local ownership and timestamps for reproducible archive bytes."""
-    info.uid = 0
-    info.gid = 0
-    info.uname = ""
-    info.gname = ""
-    info.mtime = 0
-    return info
-
-
-def _add_runtime(archive):
-    for path in sorted(_RUNTIME_DIR.rglob("*")):
-        if path.is_dir() or path.name == "__pycache__" or path.suffix == ".pyc":
-            continue
-        relative = path.relative_to(_RUNTIME_DIR)
-        archive.add(
-            path,
-            arcname=Path("mighty_runtime") / relative,
-            recursive=False,
-            filter=_normalise_info,
-        )
-
-
-def _add_user(archive, source, entry):
-    source = Path(source)
-    if not source.exists():
-        raise FileNotFoundError(source)
-    entry = Path(entry)
-    if source.is_file():
-        archive.add(source, arcname=entry, recursive=False, filter=_normalise_info)
-        return
-
-    # A bundle directory is copied as its contents, not as an absolute or
-    # host-specific parent directory. This keeps sibling imports and the
-    # declared entry path intact after extraction on the VM.
-    for path in sorted(source.rglob("*")):
-        if (
-            path.is_dir()
-            or path.name in {".git", "__pycache__", ".venv"}
-            or path.suffix == ".pyc"
-        ):
-            continue
-        relative = path.relative_to(source)
-        if any(part in {".git", "__pycache__", ".venv"} for part in relative.parts):
-            continue
-        archive.add(
-            path,
-            arcname=relative,
-            recursive=False,
-            filter=_normalise_info,
-        )
-
-
-def build_payload_tarball(spec, entry_src_path) -> bytes:
-    """Return a gzip tarball containing runtime and the user's code.
-
-    Runtime files are always rooted at ``mighty_runtime/``. A file payload is
-    stored at ``spec.code.entry``; a bundle directory is stored at the bundle
-    root so its relative imports remain valid. ``entry_src_path`` is never
-    transmitted or interpreted as an archive path.
-    """
-    entry = _code_value(spec, "entry")
-    if not isinstance(entry, str) or not entry or os.path.isabs(entry):
-        raise ValueError("spec.code.entry must be a relative path")
-
-    output = io.BytesIO()
-    with gzip.GzipFile(fileobj=output, mode="wb", mtime=0) as compressed:
-        with tarfile.open(fileobj=compressed, mode="w") as archive:
-            _add_runtime(archive)
-            _add_user(archive, entry_src_path, entry)
-    return output.getvalue()
 
 
 def _job_attr(item, name, default=None):
@@ -136,10 +99,110 @@ def _upload_checked(
     client.upload(str(local_path), remote_path)
 
 
-def _iter_user_files(spec):
+def _validate_user_file(path: Path, root: Path) -> None:
+    if path.is_symlink():
+        raise ValueError("code payload must not contain symbolic links")
+    try:
+        path.resolve(strict=True).relative_to(root.resolve(strict=True))
+    except (FileNotFoundError, ValueError):
+        raise ValueError("code payload file escapes its declared root") from None
+    if path.lstat().st_nlink != 1:
+        raise ValueError("code payload must not contain hard-linked files")
+
+
+_URL_DELIMITERS = frozenset(b" \t\r\n\"'<>(){}")
+_SECRET_QUERY_KEYS = frozenset(
+    {
+        b"access_token",
+        b"awsaccesskeyid",
+        b"googleaccessid",
+        b"sig",
+        b"signature",
+        b"token",
+        b"x-amz-credential",
+        b"x-amz-security-token",
+        b"x-amz-signature",
+        b"x-goog-credential",
+        b"x-goog-signature",
+    }
+)
+
+
+def _reject_credential_content(path: Path) -> None:
+    recent = bytearray()
+    in_url = False
+    query_key = None
+    try:
+        source = path.open("rb")
+    except OSError:
+        return
+    with source:
+        for block in iter(lambda: source.read(64 * 1024), b""):
+            for byte in block:
+                lowered = byte + 32 if ord("A") <= byte <= ord("Z") else byte
+                if in_url:
+                    if byte in _URL_DELIMITERS:
+                        in_url = False
+                        query_key = None
+                        recent.clear()
+                    elif byte == ord("?") and query_key is None:
+                        query_key = bytearray()
+                    elif isinstance(query_key, bytearray):
+                        if byte in b"=&;#":
+                            if bytes(query_key) in _SECRET_QUERY_KEYS:
+                                raise ValueError(
+                                    "code payload contains a credential-bearing URL; "
+                                    "move transfer URLs into the active job spec"
+                                )
+                            query_key = bytearray() if byte in b"&;" else False
+                            if byte == ord("#"):
+                                in_url = False
+                        elif len(query_key) <= 64:
+                            query_key.append(lowered)
+                    elif query_key is False:
+                        if byte in b"&;":
+                            query_key = bytearray()
+                        elif byte == ord("#"):
+                            in_url = False
+                    continue
+                recent.append(lowered)
+                if len(recent) > 8:
+                    del recent[0]
+                if recent.endswith(b"https://") or recent.endswith(b"http://"):
+                    in_url = True
+                    query_key = None
+
+
+def _snapshot_user_file(path: Path) -> Path:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+            raise ValueError("code payload changed while it was being staged")
+        with tempfile.NamedTemporaryFile(
+            mode="wb", delete=False, prefix=".mighty-colab-code-"
+        ) as target:
+            snapshot = Path(target.name)
+            with os.fdopen(fd, "rb", closefd=False) as source:
+                shutil.copyfileobj(source, target, length=64 * 1024)
+    finally:
+        os.close(fd)
+    try:
+        _reject_credential_content(snapshot)
+        _reject_structured_url_queries(snapshot)
+    except Exception:
+        snapshot.unlink(missing_ok=True)
+        raise
+    return snapshot
+
+def _iter_user_files(spec, source_spec_path=None):
     entry = _code_value(spec, "entry")
     root = _code_value(spec, "root", ".") or "."
     root_path = Path(root)
+    excluded = (
+        {Path(source_spec_path).resolve(strict=False)} if source_spec_path else set()
+    )
     kind = _code_value(spec, "kind", "file")
     if kind == "file":
         path = Path(entry)
@@ -147,6 +210,12 @@ def _iter_user_files(spec):
             path = root_path / path
         if not path.is_file():
             raise FileNotFoundError(f"code entry does not exist: {path}")
+        if path.resolve(strict=False) in excluded or (
+            path.name.endswith(SECRET_SIDECAR_SUFFIX)
+            or path.name.startswith(SECRET_TEMP_PREFIX)
+        ):
+            raise ValueError("code entry is a reserved credential record")
+        _validate_user_file(path, root_path)
         yield path, Path(entry)
         return
     if kind != "bundle":
@@ -154,11 +223,19 @@ def _iter_user_files(spec):
     if not root_path.is_dir():
         raise FileNotFoundError(f"code bundle root does not exist: {root_path}")
     for path in sorted(root_path.rglob("*")):
-        if path.is_dir() or path.suffix == ".pyc":
-            continue
         relative = path.relative_to(root_path)
         if any(part in {".git", "__pycache__", ".venv"} for part in relative.parts):
             continue
+        if path.is_symlink():
+            raise ValueError("code payload must not contain symbolic links")
+        if path.is_dir() or path.suffix == ".pyc":
+            continue
+        if path.resolve(strict=False) in excluded or (
+            path.name.endswith(SECRET_SIDECAR_SUFFIX)
+            or path.name.startswith(SECRET_TEMP_PREFIX)
+        ):
+            continue
+        _validate_user_file(path, root_path)
         yield path, relative
 
 
@@ -177,26 +254,30 @@ def _write_manifest(client, remote_dir, name, rows, made_dirs=None):
         local_path.unlink(missing_ok=True)
 
 
-
 def _write_secret(client, remote_path, value, made_dirs=None):
-    with tempfile.NamedTemporaryFile(mode="w", delete=False) as f:
+    with tempfile.NamedTemporaryFile(
+        mode="w", delete=False, prefix=SECRET_TEMP_PREFIX
+    ) as f:
         f.write(value)
         f.flush()
         local_path = Path(f.name)
     try:
+        local_path.chmod(0o600)
         _upload_checked(client, local_path, remote_path, made_dirs)
     finally:
         local_path.unlink(missing_ok=True)
 
-def stage_payload(*, spec, job_id: str, session, remote_dir: str) -> None:
-    """Upload runtime/code, manifests, and the control-result secret file.
 
-    Every upload is checked before calling the API. This prevents the
-    Contents chunked PUT path from receiving a payload above its known live
-    ceiling; callers should put large inputs behind ``spec.data`` URLs.
-    """
-    del job_id  # The remote directory already contains the orchestrator ID.
+def _url_ref(url: str) -> str:
+    return hashlib.sha256(url.encode("utf-8")).hexdigest()
 
+
+def stage_payload(
+    *, spec, job_id: str, session, remote_dir: str, source_spec_path=None
+) -> None:
+    """Upload public payload files before the owner-only URL channel."""
+
+    del job_id
     client = ContentsClient(session)
     made_dirs: set = set()
     runtime_remote = _remote_join(remote_dir, "mighty_runtime")
@@ -210,39 +291,70 @@ def stage_payload(*, spec, job_id: str, session, remote_dir: str) -> None:
         )
 
     src_remote = _remote_join(remote_dir, "src")
-    for local_path, relative in _iter_user_files(spec):
-        _upload_checked(
-            client, local_path, _remote_join(src_remote, str(relative)), made_dirs
+    for local_path, relative in _iter_user_files(spec, source_spec_path):
+        snapshot = _snapshot_user_file(local_path)
+        try:
+            _upload_checked(
+                client, snapshot, _remote_join(src_remote, str(relative)), made_dirs
+            )
+        finally:
+            snapshot.unlink(missing_ok=True)
+
+    urls = {}
+    data_rows = []
+    for item in _job_attr(spec, "data", []) or []:
+        url = _job_attr(item, "url")
+        reference = _url_ref(url)
+        urls[reference] = url
+        data_rows.append(
+            {
+                "url_id": url_id(url),
+                "url_ref": reference,
+                "dest": _job_attr(item, "dest"),
+                "sha256": _job_attr(item, "sha256"),
+                "size_bytes": _job_attr(item, "size_bytes"),
+            }
         )
 
-    data_rows = [
-        {
-            "url": _job_attr(item, "url"),
-            "dest": _job_attr(item, "dest"),
-            "sha256": _job_attr(item, "sha256"),
-            "size_bytes": _job_attr(item, "size_bytes"),
-        }
-        for item in (_job_attr(spec, "data", []) or [])
-    ]
-    artifact_rows = [
-        {
-            "path": _job_attr(item, "path"),
-            "url": _job_attr(item, "url"),
-            "required": _job_attr(item, "required", True),
-        }
-        for item in (_job_attr(spec, "artifacts", []) or [])
-    ]
+    artifact_rows = []
+    for item in _job_attr(spec, "artifacts", []) or []:
+        url = _job_attr(item, "url")
+        reference = _url_ref(url)
+        urls[reference] = url
+        artifact_rows.append(
+            {
+                "url_id": url_id(url),
+                "url_ref": reference,
+                "path": _job_attr(item, "path"),
+                "required": _job_attr(item, "required", True),
+            }
+        )
+
     _write_manifest(client, remote_dir, "stage.manifest.json", data_rows, made_dirs)
     _write_manifest(
         client, remote_dir, "offload.manifest.json", artifact_rows, made_dirs
     )
+
     control = _job_attr(spec, "control")
     result_channel = _job_attr(control, "result") if control is not None else None
     result_put_url = _job_attr(result_channel, "put_url")
+    result_put_ref = None
     if result_put_url:
+        result_put_ref = _url_ref(result_put_url)
+        urls[result_put_ref] = result_put_url
+
+    if urls:
+        secret_dir = _remote_join(runtime_remote, ".secrets")
+        made_dirs.add(secret_dir)
         _write_secret(
             client,
-            _remote_join(runtime_remote, "result.put-url"),
-            result_put_url,
+            _remote_join(secret_dir, "transfer.json"),
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "urls": urls,
+                    "result_put_ref": result_put_ref,
+                }
+            ),
             made_dirs,
         )

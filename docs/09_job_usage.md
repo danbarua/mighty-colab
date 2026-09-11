@@ -6,6 +6,7 @@ log:
 2026-09-11: Audited this guide against the implemented CLI, schema, state machine, transport, and tests. Corrected command syntax, plan and bundle behavior, envelope semantics, signed-URL persistence, and supervisor recovery; added the current operational limits.
 2026-09-11: Addressed PR #15 peer review: cancellation now reaches detached workloads, destroy preserves remote verdicts, SHA-256 input is validated, supervisor failures terminalize, control PUT credentials stay out of kernel history, unsupported policies fail planning, status absorbs full remote results, and declared artifact sizes count in the disk gate. Source-byte locking remains [#20](https://github.com/danbarua/mighty-colab/issues/20).
 2026-09-11: Live-verified `destroy --cancel-only` against a running CPU workload: the remote verdict became `cancelled`, the assignment remained listed until full destroy, and final teardown removed the endpoint.
+2026-09-11: Fixed and live-verified [#18](https://github.com/danbarua/mighty-colab/issues/18): generated records and remote manifests redact signed URL queries; owner-mode sidecars and an ephemeral descriptor handoff hold the credentials; missing required handoffs fail closed; recovery scrubs or tears down; credential-bearing source files are rejected. The live CPU regression proved a signed data URL remained usable while its sentinel stayed absent from command output, durable job records, remote files, and kernel history, then confirmed teardown.
 ---
 
 # Running a job
@@ -35,7 +36,7 @@ That is the whole idea. The detached consumer survives a dropped launch-kernel c
 - `job apply` does **not** start the TFE keep-alive daemon. An idle launch kernel can therefore be pruned during a long job.
 - `job status --poll` observes `result.json`; it does not take over offload or cleanup after the original supervisor dies.
 - Source staging is not resumable and has weaker timeout/token-refresh handling than result polling.
-- Signed URLs are stored unredacted in local plan/spec files and remote data/artifact manifests. Treat those files as credentials.
+- Caller-owned source specs and generated owner-mode `.mighty-colab-secrets.json` sidecars contain full signed URLs. Generated records, remote manifests, diagnostics, and kernel history contain only canonical identities and credential references.
 
 Use `mighty-colab sessions` after every interrupted run and explicitly destroy any endpoint you no longer need.
 
@@ -49,7 +50,7 @@ mighty-colab job destroy JOB_ID [--cancel-only]
 mighty-colab job list
 ```
 
-`plan` never allocates a VM. It does write `spec.json` and `plan.json`, writes an explicit `--out` path, and by default performs one-byte ranged GET probes of declared data URLs. `--no-probe` disables those network reads. Plans are written even when they contain warnings or errors; `apply` refuses errors and refuses warnings unless the spec sets `ignore_warnings: true`.
+`plan` never allocates a VM. It writes redacted `spec.json` and `plan.json` records, writes a redacted explicit `--out` path, and creates an adjacent mode-0600 `.mighty-colab-secrets.json` sidecar when query credentials exist. Keep that sidecar beside the plan: `apply` validates and hydrates it before allocation. By default planning also performs one-byte ranged GET probes of declared data URLs; `--no-probe` disables those reads. Plans are written even with warnings or errors; `apply` refuses errors and refuses warnings unless the spec sets `ignore_warnings: true`.
 
 `apply` accepts either a plan-file positional argument or `--job-id`. `--timeout` bounds the local supervisor, not the watchdog wall clock. `--leave-up` keeps the VM after completion. `destroy --cancel-only` writes cancellation intent that runner and watchdog consume, but deliberately does not unassign the VM; failure to write the intent is an error. `list` reads local job records.
 
@@ -183,7 +184,7 @@ Use a full 64-hex-character SHA-256 digest. Relative destinations resolve below 
 
 Source staging still uses the Contents API. `kind: bundle` uploads each included file separately, not as one archive. The 250 MB check is per source file, runs during apply after VM allocation, and has no aggregate bundle ceiling. `kind: file` uploads only the entry. Data GET and artifact PUT currently buffer each complete object in VM memory; size datasets and checkpoints accordingly.
 
-The URLs do not enter the consumer process's environment or argv. They are nevertheless persisted unredacted in local `spec.json`/`plan.json`, explicit `--out` plans, and remote data/artifact manifests. The control-result PUT URL is instead staged in a mode-0600 file that the launch kernel reads and unlinks, so the URL does not enter launch source or kernel history. Restrict permissions and never publish files containing these credentials.
+Signed URLs never enter generated spec/plan records, remote data/artifact manifests, validation diagnostics, kernel source/history, or the consumer process's environment and argv. Full URLs remain in the caller-owned source spec and the mode-0600 plan sidecar. Apply uploads them only after public payload staging into a mode-0600 handoff; seal, launch, and the isolated runner fail closed when a declared transfer requires a missing handoff. The launch kernel opens and unlinks it, and `python -I -S -c` consumes the inherited descriptor before starting the consumer. Interrupted recovery confirms deletion or forcibly releases the assignment. Keep source specs and sidecars private. Requirements, install hooks, existing same-UID processes, and the single-user VM must be trusted: these protections prevent persistence and accidental inheritance, not deliberate credential theft by code that runs before upload.
 
 ### Off-VM result backstop
 
@@ -286,7 +287,7 @@ Be aware of these before trusting a long run:
 - Source bytes are not part of `spec_hash`; exact locking is tracked by [#20](https://github.com/danbarua/mighty-colab/issues/20).
 - Stage uploads lack the result poller's refresh/deadline wrapper; restart has no explicit timeout.
 - Data GET and artifact PUT buffer whole objects; source size is limited per file only after allocation, with no aggregate bundle ceiling.
-- Signed URLs remain in local spec/plan files and explicit `--out` plans, and in remote data/artifact manifests.
+- Caller-owned source specs and generated `.mighty-colab-secrets.json` sidecars still contain full signed URLs and require credential handling.
 - Retry/recreate/resume and `control.log` are not implemented; planning rejects non-default policy values.
 - Detected tagged escapees are reported, not killed; the dedicated shipped-path setsid case is still unverified.
 - Job-group help omits `list`, and some early `--json` errors and failed-apply outer exit fields are inconsistent with actual behavior.

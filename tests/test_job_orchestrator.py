@@ -21,6 +21,8 @@ value of the envelope is that an unattended agent can act on it without
 reading the implementation.
 """
 
+import os
+import tempfile
 from contextlib import redirect_stdout
 from enum import Enum
 from io import StringIO
@@ -72,7 +74,35 @@ def _spec(**kw) -> JobSpec:
 
 def _plan(spec: JobSpec) -> Plan:
     return Plan(job_id="unit-job", spec_hash="deadbeef", created_at="now", spec=spec)
+def test_job_records_redact_signed_urls_and_hydrate_only_for_apply(tmp_path):
+    sentinel = "ISSUE18_LOCAL_SENTINEL"
+    signed = f"https://storage.example/input.bin?signature={sentinel}"
+    spec = _spec(data=[DataItem(url=signed, dest="input.bin", size_bytes=1)])
+    plan = _plan(spec)
+    store = JobStore(tmp_path / "jobs")
 
+    spec_path = store.write_spec(plan.job_id, spec)
+    plan_path = store.write_plan(plan)
+    secret_path = store.plan_secrets_path(plan_path)
+
+    assert sentinel not in spec_path.read_text()
+    assert sentinel not in plan_path.read_text()
+    assert "mighty-colab-secret-sha256=" in plan_path.read_text()
+    assert sentinel in secret_path.read_text()
+    assert secret_path.stat().st_mode & 0o777 == 0o600
+    assert sentinel not in store.read_plan(plan.job_id).spec.data[0].url
+    assert store.read_plan_for_apply(plan.job_id).spec.data[0].url == signed
+
+
+def test_apply_secret_sidecar_fails_closed_when_permissions_are_unsafe(tmp_path):
+    signed = "https://storage.example/input.bin?signature=ISSUE18_MODE_SENTINEL"
+    plan = _plan(_spec(data=[DataItem(url=signed, dest="input.bin", size_bytes=1)]))
+    store = JobStore(tmp_path / "jobs")
+    plan_path = store.write_plan(plan)
+    store.plan_secrets_path(plan_path).chmod(0o644)
+
+    with pytest.raises(ValueError, match="permissions"):
+        store.read_plan_for_apply(plan.job_id)
 
 def _orch(tmp_path, spec=None, client=None, runtime=None, session_store=None):
     spec = spec or _spec()
@@ -93,10 +123,13 @@ class _LaunchRuntime:
         self.argv = None
         self.code = None
         self.env = None
+        self.pass_fds = None
         self.control_url = control_url
+        self.secret_file = tempfile.TemporaryFile()
+        self.secret_file.write((control_url or "").encode())
+        self.secret_file.flush()
         self.chmod = None
         self.unlinked = None
-
         self.namespace = None
 
     def execute_code(self, code, timeout):
@@ -105,18 +138,26 @@ class _LaunchRuntime:
         def capture(argv, **kwargs):
             self.argv = argv
             self.env = dict(kwargs["env"])
+            self.pass_fds = kwargs["pass_fds"]
             return SimpleNamespace(pid=4312)
 
         def control_exists(path):
-            return bool(self.control_url and path.endswith("result.put-url"))
+            return bool(self.control_url and path.endswith("transfer.json"))
+
+        real_fchmod = os.fchmod
+
+        def capture_fchmod(fd, mode):
+            self.chmod = (fd, mode)
+            real_fchmod(fd, mode)
 
         stdout = StringIO()
         with (
             patch("os.makedirs"),
             patch("os.path.exists", side_effect=control_exists),
-            patch("os.chmod", side_effect=lambda path, mode: setattr(self, "chmod", (path, mode))),
+            patch("os.open", side_effect=lambda *_args: os.dup(self.secret_file.fileno())),
+            patch("os.fchmod", side_effect=capture_fchmod),
             patch("os.unlink", side_effect=lambda path: setattr(self, "unlinked", path)),
-            patch("builtins.open", mock_open(read_data=self.control_url or "")),
+            patch("builtins.open", mock_open()),
             patch("subprocess.Popen", side_effect=capture),
             redirect_stdout(stdout),
         ):
@@ -125,7 +166,7 @@ class _LaunchRuntime:
         return [{"text": stdout.getvalue()}]
 
 
-def test_launch_reads_control_result_url_from_a_staged_file(tmp_path):
+def test_launch_passes_transfer_secrets_only_by_inherited_fd(tmp_path):
     put_url = "https://storage.example/result.json?secret=signature"
     spec = _spec(
         code=CodeSpec(kind="file", entry="train.py", args=["--deadline", "user"]),
@@ -142,14 +183,83 @@ def test_launch_reads_control_result_url_from_a_staged_file(tmp_path):
 
     assert orch.launch("/content/jobs/unit-job/mighty_runtime") == 4312
     separator = runtime.argv.index("--")
-    assert "--result-put-url" not in runtime.argv
+    secret_index = runtime.argv.index("--secrets-fd") + 1
+    assert int(runtime.argv[secret_index]) == runtime.pass_fds[0]
+    assert runtime.argv[1:4] == ["-I", "-S", "-c"]
     assert put_url not in runtime.code
     assert put_url not in runtime.argv
-    assert runtime.env["MIGHTY_CONTROL_RESULT_PUT_URL"] == put_url
+    assert all(put_url not in value for value in runtime.env.values())
     assert put_url not in repr(runtime.namespace)
     assert runtime.chmod[1] == 0o600
-    assert runtime.unlinked.endswith("result.put-url")
+    assert runtime.unlinked.endswith("transfer.json")
     assert runtime.argv[separator + 1 :] == ["--deadline", "user"]
+
+
+class _MissingTransferRuntime:
+    def __init__(self):
+        self.consumer_started = False
+
+    def execute_code(self, code, timeout):
+        del timeout
+        stdout = StringIO()
+        try:
+            with (
+                patch("os.path.exists", return_value=False),
+                patch(
+                    "subprocess.Popen",
+                    side_effect=lambda *_a, **_kw: setattr(
+                        self, "consumer_started", True
+                    ),
+                ),
+                redirect_stdout(stdout),
+            ):
+                exec(code, {})
+        except Exception as exc:
+            return [{"ename": type(exc).__name__, "evalue": str(exc)}]
+        return [{"text": stdout.getvalue()}]
+
+
+def test_control_only_missing_transfer_map_fails_before_consumer(tmp_path):
+    sentinel = "ISSUE18_MISSING_CONTROL_SENTINEL"
+    spec = _spec(
+        control=Control(
+            result=ControlChannel(
+                put_url=f"https://storage.example/result?auth={sentinel}",
+                get_url="https://storage.example/result",
+            )
+        )
+    )
+    runtime = _MissingTransferRuntime()
+    orch = _orch(tmp_path, spec=spec, runtime=runtime)
+    orch.session_state = SimpleNamespace(url="https://vm", token="token")
+    orch._secret_channel_prepared = True
+
+    with pytest.raises(PhaseError, match="credential channel sealing failed") as error:
+        orch.seal_secret_channel()
+
+    assert error.value.phase is Phase.STAGE
+    assert sentinel not in str(error.value)
+    assert runtime.consumer_started is False
+
+
+def test_unconsumed_secret_cleanup_fails_when_neither_path_proves_absence(
+    tmp_path, monkeypatch
+):
+    import colab_cli.job.orchestrator as orchestrator_module
+
+    runtime = MagicMock()
+    runtime.execute_code.side_effect = RuntimeError("kernel unreachable")
+    contents = MagicMock()
+    contents.rm.side_effect = RuntimeError("delete failed")
+    contents.list_dir.side_effect = RuntimeError("check failed")
+    monkeypatch.setattr(orchestrator_module, "ContentsClient", lambda _session: contents)
+    orch = _orch(tmp_path, runtime=runtime)
+    orch.session_state = SimpleNamespace(url="https://vm", token="token")
+    orch._secret_channel_prepared = True
+
+    assert orch.cleanup_secret_channel() is False
+    contents.rm.assert_called_once()
+    contents.list_dir.assert_called_once()
 
 
 def test_launch_persists_the_kernel_target_for_session_commands(tmp_path):

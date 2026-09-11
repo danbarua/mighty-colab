@@ -11,13 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-"""I/O and URL-identity helpers for job specifications.
-
-Signed-URL query parameters are credentials rather than object identity, so
-canonical URL identities and hashes remove them. Stored specifications and
-remote manifests retain their full URLs; callers must protect those files.
-"""
+"""I/O and non-secret URL identity helpers for job specifications."""
 
 from __future__ import annotations
 
@@ -36,6 +30,31 @@ import yaml
 
 from colab_cli.job.models import JobSpec
 
+
+SECRET_FRAGMENT_PREFIX = "mighty-colab-secret-sha256="
+
+
+def is_redacted_url(value: str) -> bool:
+    """Return whether value is a query-free signed-URL reference."""
+
+    try:
+        parsed = urllib.parse.urlsplit(value)
+    except (TypeError, ValueError):
+        return False
+    digest = parsed.fragment.removeprefix(SECRET_FRAGMENT_PREFIX)
+    return (
+        not parsed.query
+        and parsed.fragment.startswith(SECRET_FRAGMENT_PREFIX)
+        and re.fullmatch(r"[0-9a-f]{64}", digest) is not None
+    )
+
+
+def _contains_redacted_url(value: Any) -> bool:
+    if isinstance(value, dict):
+        return any(_contains_redacted_url(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_redacted_url(item) for item in value)
+    return isinstance(value, str) and is_redacted_url(value)
 
 @dataclass(frozen=True)
 class ProbeResult:
@@ -67,17 +86,23 @@ class ProbeResult:
 
 
 def load_spec(path: str | Path) -> JobSpec:
-    """Load and validate a YAML (or JSON) job specification.
-
-    A relative ``code.root`` is relative to the spec file, not the process's
-    current directory. When omitted, the spec's parent directory is the code
-    root. This makes loading a spec independent of where the CLI is invoked.
-    """
+    """Load a source spec; redacted record snapshots are not executable."""
 
     spec_path = Path(path).expanduser().resolve(strict=False)
-    data = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
+    try:
+        data = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
+    except yaml.YAMLError as error:
+        mark = getattr(error, "problem_mark", None)
+        location = (
+            f" at line {mark.line + 1}, column {mark.column + 1}"
+            if mark is not None
+            else ""
+        )
+        raise ValueError(f"invalid YAML{location}") from None
     if not isinstance(data, dict):
         raise ValueError("job spec must contain a mapping at the top level")
+    if _contains_redacted_url(data):
+        raise ValueError("redacted job record cannot be used as a source spec")
     spec = JobSpec.model_validate(data)
     root = Path(spec.code.root) if spec.code.root else spec_path.parent
     if not root.is_absolute():
@@ -114,6 +139,19 @@ def url_id(url: str) -> str:
 
     return f"{canonical_url(url)}#{hashlib.sha256(url.encode('utf-8')).hexdigest()[:12]}"
 
+
+def has_url_query(url: str) -> bool:
+    try:
+        return bool(urllib.parse.urlsplit(url).query)
+    except ValueError:
+        return "?" in url
+
+
+def redacted_url(url: str) -> str:
+    """Return a query-free URL reference bound to the exact credential."""
+
+    digest = hashlib.sha256(url.encode("utf-8")).hexdigest()
+    return f"{canonical_url(url)}#{SECRET_FRAGMENT_PREFIX}{digest}"
 
 def _query(url: str) -> dict[str, list[str]]:
     try:
@@ -206,7 +244,10 @@ def _canonicalize(value: Any, key: str | None = None) -> Any:
     if isinstance(value, list):
         return [_canonicalize(item, key) for item in value]
     if isinstance(value, str) and key is not None and (key == "url" or key.endswith("_url")):
-        return canonical_url(value)
+        return {
+            "identity": canonical_url(value),
+            "credential_required": has_url_query(value) or is_redacted_url(value),
+        }
     return value
 
 
@@ -216,6 +257,11 @@ def spec_hash(spec: JobSpec) -> str:
     payload = _canonicalize(spec.model_dump(mode="json"))
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+def plan_hash(spec: JobSpec, source_spec_path: str) -> str:
+    """Bind the source exclusion path into a plan's integrity digest."""
+    encoded = f"{spec_hash(spec)}\0{source_spec_path}".encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _response_status(response: Any) -> int | None:
@@ -277,7 +323,7 @@ def probe_get_url(url: str, timeout: float = 10) -> ProbeResult:
             return ProbeResult(status=status, error=f"HTTP {status}")
         return ProbeResult(status=status, error=f"HTTP {status}")
     except (OSError, TimeoutError, ValueError) as error:
-        return ProbeResult(status=None, error=f"{type(error).__name__}: {error}")
+        return ProbeResult(status=None, error=type(error).__name__)
     finally:
         if response is not None:
             response.close()

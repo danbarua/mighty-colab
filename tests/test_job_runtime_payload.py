@@ -11,6 +11,8 @@ import hashlib
 import json
 import os
 import signal
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import shutil
 
 import subprocess
@@ -36,6 +38,25 @@ def _prepare(tmp_path: Path, source: str):
     entry.write_text(source)
     job_dir = tmp_path / "job"
     return package, entry, job_dir
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://EXAMPLE.com/object?sig=x",
+        "https://user:password@Example.COM:8443/object?sig=x",
+        "https://[2001:db8::1]:9443/object?sig=x",
+    ],
+)
+def test_runtime_url_identity_matches_safe_planner_identity(url):
+    from colab_cli.job.runtime_payload.runner import _url_id
+    from colab_cli.job.spec_io import url_id
+
+    identity = _url_id(url)
+    assert identity == url_id(url)
+    assert "user" not in identity
+    assert "password" not in identity
+    assert "?" not in identity
 
 
 def _run(tmp_path: Path, source: str, *extra: str, timeout=30):
@@ -78,6 +99,18 @@ def test_exit_zero_is_succeeded(tmp_path):
     assert result["exit_code"] == 0
     assert result["offload"] == "not_required"
     assert not (job_dir / "exception.json").exists()
+
+
+def test_required_secret_channel_missing_fails_before_consumer(tmp_path):
+    marker = tmp_path / "consumer-started"
+    source = f"from pathlib import Path; Path({str(marker)!r}).write_text('started')\n"
+
+    _proc, result, job_dir = _run(tmp_path, source, "--secrets-required")
+
+    assert result["workload"] == "failed"
+    assert not marker.exists()
+    assert result["exception"]["message"] == "stage failed"
+    assert result["runner_error"] == "stage failed"
 
 
 def test_uncaught_exception_is_failed_with_exception(tmp_path):
@@ -262,6 +295,156 @@ def test_stage_hash_mismatch_does_not_run_consumer(tmp_path):
     assert result["phase"] == "stage"
     assert result["workload"] == "failed"
     assert not sentinel.exists()
+
+
+def test_staged_payload_and_runner_share_a_secret_channel_without_persisting_it(
+    tmp_path, monkeypatch
+):
+    from colab_cli.job import payload_bundle
+    from colab_cli.job.models import (
+        ArtifactItem,
+        CodeSpec,
+        Control,
+        ControlChannel,
+        DataItem,
+        JobSpec,
+    )
+
+    sentinel = "ISSUE18_RUNNER_SENTINEL"
+    received = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            received.append(("GET", self.path, None))
+            body = b"staged payload"
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_PUT(self):
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length)
+            received.append(("PUT", self.path, body))
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, _format, *_args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    data_url = f"{base}/input?sig={sentinel}-data"
+    artifact_url = f"{base}/artifact?sig={sentinel}-artifact"
+    result_url = f"{base}/result?sig={sentinel}-result"
+    recovery_sentinel = "ISSUE18_RECOVERY_ONLY_SENTINEL"
+    recovery_url = f"{base}/result?sig={recovery_sentinel}"
+
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    remote_dir = tmp_path / "remote"
+    entry_source = source_root / "train.py"
+    entry_source.write_text(
+        "import os, sys\n"
+        "from pathlib import Path\n"
+        "marker = 'ISSUE18_' + 'RUNNER_SENTINEL'\n"
+        "assert marker not in repr((sys.argv, dict(os.environ)))\n"
+        "parent_env = Path('/proc/%d/environ' % os.getppid())\n"
+        "if parent_env.exists(): assert marker.encode() not in parent_env.read_bytes()\n"
+        f"job = Path({str(remote_dir)!r})\n"
+        "assert not (job / 'mighty_runtime/.secrets/transfer.json').exists()\n"
+        "assert (job / 'input.bin').read_bytes() == b'staged payload'\n"
+        "(job / 'output.bin').write_bytes(b'artifact')\n"
+        "assert not any(marker.encode() in p.read_bytes() "
+        "for p in job.rglob('*') if p.is_file())\n"
+    )
+    spec = JobSpec(
+        name="producer-consumer",
+        code=CodeSpec(kind="bundle", root=str(source_root), entry="train.py"),
+        data=[DataItem(url=data_url, dest="input.bin", size_bytes=14)],
+        artifacts=[ArtifactItem(path="output.bin", url=artifact_url)],
+        control=Control(
+            result=ControlChannel(put_url=result_url, get_url=recovery_url)
+        ),
+    )
+
+    class LocalContents:
+        def makedirs(self, path):
+            Path(path).mkdir(parents=True, exist_ok=True)
+
+        def upload(self, source, destination):
+            Path(destination).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, destination)
+
+    monkeypatch.setattr(payload_bundle, "ContentsClient", lambda _session: LocalContents())
+    payload_bundle.stage_payload(
+        spec=spec,
+        job_id="producer-consumer",
+        session=object(),
+        remote_dir=str(remote_dir),
+    )
+
+    secret_path = remote_dir / "mighty_runtime/.secrets/transfer.json"
+    secret_path.chmod(0o600)  # production seal_secret_channel step
+    secret_fd = os.open(secret_path, os.O_RDONLY)
+    secret_path.unlink()
+    bootstrap = (
+        f"import runpy,sys;sys.path.insert(0,{str(remote_dir)!r});"
+        "runpy.run_module('mighty_runtime.runner',run_name='__main__')"
+    )
+    try:
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-S",
+                "-c",
+                bootstrap,
+                "--job-dir",
+                str(remote_dir),
+                "--stage-manifest",
+                str(remote_dir / "stage.manifest.json"),
+                "--offload-manifest",
+                str(remote_dir / "offload.manifest.json"),
+                "--secrets-fd",
+                str(secret_fd),
+                str(remote_dir / "src/train.py"),
+            ],
+            cwd=remote_dir,
+            pass_fds=(secret_fd,),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    finally:
+        os.close(secret_fd)
+        server.shutdown()
+        thread.join(timeout=5)
+
+    result = json.loads((remote_dir / "result.json").read_text())
+    assert proc.returncode == 0
+    assert result["workload"] == "succeeded"
+    assert result["offload"] == "ok"
+    requests = {(method, path): body for method, path, body in received}
+    assert set(requests) == {
+        ("GET", f"/input?sig={sentinel}-data"),
+        ("PUT", f"/artifact?sig={sentinel}-artifact"),
+        ("PUT", f"/result?sig={sentinel}-result"),
+    }
+    assert requests[("PUT", f"/artifact?sig={sentinel}-artifact")] == b"artifact"
+    uploaded_result = json.loads(requests[("PUT", f"/result?sig={sentinel}-result")])
+    assert uploaded_result["workload"] == "succeeded"
+    assert sentinel not in proc.stdout
+    assert recovery_sentinel not in repr(received)
+    for path in remote_dir.rglob("*"):
+        if path.is_file():
+            assert recovery_sentinel.encode() not in path.read_bytes(), path
+    assert sentinel not in proc.stderr
+    for path in remote_dir.rglob("*"):
+        if path.is_file():
+            assert sentinel.encode() not in path.read_bytes(), path
 
 
 def test_missing_optional_artifact_does_not_fail_offload(tmp_path):

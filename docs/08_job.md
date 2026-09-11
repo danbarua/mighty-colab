@@ -10,6 +10,7 @@ log:
 2026-09-11: Audited the implemented contract against source, executable help, tests, and five adversarial domain reviews. Corrected the public CLI and schema, current phase and persistence behavior, plan-hash scope, transport boundaries, signed-URL handling, and supervisor recovery claims. Added the load-bearing implementation gaps that remain.
 2026-09-11: Addressed PR #15 peer review: external cancel intent now reaches runner and watchdog, destroy preserves remote verdicts, SHA-256 values are validated, unexpected supervisor exceptions terminalize, control PUT credentials are staged outside kernel history, unsupported policy values fail planning, status absorbs complete remote results, and declared artifact sizes count in the disk gate. Source-byte locking remains tracked by [#20](https://github.com/danbarua/mighty-colab/issues/20).
 2026-09-11: **Cancel-only live-verified.** `integration/repro_job_cancel_only/test.sh` observed a running CPU workload, issued the public `destroy --cancel-only`, observed a terminal `workload: cancelled` result while the assignment remained listed, then performed full destroy and verified the endpoint disappeared.
+2026-09-11: Fixed and live-verified [#18](https://github.com/danbarua/mighty-colab/issues/18): generated specs, plans, manifests, envelopes, events, diagnostics, and kernel launch history now contain only canonical URL identities and credential references. Full URLs remain only in caller-owned source specs, owner-mode local sidecars, and a short-lived owner-mode VM handoff that the isolated runner inherits by file descriptor and unlinks before consumer launch. Missing required handoffs fail closed; interrupted recovery scrubs or tears down; source bundles reject credential-bearing URLs from immutable snapshots. A live CPU job proved the signed data URL was consumed while the sentinel was absent from output, durable local records, remote files, and kernel history, then released the assignment.
 ---
 
 # Design: `job` — Agent job supervisor
@@ -65,7 +66,7 @@ The MCP server exposes `job_plan`, `job_status`, `job_destroy`, and `job_list`. 
 
 `provision` is a phase of apply, not another command.
 
-Apply consumes a plan file directly or retrieves one by `--job-id`. It re-hashes the plan's embedded spec with URL query strings canonicalized out and refuses a plan whose embedded spec no longer matches that recorded hash. It never re-reads the original YAML. The hash does **not** include entry bytes, bundle contents, or a git commit; code can change between plan and apply without invalidating the plan.
+Apply consumes a plan file directly or retrieves one by `--job-id`. Generated plans replace credential-bearing URL queries with canonical identities plus markers; apply hydrates them from the adjacent owner-only sidecar before allocation. It verifies the plan hash, including source-spec path and credential markers, and never re-reads the original YAML. The hash does **not** include entry bytes, bundle contents, or a git commit; code can change between plan and apply without invalidating the plan.
 
 ## Spec (v0)
 
@@ -98,7 +99,9 @@ Optional `data[]` entries contain `url`, `dest`, `sha256`, and `size_bytes`. Opt
 
 For a GCS-backed `control.result`, first sign PUT, PUT a fresh `{}` placeholder using `Content-Type: application/octet-stream`, and then sign GET for the same unique object. The runner replaces the placeholder with its terminal result. `{}` is not a verdict. The CLI does not automatically read `control.result.get_url`; it is a manual recovery channel.
 
-Signed query strings are credentials. Current persistence does **not** redact them: `spec.json`, `plan.json`, an explicit `--out` file, and remote data/artifact manifests can contain the full query. The control-result PUT URL is staged in a mode-0600 file, read and unlinked by the launch kernel, and does not appear in launch source or runner argv. Envelopes and event messages do not intentionally include URL queries.
+Signed query strings are credentials. Generated `spec.json`, `plan.json`, explicit `--out` plans, remote manifests, envelopes, events, and validation diagnostics expose only canonical URL identities and opaque references. Full URLs remain in the caller-owned source spec and an adjacent owner-mode `.mighty-colab-secrets.json` sidecar. Apply sends them to an owner-mode remote handoff only after all public files; the launch kernel opens and unlinks it, then passes the inherited descriptor to an isolated runner. The runner clears inherited URL variables before consumer launch. Recovery confirms deletion or forcibly releases the assignment.
+
+This boundary prevents durable disclosure, diagnostic reflection, and ordinary launch-time inheritance by the consumer. It does not defend against hostile same-UID code that runs before credential upload: a dependency install hook, `.pth` file, or existing process can persist and inspect the later handoff or launch process through `/proc`. Requirements, their build/install hooks, and the single-user job VM are therefore trusted inputs. Dependency installation completes before credential upload, and `-I -S` prevents accidental installed-package imports in the runner bootstrap; neither mechanism is a privilege boundary against malicious dependencies.
 
 `apply` runs exactly one attempt. The only executable policy values are `retry.when: [retry_same]`, `max_attempts: 1`, `mode: recreate`, `on_run_fail: offload_anyway`, and no `control.log`; planning rejects other values instead of accepting inactive behavior. `retry.budget_seconds` remains active for control-URL expiry validation. There is no retry, resume, checkpoint, or control-log implementation.
 
@@ -116,14 +119,14 @@ The durable workload is a runner process, not the launch kernel:
 
 ```
 kernel launch RPC
-  └─ python -m mighty_runtime.runner
+  └─ python -I -S -c <isolated runner bootstrap, inherited secret fd>
        └─ python -m mighty_runtime.shim <entry>
 watchdog process (sibling)
 ```
 
-Before launch, the local stage phase uploads `mighty_runtime`, user code, and manifests through the Contents API. `kind: file` uploads only the entry file. `kind: bundle` walks the root and uploads files individually, excluding `.git`, `.venv`, `__pycache__`, and `.pyc`; it does not send a tarball.
+Before launch, the local stage phase uploads `mighty_runtime`, user code, and query-free manifests through the Contents API. `kind: file` uploads only the entry file. `kind: bundle` walks the root and uploads files individually, excluding `.git`, `.venv`, `__pycache__`, `.pyc`, the active source spec, secret sidecars, and reserved atomic-secret temporaries. Each user file is copied once from an `O_NOFOLLOW` descriptor into an immutable local snapshot; that same snapshot is scanned and uploaded, closing the scan/upload race. Arbitrary content is rejected when an HTTP(S) query uses a recognized credential key. YAML-shaped mappings are parsed regardless of filename extension and reject any query-bearing value in `url` or `*_url` fields, covering custom signers while allowing ordinary query URLs in source code.
 
-`Orchestrator.launch()` calls `ColabRuntime.execute_code(..., timeout=120)` and starts the runner with `start_new_session=True`. Passing no output hook does not create a separate non-interactive protocol: the vendored client still uses its interactive execution loop internally. The 120-second limit covers the execute reply; kernel HTTP/WebSocket startup retains its shorter defaults. Kernel restart itself currently has no explicit deadline.
+`Orchestrator.launch()` calls `ColabRuntime.execute_code(..., timeout=120)`. When the plan declares any transfer URL, sealing and launch both require the private handoff; absence fails before a consumer starts, and the runner independently enforces `--secrets-required`. The kernel opens and unlinks the handoff, then starts the runner with `start_new_session=True`, `python -I -S -c`, and an inherited descriptor rather than an argv/environment URL. Passing no output hook does not create a separate non-interactive protocol: the vendored client still uses its interactive execution loop internally. The 120-second limit covers the execute reply; kernel HTTP/WebSocket startup retains its shorter defaults. Kernel restart itself currently has no explicit deadline.
 
 The runner creates `launch.json` with `O_EXCL`, starts the shim in its own session/process group, and remains its parent so it can `waitpid()`. The shim sets the entry's real `sys.argv`, `__file__`, and `sys.path[0]`, then uses `runpy.run_path(..., run_name="__main__")`. A duplicate runner sees the existing live launch identity and exits without starting a second consumer; the launch RPC does not promise to return the original runner PID.
 
@@ -149,11 +152,11 @@ Each staged data item can carry `size_bytes` and an exact 64-hex-character `sha2
 
 ## Plan
 
-`job plan` never calls `assign`, but it is not side-effect-free: it writes `spec.json` and `plan.json` below the job store, writes `--out` when requested, and performs ranged GET probes unless `--no-probe` is set. It writes those files even when diagnostics contain warnings or errors.
+`job plan` never calls `assign`, but it is not side-effect-free: it writes redacted `spec.json` and `plan.json` records below the job store, writes a redacted `--out` plan when requested, creates adjacent owner-mode secret sidecars when query credentials exist, and performs ranged GET probes unless `--no-probe` is set. It writes generated records even when diagnostics contain warnings or errors.
 
 Errors make `plan` exit non-zero and make `apply` refuse the saved plan. Warnings make apply refuse unless the embedded spec has `ignore_warnings: true`. The current planner checks accelerator names, code-entry containment/existence, destination containment below `/content`, reserved/colliding paths, HTTPS and recognized literal private hosts, signed-URL expiry, and data ranged GETs. It does not implement several earlier design gates: aggregate bundle/data size, dependency resolution, ADC scope validation, file-mode sibling-import analysis, PUT/GET object equivalence, or artifact/control mutation probes.
 
-The job ID is `<name>-<UTC timestamp>-<six random hex characters>`. `spec_hash` is a canonical hash of the modeled spec with URL queries removed. It is not a content hash. `apply` revalidates URL expiry and plan self-consistency before assignment, but stages whatever code bytes are present at apply time.
+The job ID is `<name>-<UTC timestamp>-<six random hex characters>`. `spec_hash` is a canonical hash of the modeled spec with URL identities, source-spec path, and credential-presence markers; `plan_hash` binds the full generated plan and its marker set. Neither is a source-content hash. Apply hydrates from the owner-only sidecar, revalidates URL expiry and both hashes before assignment, but stages whatever code bytes are present at apply time.
 
 ## Apply phases
 
@@ -203,7 +206,7 @@ Therefore `ok` can be true while `done` is still false; consumers must poll `don
 
 `not_required` means the spec declared no artifacts. `skipped` is a terminal schema value but the current runner normally attempts declared artifacts even after failure. Per-artifact results are preserved; any recorded upload failure currently makes scalar offload fail, including a failed optional upload.
 
-`job status --poll` is an observer, not supervisor takeover. It stops when `result.json` appears and absorbs the remote phase, workload, exit/signal/exception, artifact, and offload fields, but it does not finish cleanup. It can therefore return `done: false` after finding a remote terminal result. A dead local PID is marked `supervisor: interrupted`, but status does not guarantee `cleanup: left_up` or identity-based `workload: unknown`; PID liveness is also susceptible to PID reuse.
+`job status --poll` is an observer, not supervisor takeover. It stops when `result.json` appears and absorbs the remote phase, workload, exit/signal/exception, artifact, and offload fields, but it does not finish ordinary offload or cleanup after the original supervisor dies. It identifies that supervisor by PID, process start time, and boot identity rather than PID alone. Interrupted, finished, and cleanup-failed recovery confirms removal of any remote transfer handoff; inability to confirm forces endpoint release. A concurrently running healthy supervisor is never scrubbed.
 
 Every envelope carries schema/CLI versions, phase, requested/actual accelerator, ordered string hints, timestamps, and relevant result details. The local files are:
 
@@ -213,7 +216,7 @@ Every envelope carries schema/CLI versions, phase, requested/actual accelerator,
   plan.json
   envelope.json
   events.jsonl
-  supervisor.pid       # present only while apply records one
+  supervisor.json      # PID, process start time, and boot identity while apply runs
 ```
 
 The remote files include:
@@ -238,9 +241,9 @@ The local JSON writes use atomic replacement, but the store has no cross-process
 
 ## Testing strategy
 
-The permanent suite covers model validation, plan diagnostics, canonical spec hashing, expiry revalidation, runner exit/cancel behavior, duplicate remote launch, transport refresh, phase transitions, CLI parsing, and envelope truth tables. Live integrations cover CPU and T4 jobs, signed GCS data/artifact/control-result paths, dependency restart/verify, workload failure, token refresh recovery, explicit launch-kernel restart, and cancel-only termination with assignment retention.
+The permanent suite covers model validation, plan diagnostics without reflected inputs, redacted plan/spec persistence with owner-only hydration, canonical URL identity and credential-marker hashing, source-bundle credential rejection against immutable upload snapshots, expiry revalidation, isolated descriptor handoff and unlinking, interrupted-recovery deletion/forced teardown, healthy-supervisor race exclusion, runner exit/cancel behavior, duplicate remote launch, transport refresh, phase transitions, CLI parsing, and envelope truth tables. Live integrations cover CPU and T4 jobs, signed GCS data/artifact/control-result paths, dependency restart/verify, workload failure, token refresh recovery, explicit launch-kernel restart, and cancel-only termination with assignment retention.
 
-The current gaps need regression coverage before their claims can be promoted: keep-alive ownership; endpoint persist-before-side-effect; concurrent apply exclusion; status takeover through cleanup; source-content locking ([#20](https://github.com/danbarua/mighty-colab/issues/20)); signed-URL redaction in durable local/remote files; long-stage refresh/timeouts; bounded restart; streamed transfer; aggregate bundle limits; optional-upload semantics; control log; and a shipped-path setsid escapee case.
+The current gaps need regression coverage before their claims can be promoted: keep-alive ownership; endpoint persist-before-side-effect; concurrent apply exclusion; status takeover through cleanup; source-content locking ([#20](https://github.com/danbarua/mighty-colab/issues/20)); long-stage refresh/timeouts; bounded restart; streamed transfer; aggregate bundle limits; optional-upload semantics; control log; and a shipped-path setsid escapee case.
 
 ## Spike results (2026-09-11, live CPU VM)
 
@@ -430,7 +433,7 @@ These are current implementation limits, not hypothetical polish:
 - **Plan integrity:** `spec_hash` does not lock source bytes or a bundle manifest. Apply can run code that differs from what existed at plan time. Exact source locking is tracked by [#20](https://github.com/danbarua/mighty-colab/issues/20).
 - **Transport bounds:** source/manifests are staged with a raw `ContentsClient` that lacks `JobTransport` refresh/deadline handling. The restart request has no explicit timeout. Control-plane assignment refresh is also not bounded by the job transport's HTTP deadlines.
 - **Memory and size:** data GET and artifact PUT buffer whole objects in RAM. The 250 MB source limit is per file, enforced after allocation; there is no aggregate bundle ceiling.
-- **Signed secrets:** raw signed URLs are persisted in local spec/plan files and explicit `--out` plans, and in remote data/artifact manifests. There is no redacted sidecar representation.
+- **Signed secrets:** generated specs, plans, manifests, envelopes, events, diagnostics, and kernel launch history contain query-free URL identities and opaque credential references only. Caller-owned source specs and generated owner-mode `.mighty-colab-secrets.json` sidecars still contain full URLs and require credential handling.
 - **Declared but inactive controls:** planning rejects non-default retry/recreate/resume settings, `control.log`, and `on_run_fail: skip`. `control.result.get_url` remains manual, and PUT/GET object equivalence is not validated.
 - **Network containment:** host checks do not resolve DNS and miss at least IPv6 link-local forms.
 - **Process containment:** tagged escapees are reported, not killed. The dedicated shipped-path setsid case remains unverified.
