@@ -51,7 +51,7 @@ from colab_cli.job.models import (
     Supervisor,
     Workload,
 )
-from colab_cli.job.orchestrator import Orchestrator, PhaseError
+from colab_cli.job.orchestrator import Orchestrator, PhaseError, stop_session_keep_alive
 from colab_cli.job.runtime_payload import ident
 from colab_cli.job.store import JobStore, load_plan_file, write_plan_file
 
@@ -400,6 +400,8 @@ def apply(
         transport_factory=lambda s: JobTransport(s, state.client, state.store),
         session_store=state.store,
         emit=lambda m: typer.echo(m),
+        auth_provider=state.auth_provider,
+        config_path=state.config_path,
     )
     store.write_supervisor_identity(
         p.job_id,
@@ -658,35 +660,34 @@ def destroy(
     saved_plan = store.read_plan(job_id)
     transport = None
     intent_status = None
-    if env.session:
-        session = state.store.get(env.session)
-        if session is not None:
-            transport = JobTransport(session, state.client, state.store)
-            try:
-                result, read_status = transport.read_json(
-                    f"/content/jobs/{job_id}/result.json"
-                )
-                if read_status.name == "OK" and result:
-                    if saved_plan is not None:
-                        Orchestrator.absorb_result(env, saved_plan.spec, result)
-                    else:
-                        env.workload = Workload(result.get("workload", "unknown"))
-                        env.exit_code = result.get("exit_code")
-                        env.signal = result.get("signal")
-                        env.exception = result.get("exception")
-                    env.supervisor = Supervisor.FINISHED
-            except Exception as e:  # noqa: BLE001 - teardown still must proceed
-                typer.echo(
-                    f"[colab] Could not reconcile remote result ({type(e).__name__}).",
-                    err=True,
-                )
-
+    session = state.store.get(env.session) if env.session else None
+    if session is not None:
+        transport = JobTransport(session, state.client, state.store)
+        try:
+            result, read_status = transport.read_json(
+                f"/content/jobs/{job_id}/result.json"
+            )
+            if read_status.name == "OK" and result:
+                if saved_plan is not None:
+                    Orchestrator.absorb_result(env, saved_plan.spec, result)
+                else:
+                    env.workload = Workload(result.get("workload", "unknown"))
+                    env.exit_code = result.get("exit_code")
+                    env.signal = result.get("signal")
+                    env.exception = result.get("exception")
+                env.supervisor = Supervisor.FINISHED
+        except Exception as e:  # noqa: BLE001 - teardown still must proceed
+            typer.echo(
+                f"[colab] Could not reconcile remote result ({type(e).__name__}).",
+                err=True,
+            )
 
     secret_removed = transport is not None and _scrub_transfer_secret(
         transport, job_id
     )
     if cancel_only and not secret_removed:
         try:
+            stop_session_keep_alive(session)
             state.client.unassign(env.endpoint)
             env.cleanup = Cleanup.RELEASED
             if env.session:
@@ -735,6 +736,7 @@ def destroy(
             raise typer.Exit(1)
         return
 
+    stop_session_keep_alive(session)
     if env.endpoint:
         try:
             state.client.unassign(env.endpoint)

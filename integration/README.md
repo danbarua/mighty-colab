@@ -28,6 +28,7 @@ End-to-end tests that run against a **live Colab backend** (unlike the mocked un
 | `repro_auth_config_json/` | Fast (~2s): `-c/--client-oauth-config` combined with `--json`, happy and unhappy paths. A malformed config file produces a clean `status="error"`, `reason="auth_config_invalid"` envelope (json and plain-text alike — no raw Python traceback), deterministic regardless of machine auth state since it fails at `json.load()` before any cached token is consulted. A valid config authenticates and returns a clean `status="ok"` envelope, skipped (not failed) when no cached OAuth token exists yet, so it doesn't block on the interactive flow's `input()`. Exercises `cli.py:main()`'s top-level uncaught-exception catch-all. |
 | `repro_job_kernel_restart/` | Live e2e (~3 minutes): starts a detached CPU `job`, waits for the recorded launch-kernel identity, invokes public `restart-kernel`, proves the same consumer process continues to make progress and exits 0, then destroys the assignment and verifies its endpoint is absent. |
 | `repro_job_signed_url_redaction/` | Live e2e: plans and runs a CPU job with a signed-URL sentinel, proves generated local records, CLI output, remote files, and kernel history omit it, confirms the owner-only sidecar retains it, then destroys the assignment and verifies no active sessions remain. |
+| `repro_job_keep_alive/` | Live e2e: `job apply --leave-up` starts the TFE keep-alive daemon, records pid/ping, keeps it through an idle kernel wait, then `job destroy` reaps it and leaves no session. |
 
 
 ## Running

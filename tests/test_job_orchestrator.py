@@ -104,7 +104,9 @@ def test_apply_secret_sidecar_fails_closed_when_permissions_are_unsafe(tmp_path)
     with pytest.raises(ValueError, match="permissions"):
         store.read_plan_for_apply(plan.job_id)
 
-def _orch(tmp_path, spec=None, client=None, runtime=None, session_store=None):
+def _orch(
+    tmp_path, spec=None, client=None, runtime=None, session_store=None, **kw
+):
     spec = spec or _spec()
     return Orchestrator(
         plan=_plan(spec),
@@ -113,6 +115,24 @@ def _orch(tmp_path, spec=None, client=None, runtime=None, session_store=None):
         runtime_factory=lambda url, token: runtime or MagicMock(),
         transport_factory=lambda s: MagicMock(),
         session_store=session_store or MagicMock(),
+        **kw,
+    )
+
+
+@pytest.fixture(autouse=True)
+def keep_alive_spawn(monkeypatch):
+    spawn = MagicMock(return_value=4242)
+    monkeypatch.setattr("colab_cli.commands.session.spawn_keep_alive", spawn)
+    return spawn
+
+
+def _cpu_assignment(endpoint="m-s-cpu"):
+    return SimpleNamespace(
+        accelerator=SimpleNamespace(name="NONE"),
+        endpoint=endpoint,
+        runtime_proxy_info=SimpleNamespace(token="t", url="https://u"),
+        variant=SimpleNamespace(name="DEFAULT"),
+        machine_shape="STANDARD",
     )
 
 
@@ -381,27 +401,24 @@ def test_interrupted_supervisor_is_terminal_so_done_can_be_reached():
 # --------------------------------------------------------------------------
 
 
-def test_provision_refuses_a_cpu_box_when_a_gpu_was_requested(tmp_path):
+def test_provision_refuses_a_cpu_box_when_a_gpu_was_requested(
+    tmp_path, keep_alive_spawn
+):
     """The silent-substitution failure. Upstream maps unknown accelerators
     onto A100 and capacity pressure can hand back a CPU box; accepting it
     is how you publish chance-level results from a run that never had a
     GPU."""
     client = MagicMock()
-    client.assign.return_value = SimpleNamespace(
-        accelerator=SimpleNamespace(name="NONE"),
-        endpoint="m-s-cpu",
-        runtime_proxy_info=SimpleNamespace(token="t", url="https://u"),
-        variant=SimpleNamespace(name="DEFAULT"),
-        machine_shape="STANDARD",
-    )
+    client.assign.return_value = _cpu_assignment()
     orch = _orch(tmp_path, client=client)
 
     with pytest.raises(PhaseError) as exc:
         orch.provision()
 
     assert exc.value.retry_class is RetryClass.RETRY_DIFFERENT
-    # and it must not leave the CPU box assigned
     client.unassign.assert_called_once_with("m-s-cpu")
+    keep_alive_spawn.assert_not_called()
+    orch.session_store.add.assert_not_called()
 
 
 def test_provision_accepts_cpu_when_the_spec_asked_for_it(tmp_path):
@@ -445,6 +462,106 @@ def test_provision_walks_the_preference_list_in_order(tmp_path):
     assert orch.env.actual_accelerator == "T4"
     assert orch.env.requested_accelerator == "T4"
     assert client.assign.call_count == 2
+
+
+def test_provision_starts_keep_alive_after_persisting_the_session(
+    tmp_path, keep_alive_spawn
+):
+    from colab_cli.auth import AuthProvider
+
+    order = []
+    client = MagicMock()
+    client.assign.return_value = _cpu_assignment("m-s-job")
+    session_store = MagicMock()
+    session_store.add.side_effect = lambda s: order.append(
+        ("persist", s.keep_alive_pid, s.last_keep_alive_ping is not None)
+    )
+    keep_alive_spawn.side_effect = lambda *a, **k: (
+        order.append(("spawn", a, k)) or 4242
+    )
+
+    orch = _orch(
+        tmp_path,
+        spec=_spec(accelerator=Accelerator(prefer=[], accept_cpu=True)),
+        client=client,
+        session_store=session_store,
+        auth_provider=AuthProvider.ADC,
+        config_path="/tmp/sessions.json",
+    )
+    orch.provision()
+
+    assert [step[0] for step in order] == ["persist", "spawn", "persist"]
+    assert order[0][1] is None
+    assert order[0][2] is True
+    assert order[1][1] == ("m-s-job", "job-unit-job")
+    assert order[1][2]["auth_provider"] is AuthProvider.ADC
+    assert order[1][2]["config_path"] == "/tmp/sessions.json"
+    assert order[2][1] == 4242
+    assert orch.session_state.keep_alive_pid == 4242
+    assert orch.session_state.last_keep_alive_ping is not None
+    client.keep_alive_assignment.assert_called_once_with("m-s-job")
+
+
+def test_provision_scope_error_releases_the_vm_without_a_daemon(
+    tmp_path, keep_alive_spawn
+):
+    from colab_cli.client import ColabRequestError
+
+    client = MagicMock()
+    client.assign.return_value = _cpu_assignment("m-s-job")
+    response = MagicMock()
+    response.status_code = 403
+    client.keep_alive_assignment.side_effect = ColabRequestError(
+        "Forbidden",
+        MagicMock(),
+        response,
+        response_body='[7,"Request had insufficient authentication scopes.",'
+        '[["type.googleapis.com/google.rpc.DebugInfo",[null,'
+        '"gaia_mint_exchange::SCOPE_NOT_PERMITTED"]]]]',
+    )
+    orch = _orch(
+        tmp_path,
+        spec=_spec(accelerator=Accelerator(prefer=[], accept_cpu=True)),
+        client=client,
+    )
+
+    with pytest.raises(PhaseError) as exc:
+        orch.provision()
+
+    assert exc.value.retry_class is RetryClass.FIX_HUMAN
+    client.unassign.assert_called_once_with("m-s-job")
+    keep_alive_spawn.assert_not_called()
+    orch.session_store.add.assert_not_called()
+    assert orch.env.endpoint is None
+
+
+def test_provision_tolerates_a_non_scope_preflight_error(
+    tmp_path, keep_alive_spawn
+):
+    from colab_cli.client import ColabRequestError
+
+    client = MagicMock()
+    client.assign.return_value = _cpu_assignment("m-s-job")
+    response = MagicMock()
+    response.status_code = 503
+    client.keep_alive_assignment.side_effect = ColabRequestError(
+        "Service Unavailable",
+        MagicMock(),
+        response,
+        response_body="upstream timeout",
+    )
+    orch = _orch(
+        tmp_path,
+        spec=_spec(accelerator=Accelerator(prefer=[], accept_cpu=True)),
+        client=client,
+    )
+
+    orch.provision()
+
+    client.unassign.assert_not_called()
+    keep_alive_spawn.assert_called_once()
+    assert orch.session_state.keep_alive_pid == 4242
+    assert orch.session_state.last_keep_alive_ping is None
 
 
 # --------------------------------------------------------------------------
@@ -604,6 +721,8 @@ def test_surviving_descendants_are_surfaced_as_a_hint(tmp_path):
 # --------------------------------------------------------------------------
 
 
+
+
 def test_degraded_transport_never_becomes_session_lost(tmp_path):
     """The expensive misclassification: calling a healthy VM dead makes a
     retrying agent provision a second one alongside the first."""
@@ -699,6 +818,66 @@ def test_cleanup_closes_the_kernel_client_when_the_vm_is_left_up(tmp_path):
     orch.cleanup(force_leave_up=True)
 
     runtime.stop.assert_called_once_with()
+def test_cleanup_stops_keep_alive_before_release(tmp_path, monkeypatch):
+    killed = []
+    monkeypatch.setattr(
+        "colab_cli.common.kill_process", lambda pid: killed.append(pid)
+    )
+    client = MagicMock()
+    session_store = MagicMock()
+    orch = _orch(tmp_path, client=client, session_store=session_store)
+    orch.env.endpoint = "m-s-abc"
+    orch.session_state = SimpleNamespace(
+        name="job-unit-job", keep_alive_pid=4242
+    )
+
+    orch.cleanup()
+
+    assert killed == [4242]
+    client.unassign.assert_called_once_with("m-s-abc")
+    session_store.remove.assert_called_once_with("job-unit-job")
+    assert orch.env.cleanup is Cleanup.RELEASED
+
+
+def test_leave_up_preserves_keep_alive(tmp_path, monkeypatch):
+    killed = []
+    monkeypatch.setattr(
+        "colab_cli.common.kill_process", lambda pid: killed.append(pid)
+    )
+    client = MagicMock()
+    session_store = MagicMock()
+    orch = _orch(tmp_path, client=client, session_store=session_store)
+    orch.env.endpoint = "m-s-abc"
+    orch.session_state = SimpleNamespace(
+        name="job-unit-job", keep_alive_pid=4242
+    )
+
+    orch.cleanup(force_leave_up=True)
+
+    assert killed == []
+    client.unassign.assert_not_called()
+    session_store.remove.assert_not_called()
+    assert orch.env.cleanup is Cleanup.LEFT_UP
+
+
+def test_cleanup_stops_keep_alive_when_the_assignment_is_already_absent(
+    tmp_path, monkeypatch
+):
+    killed = []
+    monkeypatch.setattr(
+        "colab_cli.common.kill_process", lambda pid: killed.append(pid)
+    )
+    session_store = MagicMock()
+    orch = _orch(tmp_path, session_store=session_store)
+    orch.session_state = SimpleNamespace(
+        name="job-unit-job", keep_alive_pid=4242
+    )
+
+    orch.cleanup()
+
+    assert killed == [4242]
+    session_store.remove.assert_called_once_with("job-unit-job")
+    assert orch.env.cleanup is Cleanup.ALREADY_ABSENT
 
 
 # --------------------------------------------------------------------------
