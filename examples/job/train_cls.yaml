@@ -1,0 +1,75 @@
+# A complete `mighty-colab job` spec.
+#
+#   mighty-colab job plan examples/job/train_cls.yaml     # free, allocates nothing
+#   mighty-colab --json job apply --job-id <id>           # the only step that spends
+#   mighty-colab --json job status <id>
+#   mighty-colab job destroy <id>                         # safe to run twice
+#
+# Paths in `code` are relative to this file, so the spec works from any
+# working directory.
+
+name: train-cls
+
+accelerator:
+  # Tried in order. Nothing is substituted silently: if none of these are
+  # available the job fails at `provision` with retry_class=retry_different
+  # rather than quietly running on a CPU box.
+  prefer: [A100, L4, T4]
+  accept_cpu: false
+
+code:
+  kind: bundle
+  root: ./src            # packed and uploaded whole; becomes sys.path[0]
+  entry: train.py        # relative to `root`, always
+  args: ["--epochs", "3"]
+
+# Installed with pip, then the kernel is restarted, then re-probed against
+# sys.modules. Pinning matters: an unpinned install that resolves to a new
+# major version is the difference between a result and a week of confusion.
+deps:
+  - torch==2.4.1
+  - numpy==1.26.4
+
+# Pulled by the VM over HTTPS, before your code starts. The URLs are signed
+# by you and are never passed into your process's environment.
+# `sha256` is optional but strongly recommended -- it is the only thing that
+# distinguishes "the dataset" from "a truncated copy of the dataset".
+data:
+  - url: https://storage.googleapis.com/my-bucket/cls/x.npy?X-Goog-Signature=...
+    dest: /content/data/x.npy
+    sha256: 7d793037a0760186574b0282f2f435e7
+    size_bytes: 104857600
+
+# Pushed by the VM after your code exits -- including when it FAILED. A
+# crashed run's last checkpoint is usually the thing you most want.
+artifacts:
+  - path: /content/out/model.pt
+    url: https://storage.googleapis.com/my-bucket/runs/model.pt?X-Goog-Signature=...
+    required: true
+  - path: /content/out/curve.png
+    url: https://storage.googleapis.com/my-bucket/runs/curve.png?X-Goog-Signature=...
+    required: false        # missing is reported, but does not fail the job
+
+# Where the verdict goes if the VM becomes unreadable. Defence in depth:
+# the normal path is the Contents API, and this is the backstop for genuine
+# VM loss. Both methods are needed because signed URLs are method-specific.
+control:
+  result:
+    put_url: https://storage.googleapis.com/my-bucket/runs/result.json?X-Goog-Signature=...
+    get_url: https://storage.googleapis.com/my-bucket/runs/result.json?X-Goog-Signature=...
+
+budgets:
+  # The only kill. There is deliberately no "stall" budget: "stdout went
+  # quiet" is not evidence of a hung job, and killing on it murders healthy
+  # JAX/XLA compiles.
+  wall_clock: 3600
+
+retry:
+  # `when`, not `on`: YAML 1.1 reads a bare `on:` key as boolean true.
+  when: [retry_same]      # an explicit allow-list, never "anything that failed"
+  max_attempts: 2
+  budget_seconds: 14400
+  mode: recreate
+
+on_run_fail: offload_anyway
+on_offload_fail: leave_up   # keep the VM so the artifacts can be rescued

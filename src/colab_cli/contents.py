@@ -37,7 +37,12 @@ class ContentsClient:
         self.token = session_state.token
 
     def _request(
-        self, method: str, path: str, params: dict = None, json_data: dict = None
+        self,
+        method: str,
+        path: str,
+        params: dict = None,
+        json_data: dict = None,
+        timeout: tuple[float, float] | None = None,
     ):
         # Quote the path, but don't encode slashes so directory paths stay intact
         quoted_path = quote(path.strip("/"), safe="/")
@@ -47,7 +52,10 @@ class ContentsClient:
         if params:
             req_params.update(params)
 
-        response = requests.request(method, url, params=req_params, json=json_data)
+        request_kwargs = {"params": req_params, "json": json_data}
+        if timeout is not None:
+            request_kwargs["timeout"] = timeout
+        response = requests.request(method, url, **request_kwargs)
 
         if get_status_code(response) == 404:
             raise FileNotFoundError(f"File or directory not found: {path}")
@@ -78,7 +86,12 @@ class ContentsClient:
     def list_dir(self, path: str):
         return self._request("GET", path)
 
-    def upload(self, local_path: str, remote_path: str):
+    def upload(
+        self,
+        local_path: str,
+        remote_path: str,
+        timeout: tuple[float, float] | None = None,
+    ):
         file_size = os.path.getsize(local_path)
         filename = remote_path.split("/")[-1]
         base_payload = {
@@ -95,6 +108,7 @@ class ContentsClient:
                 "PUT",
                 remote_path,
                 json_data={**base_payload, "content": content_b64, "chunk": 1},
+                timeout=timeout,
             )
 
         result = None
@@ -118,7 +132,12 @@ class ContentsClient:
                 result = self._request(
                     "PUT",
                     remote_path,
-                    json_data={**base_payload, "content": content_b64, "chunk": chunk},
+                    json_data={
+                        **base_payload,
+                        "content": content_b64,
+                        "chunk": chunk,
+                    },
+                    timeout=timeout,
                 )
                 if is_last:
                     break

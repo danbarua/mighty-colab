@@ -431,10 +431,18 @@ def _extract_command_names(help_output: str) -> list[str]:
     """Parse the command list out of a Typer/Click help output rendered
     inside the `╭─ Commands ─...` rich box. Returns names in the order they
     appear.
+
+    Only lines whose first token starts at the *name column* count. A
+    command whose help text is long enough to wrap renders its overflow
+    indented under the description, and taking the first token of every
+    line would read that overflow as a command name -- which is how a
+    group named `job` with a one-line summary ending in "destroy." made
+    this test report `destroy.` as an unsorted command.
     """
     lines = help_output.splitlines()
     in_commands = False
     names = []
+    name_col = None
     for line in lines:
         if "Commands" in line and ("─" in line or "-" in line):
             in_commands = True
@@ -444,12 +452,17 @@ def _extract_command_names(help_output: str) -> list[str]:
             if stripped.startswith("╰") or stripped.startswith("`"):
                 break
             # Lines look like:  "│ help        Show help for a command. │"
-            # Strip the rich box characters.
-            inner = stripped.strip("│").strip()
-            if not inner:
+            # Strip the rich box characters, but keep the indentation that
+            # distinguishes a name from a wrapped description.
+            inner = stripped.strip("│")
+            if not inner.strip():
                 continue
-            tok = inner.split()[0]
-            names.append(tok)
+            col = len(inner) - len(inner.lstrip())
+            if name_col is None:
+                name_col = col
+            elif col != name_col:
+                continue
+            names.append(inner.split()[0])
     return names
 
 
