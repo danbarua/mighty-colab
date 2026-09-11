@@ -451,7 +451,9 @@ class Orchestrator:
                 wd, wd_status = transport.read_json(f"{self.remote_dir}/watchdog.json")
                 if wd_status.name == "OK" and wd:
                     self.env.hints = [
-                        f"t={wd.get('elapsed')}s gpu={wd.get('gpu')} "
+                        f"t={wd.get('elapsed')}s "
+                        f"remaining={wd.get('remaining')}s "
+                        f"gpu={wd.get('gpu')} "
                         f"disk_free={wd.get('disk_free_bytes')} "
                         f"runner_alive={wd.get('runner_alive')}"
                     ]

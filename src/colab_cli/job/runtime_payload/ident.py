@@ -119,7 +119,7 @@ def descendants(pgid: int) -> list:
 JOB_ENV_VAR = "MIGHTY_JOB_ID"
 
 
-def tagged_processes(job_id: str) -> list:
+def tagged_processes(job_id: str, exclude=()) -> list:
     """PIDs whose environment carries this job's id, excluding ourselves.
 
     This is the only sweep that finds a `setsid` escapee: it left the
@@ -128,19 +128,26 @@ def tagged_processes(job_id: str) -> list:
     it inherited. Linux-only -- reading another process's environ needs
     /proc, which is what Colab actually runs on.
 
+    `exclude` is for the supervisor's *own* tagged processes -- notably the
+    watchdog, which inherits `MIGHTY_JOB_ID` by design and is still alive
+    when the verdict is written. Without it every single job reports a
+    surviving descendant, and an alarm that fires every time is one
+    operators learn to ignore -- which costs exactly the real escapee this
+    sweep exists to catch.
+
     Returns [] on non-Linux, where this cannot be answered; callers MUST
     treat that as "unknown", never as "nothing survived".
     """
     if not _LINUX or not job_id:
         return []
     needle = f"{JOB_ENV_VAR}={job_id}\0".encode()
-    me = os.getpid()
+    skip = {os.getpid(), *exclude}
     out = []
     for entry in os.listdir("/proc"):
         if not entry.isdigit():
             continue
         pid = int(entry)
-        if pid == me:
+        if pid in skip:
             continue
         try:
             with open(f"/proc/{pid}/environ", "rb") as f:

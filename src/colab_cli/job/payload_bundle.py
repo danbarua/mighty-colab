@@ -109,13 +109,30 @@ def _remote_join(root: str, child: str) -> str:
     return f"{root.rstrip('/')}/{child.lstrip('/')}"
 
 
-def _upload_checked(client, local_path: Path, remote_path: str) -> None:
+def _upload_checked(
+    client, local_path: Path, remote_path: str, made_dirs: set | None = None
+) -> None:
     size = local_path.stat().st_size
     if size > CONTENTS_UPLOAD_CEILING:
         raise ValueError(
             f"Refusing upload of {local_path}: {size} bytes exceeds the "
             "250 MB Contents ceiling; use a data URL instead."
         )
+    # The Contents API does not create parents implicitly, and the Colab
+    # backend reports the resulting failure as a bare HTTP 500 -- which the
+    # client reasonably attributes to the known upload-size limit. A live
+    # run hit exactly that: a 222-byte `mighty_runtime/__init__.py`
+    # rejected as "too large" because its directory did not exist yet.
+    #
+    # `made_dirs` is caller-scoped, never module-global: a cache that
+    # outlived one staging pass would skip `makedirs` for a *different* VM
+    # reached later in the same process, and the skip only shows up as
+    # that same misleading 500.
+    parent = remote_path.rsplit("/", 1)[0]
+    if parent and (made_dirs is None or parent not in made_dirs):
+        client.makedirs(parent)
+        if made_dirs is not None:
+            made_dirs.add(parent)
     client.upload(str(local_path), remote_path)
 
 
@@ -145,7 +162,7 @@ def _iter_user_files(spec):
         yield path, relative
 
 
-def _write_manifest(client, remote_dir, name, rows):
+def _write_manifest(client, remote_dir, name, rows, made_dirs=None):
     if not rows:
         return
     with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
@@ -153,7 +170,9 @@ def _write_manifest(client, remote_dir, name, rows):
         f.flush()
         local_path = Path(f.name)
     try:
-        _upload_checked(client, local_path, _remote_join(remote_dir, name))
+        _upload_checked(
+            client, local_path, _remote_join(remote_dir, name), made_dirs
+        )
     finally:
         local_path.unlink(missing_ok=True)
 
@@ -168,14 +187,22 @@ def stage_payload(*, spec, job_id: str, session, remote_dir: str) -> None:
     del job_id  # The remote directory already contains the orchestrator ID.
 
     client = ContentsClient(session)
+    made_dirs: set = set()
     runtime_remote = _remote_join(remote_dir, "mighty_runtime")
     for local_path in sorted(_RUNTIME_DIR.rglob("*.py")):
         relative = local_path.relative_to(_RUNTIME_DIR)
-        _upload_checked(client, local_path, _remote_join(runtime_remote, str(relative)))
+        _upload_checked(
+            client,
+            local_path,
+            _remote_join(runtime_remote, str(relative)),
+            made_dirs,
+        )
 
     src_remote = _remote_join(remote_dir, "src")
     for local_path, relative in _iter_user_files(spec):
-        _upload_checked(client, local_path, _remote_join(src_remote, str(relative)))
+        _upload_checked(
+            client, local_path, _remote_join(src_remote, str(relative)), made_dirs
+        )
 
     data_rows = [
         {
@@ -194,5 +221,7 @@ def stage_payload(*, spec, job_id: str, session, remote_dir: str) -> None:
         }
         for item in (_job_attr(spec, "artifacts", []) or [])
     ]
-    _write_manifest(client, remote_dir, "stage.manifest.json", data_rows)
-    _write_manifest(client, remote_dir, "offload.manifest.json", artifact_rows)
+    _write_manifest(client, remote_dir, "stage.manifest.json", data_rows, made_dirs)
+    _write_manifest(
+        client, remote_dir, "offload.manifest.json", artifact_rows, made_dirs
+    )

@@ -110,11 +110,16 @@ def _runner_identity(job_dir):
     )
 
 
-def _record(job_dir, runner_alive, deadline, now):
+def _record(job_dir, runner_alive, deadline, now, started):
+    # `elapsed`/`remaining` are derived here rather than by the supervisor:
+    # the local clock may be minutes off the VM's, and "how long has this
+    # been running" must be answered by the machine that is running it.
     _atomic_write_json(
         os.path.join(job_dir, "watchdog.json"),
         {
             "ts": now,
+            "elapsed": round(now - started),
+            "remaining": (round(deadline - now) if deadline is not None else None),
             "disk_free_bytes": _disk_free_bytes(job_dir),
             "gpu": _gpu_query(),
             "runner_alive": runner_alive,
@@ -167,6 +172,7 @@ def main(argv):
     cancel_sent = os.path.exists(os.path.join(job_dir, "cancel.json"))
     kill_sent = False
     escalate_at = None
+    started = time.time()
     while True:
         now = time.time()
         pid, expected_start, expected_boot, deadline = _runner_identity(job_dir)
@@ -175,7 +181,7 @@ def main(argv):
             deadline_value = float(deadline) if deadline is not None else None
         except (TypeError, ValueError):
             deadline_value = None
-        _record(job_dir, runner_alive, deadline_value, now)
+        _record(job_dir, runner_alive, deadline_value, now, started)
 
         # A result means the runner has completed its durable work. Stop the
         # sibling rather than leave a detached process behind.

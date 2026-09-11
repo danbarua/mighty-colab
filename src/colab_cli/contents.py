@@ -86,6 +86,38 @@ class ContentsClient:
     def list_dir(self, path: str):
         return self._request("GET", path)
 
+    def makedirs(self, remote_dir: str, timeout: tuple[float, float] | None = None):
+        """Create `remote_dir` and every missing ancestor. Idempotent.
+
+        The Jupyter Contents API will not create parents implicitly: a PUT
+        of `a/b/c.py` when `a/b` does not exist fails, and the Colab
+        backend reports it as a bare HTTP 500 rather than a 404. That
+        misleading status is why this is worth a dedicated method -- the
+        500 handler in `_request` reasonably attributes 500s to the known
+        size-limit failure, so a missing directory otherwise surfaces as
+        "your file is too big" for a 222-byte `__init__.py`.
+        """
+        parts = [p for p in remote_dir.strip("/").split("/") if p]
+        for i in range(1, len(parts) + 1):
+            path = "/".join(parts[:i])
+            try:
+                existing = self._request("GET", path, timeout=timeout)
+            except FileNotFoundError:
+                existing = None
+            if existing is not None:
+                if existing.get("type") != "directory":
+                    raise NotADirectoryError(
+                        f"Cannot create directory {remote_dir!r}: {path!r} "
+                        "already exists and is a file"
+                    )
+                continue
+            self._request(
+                "PUT",
+                path,
+                json_data={"type": "directory", "path": path},
+                timeout=timeout,
+            )
+
     def upload(
         self,
         local_path: str,

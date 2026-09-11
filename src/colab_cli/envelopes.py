@@ -93,6 +93,39 @@ class RunEnvelope(EnvelopeBase):
     outputs: List[Dict[str, Any]]
 
 
+class JobPlanEnvelope(EnvelopeBase):
+    """`job plan --json`. Carries diagnostics whether or not they are fatal.
+
+    `job_id` is present even when the plan has errors: the plan is still
+    written to disk, so a caller can fix the spec and re-plan while keeping
+    a stable handle on the attempt.
+    """
+
+    job_id: Optional[str] = None
+    spec_hash: Optional[str] = None
+    plan_path: Optional[str] = None
+    diagnostics: List[Dict[str, Any]] = []
+
+
+class JobEnvelopeWrapper(EnvelopeBase):
+    """`job apply|status|destroy --json`.
+
+    `status` here is the CLI-transaction field -- whether this invocation
+    worked -- and is deliberately NOT the job's verdict. A successful
+    `job status` reporting a failed run is `status: ok`. The job's own
+    outcome lives entirely inside `job`, with `done`/`ok` lifted to the top
+    level so a poller does not have to recompute the predicates.
+    """
+
+    job: Dict[str, Any]
+    done: bool
+    ok: bool
+
+
+class JobListEnvelope(EnvelopeBase):
+    jobs: List[Dict[str, Any]]
+
+
 class ExecAsyncStarted(EnvelopeBase):
     pid: int
     log_path: str

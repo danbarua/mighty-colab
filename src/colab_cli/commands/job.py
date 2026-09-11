@@ -37,6 +37,11 @@ import typer
 from typing_extensions import Annotated
 
 from colab_cli.common import build_envelope, emit_json, state
+from colab_cli.envelopes import (
+    JobEnvelopeWrapper,
+    JobListEnvelope,
+    JobPlanEnvelope,
+)
 from colab_cli.job.models import (
     Cleanup,
     JobEnvelope,
@@ -93,7 +98,8 @@ def _emit(env: JobEnvelope, command: str) -> None:
                 job=json.loads(env.model_dump_json()),
                 done=env.done,
                 ok=env.ok,
-            )
+            ),
+            JobEnvelopeWrapper,
         )
     else:
         typer.echo(_human(env))
@@ -159,7 +165,8 @@ def _emit_spec_errors(exc) -> None:
                 exit_code=1,
                 reason="the spec does not validate",
                 diagnostics=diags,
-            )
+            ),
+            JobPlanEnvelope,
         )
     else:
         for d in diags:
@@ -222,7 +229,8 @@ def plan(
                 spec_hash=p.spec_hash,
                 plan_path=str(store.job_dir(job_id) / "plan.json"),
                 diagnostics=[json.loads(d.model_dump_json()) for d in p.diagnostics],
-            )
+            ),
+            JobPlanEnvelope,
         )
     else:
         typer.echo(f"[job] plan {job_id}  spec_hash={p.spec_hash[:12]}")
@@ -557,7 +565,10 @@ def list_jobs():
                     "endpoint": e.endpoint if e else None,
                 }
             )
-        emit_json(build_envelope(status="ok", command="job list", jobs=rows))
+        emit_json(
+            build_envelope(status="ok", command="job list", jobs=rows),
+            JobListEnvelope,
+        )
         return
     if not ids:
         typer.echo("[colab] No jobs.")

@@ -536,7 +536,11 @@ def main(argv):
     except Exception:  # noqa: BLE001
         pass
     try:
-        tagged = ident.tagged_processes(job_id)
+        # The watchdog carries MIGHTY_JOB_ID too, by design, and is still
+        # alive at verdict time -- exclude it or every job reports a
+        # phantom escapee. Confirmed on a live VM before this was fixed.
+        own = {watchdog_proc.pid} if watchdog_proc is not None else set()
+        tagged = ident.tagged_processes(job_id, exclude=own)
         detect_ok = ident.can_detect_escapees()
     except Exception:  # noqa: BLE001
         pass
