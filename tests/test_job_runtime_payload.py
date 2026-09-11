@@ -25,6 +25,12 @@ import pytest
 RUNTIME_SOURCE = Path(__file__).parents[1] / "src/colab_cli/job/runtime_payload"
 
 
+def _clean_workload():
+    from colab_cli.job.runtime_payload import ident
+
+    return "succeeded" if ident.can_detect_escapees() else "unknown"
+
+
 def _runtime_env(root: Path):
     env = os.environ.copy()
     env["PYTHONPATH"] = str(root)
@@ -95,7 +101,7 @@ def _run_prepared(tmp_path: Path, entry: Path, job_dir: Path, *extra: str, timeo
 def test_exit_zero_is_succeeded(tmp_path):
     proc, result, job_dir = _run(tmp_path, "raise SystemExit(0)\n")
     assert proc.returncode == 0
-    assert result["workload"] == "succeeded"
+    assert result["workload"] == _clean_workload()
     assert result["exit_code"] == 0
     assert result["offload"] == "not_required"
     assert not (job_dir / "exception.json").exists()
@@ -205,7 +211,7 @@ def test_sibling_import_and_real_file_work(tmp_path):
     )
     (tmp_path / "sibling.py").write_text("VALUE = 'imported'\n")
     _proc, result, _job_dir = _run_prepared(tmp_path, entry, job_dir)
-    assert result["workload"] == "succeeded"
+    assert result["workload"] == _clean_workload()
     assert (tmp_path / "sibling-result").read_text() == "imported"
 
 
@@ -495,7 +501,7 @@ def test_staged_payload_and_runner_share_a_secret_channel_without_persisting_it(
 
     result = json.loads((remote_dir / "result.json").read_text())
     assert proc.returncode == 0
-    assert result["workload"] == "succeeded"
+    assert result["workload"] == _clean_workload()
     assert result["offload"] == "ok"
     requests = {(method, path): body for method, path, body in received}
     assert set(requests) == {
@@ -505,7 +511,7 @@ def test_staged_payload_and_runner_share_a_secret_channel_without_persisting_it(
     }
     assert requests[("PUT", f"/artifact?sig={sentinel}-artifact")] == b"artifact"
     uploaded_result = json.loads(requests[("PUT", f"/result?sig={sentinel}-result")])
-    assert uploaded_result["workload"] == "succeeded"
+    assert uploaded_result["workload"] == _clean_workload()
     assert uploaded_result["schema_version"] == "2"
     assert uploaded_result["cli_version"] == "installed-1.2.3"
     assert uploaded_result["runtime_payload_version"] == result["runtime_payload_version"]
@@ -550,6 +556,63 @@ def test_missing_optional_artifact_does_not_fail_offload(tmp_path):
 def test_escapee_detection_is_available_on_linux(tmp_path):
     _proc, result, _job_dir = _run(tmp_path, "print('no escape')\n")
     assert result["escapee_detection_available"] is True
+
+
+def test_succeeded_is_refused_when_escapee_detection_is_unavailable():
+    from colab_cli.job.runtime_payload.runner import _classify_workload
+
+    workload, reason = _classify_workload(
+        "succeeded", tagged=[], detect_ok=False
+    )
+    assert workload == "unknown"
+    assert reason == "escapee detection unavailable"
+
+
+def test_succeeded_is_refused_while_a_tagged_descendant_survives():
+    from colab_cli.job.runtime_payload.runner import _classify_workload
+
+    workload, reason = _classify_workload(
+        "succeeded", tagged=[4242], detect_ok=True
+    )
+    assert workload == "failed"
+    assert "survived" in reason
+    cancelled, _reason = _classify_workload(
+        "cancelled", tagged=[4242], detect_ok=True
+    )
+    assert cancelled == "cancelled"
+
+
+@pytest.mark.skipif(
+    not (sys.platform.startswith("linux") and Path("/proc").is_dir()),
+    reason="setsid containment requires Linux /proc",
+)
+def test_setsid_grandchild_is_dead_before_the_terminal_result(tmp_path):
+    marker = tmp_path / "escapee.pid"
+    source = (
+        "import os, time\n"
+        "from pathlib import Path\n"
+        f"marker = Path({str(marker)!r})\n"
+        "if os.fork() == 0:\n"
+        "    os.setsid()\n"
+        "    if os.fork() == 0:\n"
+        "        marker.write_text(str(os.getpid()))\n"
+        "        time.sleep(30)\n"
+        "        os._exit(0)\n"
+        "    os._exit(0)\n"
+        "for _ in range(50):\n"
+        "    if marker.exists():\n"
+        "        break\n"
+        "    time.sleep(0.05)\n"
+    )
+    _proc, result, _job_dir = _run(tmp_path, source, timeout=40)
+    assert marker.exists()
+    pid = int(marker.read_text())
+    with pytest.raises(OSError):
+        os.kill(pid, 0)
+    assert result["surviving_descendants"] == []
+    assert result["workload"] == "succeeded"
+    assert result["escapee_detection_available"] is True
+
 def test_consumer_args_after_separator_are_verbatim(tmp_path):
     _package, entry, job_dir = _prepare(
         tmp_path,
@@ -570,7 +633,7 @@ def test_consumer_args_after_separator_are_verbatim(tmp_path):
         "--deadline",
         "1",
     )
-    assert result["workload"] == "succeeded"
+    assert result["workload"] == _clean_workload()
     assert json.loads((tmp_path / "args.json").read_text()) == [
         "--job-dir",
         "/tmp/evil",

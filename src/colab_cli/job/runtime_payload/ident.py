@@ -158,6 +158,40 @@ def tagged_processes(job_id: str, exclude=()) -> list:
     return out
 
 
+def tagged_identities(job_id: str, exclude=()) -> list:
+    """Tagged PIDs with starttime and boot_id captured in one pass."""
+    boot = boot_id()
+    out = []
+    for pid in tagged_processes(job_id, exclude):
+        started = starttime(pid)
+        if started:
+            out.append((pid, started, boot))
+    return out
+
+
+def signal_identities(identities, sig) -> list:
+    """Signal only processes whose pid+starttime+boot_id still match.
+
+    A reused PID has a different starttime, so it is skipped.
+    """
+    signaled = []
+    for pid, started, boot in identities:
+        if not alive(pid, started, boot):
+            continue
+        try:
+            os.kill(pid, sig)
+        except OSError:
+            continue
+        signaled.append(pid)
+    return signaled
+
+
+def signal_tagged(job_id: str, sig, exclude=()) -> list:
+    """Scan tagged processes and signal those whose identity still matches."""
+    return signal_identities(tagged_identities(job_id, exclude), sig)
+
+
+
 def can_detect_escapees() -> bool:
     """Whether tagged_processes() can actually answer on this platform."""
     return _LINUX

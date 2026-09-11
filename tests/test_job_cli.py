@@ -22,6 +22,7 @@ not -- each of the first three cost a provisioned VM to find.
 import json
 import os
 import re
+import signal
 from unittest.mock import MagicMock
 
 import pytest
@@ -155,6 +156,39 @@ def test_escapee_sweep_excludes_our_own_watchdog(monkeypatch, tmp_path):
 
     assert sorted(ident.tagged_processes("job-A")) == [100, 200]
     assert ident.tagged_processes("job-A", exclude={200}) == [100]
+
+
+def test_signal_identities_skips_a_reused_pid(monkeypatch):
+    from colab_cli.job.runtime_payload import ident
+
+    killed = []
+    monkeypatch.setattr(ident.os, "kill", lambda pid, sig: killed.append(pid))
+    monkeypatch.setattr(
+        ident, "alive", lambda pid, started, boot: False
+    )
+    signaled = ident.signal_identities(
+        [(100, "old-start", "boot")], signal.SIGKILL
+    )
+    assert signaled == []
+    assert killed == []
+
+
+def test_signal_identities_kills_only_the_matching_process(monkeypatch):
+    from colab_cli.job.runtime_payload import ident
+
+    killed = []
+
+    def fake_alive(pid, started, boot):
+        return pid == 100 and started == "t" and boot == "b"
+
+    monkeypatch.setattr(ident.os, "kill", lambda pid, sig: killed.append((pid, sig)))
+    monkeypatch.setattr(ident, "alive", fake_alive)
+    signaled = ident.signal_identities(
+        [(100, "t", "b"), (101, "t", "b")], signal.SIGTERM
+    )
+    assert signaled == [100]
+    assert killed == [(100, signal.SIGTERM)]
+
 
 
 # --------------------------------------------------------------------------

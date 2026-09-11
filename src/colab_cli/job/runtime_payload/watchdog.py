@@ -47,6 +47,15 @@ def _safe_killpg(pgid, sig):
         return False
 
 
+def _signal_escapees(job_dir, sig) -> None:
+    job_id = os.path.basename(os.path.normpath(job_dir))
+    try:
+        ident.signal_tagged(job_id, sig, exclude={os.getpid()})
+    except Exception:  # noqa: BLE001 - watchdog must keep polling
+        pass
+
+
+
 def _gpu_query():
     """Return the nvidia-smi query output, or None when unavailable."""
     try:
@@ -147,6 +156,7 @@ def _cancel(job_dir, shim_pgid, now):
             {"cancelled_by": "wall_clock", "at": now},
         )
     _safe_killpg(shim_pgid, signal.SIGTERM)
+    _signal_escapees(job_dir, signal.SIGTERM)
 
 
 def main(argv):
@@ -214,13 +224,16 @@ def main(argv):
         if not cancel_sent and (cancel_requested or deadline_reached):
             if cancel_requested:
                 _safe_killpg(shim_pgid, signal.SIGTERM)
+                _signal_escapees(job_dir, signal.SIGTERM)
             else:
                 _cancel(job_dir, shim_pgid, now)
             cancel_sent = True
             escalate_at = now + GRACE_SECONDS
         elif not kill_sent and escalate_at is not None and now >= escalate_at:
             _safe_killpg(shim_pgid, signal.SIGKILL)
+            _signal_escapees(job_dir, signal.SIGKILL)
             kill_sent = True
+
 
         # Poll more frequently than the report cadence only when a deadline is
         # close. This keeps the normal 30-second report contract while making

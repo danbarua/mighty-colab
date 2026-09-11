@@ -15,6 +15,7 @@ log:
 2026-09-12: Fixed [#27](https://github.com/danbarua/mighty-colab/issues/27): GCS control-result URL pairs must identify one object; `status` and `destroy` automatically use the GET URL as a bounded terminal-result fallback when the VM result is unavailable. Unsupported retry, resume, control-log, and run-failure policy values remain plan errors.
 2026-09-12: Fixed [#26](https://github.com/danbarua/mighty-colab/issues/26): terminal local and off-VM results identify the CLI build and exact shipped runtime payload under explicit result schema version 2; current readers continue to accept version-1 records.
 2026-09-12: Hardened #26 result recovery after review: terminal absorption validates on a copy and commits only a complete record; malformed VM and off-VM results leave existing envelope state unchanged.
+2026-09-11: Fixed [#23](https://github.com/danbarua/mighty-colab/issues/23): tagged `setsid` descendants are signalled with identity checks; `succeeded` is refused if any survive or if escapee detection is unavailable.
 
 
 
@@ -309,7 +310,6 @@ Be aware of these before trusting a long run:
 - Data GET and artifact PUT buffer whole objects; source size is limited per file only after allocation, with no aggregate bundle ceiling.
 - Caller-owned source specs and generated `.mighty-colab-secrets.json` sidecars still contain full signed URLs and require credential handling.
 - Retry/recreate/resume and `control.log` are not implemented; planning rejects non-default policy values.
-- Detected tagged escapees are reported, not killed; the dedicated shipped-path setsid case is still unverified.
 - Job-group help omits `list`, and some early `--json` errors and failed-apply outer exit fields are inconsistent with actual behavior.
 
 Verified live on 2026-09-11: CPU and T4 GPU runs end to end; install/restart/verify with a real dependency pin; the workload failure path with cleanup; proxy access recovery after the approximately 60-minute failure; explicit public launch-kernel restart while a detached consumer continued; cancel-only termination while the assignment remained live, followed by full teardown; signed GCS data GET, artifact PUT, and control-result PUT; job-owned TFE keep-alive through idle leave-up and destroy; and supervisor crash recovery via `status --poll` after killing apply during run. These runs do not verify platform-initiated kernel replacement or the gaps above.

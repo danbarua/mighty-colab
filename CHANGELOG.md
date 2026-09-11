@@ -71,6 +71,10 @@ below corresponds to a tag of the same name.
   current readers continue to accept version-1 records, require complete
   provenance from version-2 producers, reject unknown result schemas, and
   leave persisted envelope state unchanged when any terminal field is invalid.
+- **A `setsid` grandchild could outlive a succeeded verdict.** Runner and
+  watchdog now signal processes tagged with `MIGHTY_JOB_ID` using
+  pid+starttime+boot_id identity checks. `succeeded` is refused while a
+  tagged descendant survives or when `/proc` detection is unavailable.
 
 - **`job` sessions did not retain the kernel that launched their detached
   runner.** The session record now persists the runtime's kernel and Jupyter
