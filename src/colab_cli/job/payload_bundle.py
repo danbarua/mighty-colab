@@ -239,6 +239,74 @@ def _iter_user_files(spec, source_spec_path=None):
         yield path, relative
 
 
+def _hash_user_file(path: Path) -> tuple[int, str]:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
+    try:
+        digest = hashlib.sha256()
+        size = 0
+        with os.fdopen(fd, "rb", closefd=False) as source:
+            for chunk in iter(lambda: source.read(64 * 1024), b""):
+                size += len(chunk)
+                digest.update(chunk)
+        return size, digest.hexdigest()
+    finally:
+        os.close(fd)
+
+
+def collect_source_files(spec, source_spec_path=None):
+    """Snapshot the source payload as relative path, size, and SHA-256."""
+    from colab_cli.job.models import SourceFileLock
+
+    rows = []
+    for local_path, relative in _iter_user_files(spec, source_spec_path):
+        size, digest = _hash_user_file(local_path)
+        rows.append(
+            SourceFileLock(
+                path=relative.as_posix(),
+                size_bytes=size,
+                sha256=digest,
+            )
+        )
+    rows.sort(key=lambda item: item.path)
+    return rows
+
+
+def verify_source_files(spec, source_files, source_spec_path=None) -> None:
+    """Refuse apply when disk bytes differ from the accepted plan."""
+    if not source_files:
+        raise ValueError("plan has no source lock; re-run job plan")
+    current = {
+        item.path: item for item in collect_source_files(spec, source_spec_path)
+    }
+    expected = {item.path: item for item in source_files}
+    added = sorted(set(current) - set(expected))
+    removed = sorted(set(expected) - set(current))
+    changed = sorted(
+        path
+        for path in set(current) & set(expected)
+        if (
+            current[path].size_bytes != expected[path].size_bytes
+            or current[path].sha256 != expected[path].sha256
+        )
+    )
+    if not added and not removed and not changed:
+        return
+    parts = []
+    if added:
+        parts.append("added " + ", ".join(added))
+    if removed:
+        parts.append("removed " + ", ".join(removed))
+    if changed:
+        parts.append("changed " + ", ".join(changed))
+    raise ValueError(
+        "source files changed since planning ("
+        + "; ".join(parts)
+        + "); re-run job plan"
+    )
+
+
+
 def _write_manifest(client, remote_dir, name, rows, made_dirs=None):
     if not rows:
         return
@@ -273,7 +341,13 @@ def _url_ref(url: str) -> str:
 
 
 def stage_payload(
-    *, spec, job_id: str, session, remote_dir: str, source_spec_path=None
+    *,
+    spec,
+    job_id: str,
+    session,
+    remote_dir: str,
+    source_spec_path=None,
+    source_files=None,
 ) -> None:
     """Upload public payload files before the owner-only URL channel."""
 
@@ -291,14 +365,29 @@ def stage_payload(
         )
 
     src_remote = _remote_join(remote_dir, "src")
+    expected = (
+        {item.path: item for item in source_files} if source_files is not None else None
+    )
+    uploaded = set()
     for local_path, relative in _iter_user_files(spec, source_spec_path):
+        key = relative.as_posix()
+        if expected is not None and key not in expected:
+            raise ValueError(f"undeclared source file: {key}")
         snapshot = _snapshot_user_file(local_path)
         try:
+            if expected is not None:
+                size, digest = _hash_user_file(snapshot)
+                lock = expected[key]
+                if size != lock.size_bytes or digest != lock.sha256:
+                    raise ValueError(f"source file changed while staging: {key}")
             _upload_checked(
                 client, snapshot, _remote_join(src_remote, str(relative)), made_dirs
             )
         finally:
             snapshot.unlink(missing_ok=True)
+        uploaded.add(key)
+    if expected is not None and uploaded != set(expected):
+        raise ValueError("source payload does not match the plan")
 
     urls = {}
     data_rows = []

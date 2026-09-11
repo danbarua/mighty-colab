@@ -42,6 +42,10 @@ below corresponds to a tag of the same name.
   orphaned: it absorbs a complete remote result or classifies a dead runner
   from `launch.json` identity plus `watchdog.json`, then finishes cleanup
   without overwriting the remote workload if teardown fails.
+- **Job plans did not lock source bytes.** Plans now record each source file's
+  relative path, size, and SHA-256. Apply refuses added, removed, renamed, or
+  changed files before assignment and stages only locked bytes. Signed-URL
+  query canonicalization is unchanged.
 
 - **`job` sessions did not retain the kernel that launched their detached
   runner.** The session record now persists the runtime's kernel and Jupyter

@@ -332,6 +332,40 @@ class Diagnostic(BaseModel):
     hint: Optional[str] = None
 
 
+class SourceFileLock(BaseModel):
+    """One source file covered by a plan, identified without absolute paths."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    path: str
+    size_bytes: int
+    sha256: str
+
+    @field_validator("path")
+    @classmethod
+    def _relative_posix_path(cls, value: str) -> str:
+        if not value or value.startswith("/") or "\\" in value:
+            raise ValueError("source path must be a relative POSIX path")
+        parts = value.split("/")
+        if any(part in {"", ".", ".."} for part in parts):
+            raise ValueError("source path must not contain empty or parent segments")
+        return value
+
+    @field_validator("size_bytes")
+    @classmethod
+    def _non_negative_size(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("size_bytes must be >= 0")
+        return value
+
+    @field_validator("sha256")
+    @classmethod
+    def _sha256_is_full_hex_digest(cls, value: str) -> str:
+        if len(value) != 64 or any(c not in "0123456789abcdefABCDEF" for c in value):
+            raise ValueError("sha256 must contain exactly 64 hexadecimal characters")
+        return value.lower()
+
+
 class Plan(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -346,6 +380,7 @@ class Plan(BaseModel):
     # have since expired -- cheaper to catch before `assign` than after.
     url_expiry: Dict[str, Optional[str]] = Field(default_factory=dict)
     source_spec_path: Optional[str] = None
+    source_files: List[SourceFileLock] = Field(default_factory=list)
 
     @property
     def has_errors(self) -> bool:

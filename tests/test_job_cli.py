@@ -219,7 +219,7 @@ accelerator:
   prefer: []
   accept_cpu: true
 code:
-  kind: bundle
+  kind: file
   entry: train.py
 data:
   - url: https://storage.example/input?signature={sentinel}
@@ -297,7 +297,7 @@ def test_apply_rejects_a_plan_with_its_credential_marker_removed(
     spec = tmp_path / "job.yaml"
     spec.write_text(
         "name: marker\naccelerator:\n  prefer: []\n  accept_cpu: true\n"
-        "code:\n  kind: bundle\n  entry: train.py\n"
+        "code:\n  kind: file\n  entry: train.py\n"
         "data:\n  - url: https://storage.example/input?signature=secret\n"
         "    dest: input.bin\n    size_bytes: 1\n"
     )
@@ -334,7 +334,7 @@ def test_unconfirmed_credential_cleanup_overrides_leave_up(
     spec = tmp_path / "job.yaml"
     spec.write_text(
         "name: cleanup\naccelerator:\n  prefer: []\n  accept_cpu: true\n"
-        "code:\n  kind: bundle\n  entry: train.py\n"
+            "code:\n  kind: file\n  entry: train.py\n"
         "data:\n  - url: https://storage.example/input?signature=secret\n"
         "    dest: input.bin\n    size_bytes: 1\n"
     )
@@ -400,19 +400,23 @@ def test_apply_accepts_a_plan_whose_spec_is_untouched(tmp_path, mock_common_stat
     """The guard must not reject honest plans -- otherwise the first thing
     anyone does is delete it."""
     from colab_cli.job.models import Plan
-    from colab_cli.job.spec_io import spec_hash
+    from colab_cli.job.payload_bundle import collect_source_files
+    from colab_cli.job.spec_io import plan_hash
 
+    (tmp_path / "train.py").write_text("print(1)\n")
     spec = JobSpec(
         name="honest",
-        code=CodeSpec(kind="file", entry="train.py"),
+        code=CodeSpec(kind="file", root=str(tmp_path), entry="train.py"),
         accelerator=Accelerator(prefer=[], accept_cpu=True),
         budgets=Budgets(wall_clock=60),
     )
+    source_files = collect_source_files(spec)
     plan = Plan(
         job_id="honest",
-        spec_hash=spec_hash(spec),
+        spec_hash=plan_hash(spec, None, source_files),
         created_at="now",
         spec=spec,
+        source_files=source_files,
     )
     plan_file = tmp_path / "plan.json"
     plan_file.write_text(plan.model_dump_json())
@@ -420,6 +424,103 @@ def test_apply_accepts_a_plan_whose_spec_is_untouched(tmp_path, mock_common_stat
     result = runner.invoke(app, ["job", "apply", str(plan_file)])
 
     assert "its own recorded hash" not in _clean(result.output)
+    assert "source files changed" not in _clean(result.output)
+
+
+def _locked_plan(tmp_path, job_id, *, kind="file", files=None):
+    from colab_cli.job.models import Plan
+    from colab_cli.job.payload_bundle import collect_source_files
+    from colab_cli.job.spec_io import plan_hash
+
+    files = files or {"train.py": "print(1)\n"}
+    for name, content in files.items():
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+    spec_path = tmp_path / "job.yaml"
+    spec_path.write_text("name: lock\n")
+    spec = JobSpec(
+        name=job_id,
+        code=CodeSpec(kind=kind, root=str(tmp_path), entry="train.py"),
+        accelerator=Accelerator(prefer=[], accept_cpu=True),
+        budgets=Budgets(wall_clock=60),
+    )
+    source_files = collect_source_files(spec, spec_path)
+    plan = Plan(
+        job_id=job_id,
+        spec_hash=plan_hash(spec, str(spec_path), source_files),
+        created_at="now",
+        spec=spec,
+        source_spec_path=str(spec_path),
+        source_files=source_files,
+    )
+    plan_file = tmp_path.parent / f"{job_id}.plan.json"
+    plan_file.write_text(plan.model_dump_json())
+    return plan_file
+
+
+def test_apply_refuses_a_modified_source_file_before_assignment(
+    tmp_path, mock_common_state
+):
+    plan_file = _locked_plan(tmp_path, "changed-byte")
+    (tmp_path / "train.py").write_text("print(2)\n")
+
+    result = runner.invoke(app, ["job", "apply", str(plan_file)])
+
+    assert result.exit_code == 1
+    assert "changed train.py" in _clean(result.output)
+    mock_common_state.client.assign.assert_not_called()
+
+
+def test_apply_refuses_added_removed_and_renamed_bundle_files(
+    tmp_path, mock_common_state
+):
+    files = {"train.py": "print(1)\n", "helper.py": "X = 1\n"}
+    plan_file = _locked_plan(tmp_path, "bundle-drift", kind="bundle", files=files)
+
+    (tmp_path / "extra.py").write_text("Y = 2\n")
+    result = runner.invoke(app, ["job", "apply", str(plan_file)])
+    assert result.exit_code == 1
+    assert "added extra.py" in _clean(result.output)
+    mock_common_state.client.assign.assert_not_called()
+
+    (tmp_path / "extra.py").unlink()
+    (tmp_path / "helper.py").unlink()
+    result = runner.invoke(app, ["job", "apply", str(plan_file)])
+    assert result.exit_code == 1
+    assert "removed helper.py" in _clean(result.output)
+    mock_common_state.client.assign.assert_not_called()
+
+    (tmp_path / "helper.py").write_text("X = 1\n")
+    (tmp_path / "helper.py").rename(tmp_path / "util.py")
+    result = runner.invoke(app, ["job", "apply", str(plan_file)])
+    out = _clean(result.output)
+    assert "removed helper.py" in out
+    assert "util.py" in out
+    mock_common_state.client.assign.assert_not_called()
+
+
+def test_plan_records_relative_path_size_and_sha256(tmp_path, mock_common_state):
+    (tmp_path / "train.py").write_text("print(1)\n")
+    spec = tmp_path / "job.yaml"
+    spec.write_text(
+        "name: lock-me\naccelerator:\n  prefer: []\n  accept_cpu: true\n"
+        "code:\n  kind: file\n  entry: train.py\nbudgets:\n  wall_clock: 60\n"
+    )
+
+    result = runner.invoke(app, ["job", "plan", str(spec), "--no-probe"])
+
+    assert result.exit_code == 0
+    from colab_cli.commands.job import _store
+
+    plans = list((_store().root).glob("*/plan.json"))
+    assert len(plans) == 1
+    payload = json.loads(plans[0].read_text())
+    files = payload["source_files"]
+    assert files[0]["path"] == "train.py"
+    assert files[0]["size_bytes"] == len("print(1)\n")
+    assert len(files[0]["sha256"]) == 64
+
 
 
 # --------------------------------------------------------------------------
@@ -717,6 +818,29 @@ def test_stage_payload_allows_benign_http_query_parameters(tmp_path, monkeypatch
     )
 
     assert uploaded["/content/jobs/benign-query/src/train.py"] == source
+
+
+def test_stage_payload_refuses_an_undeclared_source_file(tmp_path, monkeypatch):
+    from colab_cli.job.payload_bundle import collect_source_files
+
+    (tmp_path / "train.py").write_text("print(1)\n")
+    spec = JobSpec(
+        name="locked-stage",
+        code=CodeSpec(kind="bundle", root=str(tmp_path), entry="train.py"),
+    )
+    locked = collect_source_files(spec)
+    (tmp_path / "sneak.py").write_text("print(2)\n")
+    monkeypatch.setattr(payload_bundle, "ContentsClient", lambda _session: MagicMock())
+
+    with pytest.raises(ValueError, match="undeclared source file: sneak.py"):
+        payload_bundle.stage_payload(
+            spec=spec,
+            job_id="locked-stage",
+            session=MagicMock(),
+            remote_dir="/content/jobs/locked-stage",
+            source_files=locked,
+        )
+
 
 
 @pytest.mark.parametrize("kind", ["file", "bundle"])
@@ -1159,19 +1283,23 @@ def test_unexpected_apply_exception_emits_a_terminal_envelope(
     from colab_cli.commands.job import _store
     from colab_cli.job.models import Plan
     from colab_cli.job.orchestrator import Orchestrator
-    from colab_cli.job.spec_io import spec_hash
+    from colab_cli.job.payload_bundle import collect_source_files
+    from colab_cli.job.spec_io import plan_hash
 
+    (tmp_path / "train.py").write_text("print(1)\n")
     spec = JobSpec(
         name="unexpected",
-        code=CodeSpec(kind="file", entry="train.py"),
+        code=CodeSpec(kind="file", root=str(tmp_path), entry="train.py"),
         accelerator=Accelerator(prefer=[], accept_cpu=True),
         budgets=Budgets(wall_clock=60),
     )
+    source_files = collect_source_files(spec)
     plan = Plan(
         job_id="unexpected",
-        spec_hash=spec_hash(spec),
+        spec_hash=plan_hash(spec, None, source_files),
         created_at="now",
         spec=spec,
+        source_files=source_files,
     )
     plan_file = tmp_path / "plan.json"
     plan_file.write_text(plan.model_dump_json())

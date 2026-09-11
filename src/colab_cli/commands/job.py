@@ -214,6 +214,7 @@ def plan(
     from colab_cli.common import state
     from pydantic import ValidationError
 
+    from colab_cli.job.payload_bundle import collect_source_files
     from colab_cli.job.planner import build_plan
     from colab_cli.job.spec_io import load_spec, plan_hash
 
@@ -237,7 +238,11 @@ def plan(
     job_id = _new_job_id(spec.name)
     p = build_plan(spec, job_id, probe=not no_probe)
     p.source_spec_path = str(Path(spec_file).expanduser().resolve(strict=False))
-    p.spec_hash = plan_hash(p.spec, p.source_spec_path)
+    try:
+        p.source_files = collect_source_files(spec, p.source_spec_path)
+    except (FileNotFoundError, ValueError):
+        p.source_files = []
+    p.spec_hash = plan_hash(p.spec, p.source_spec_path, p.source_files)
 
     store = _store()
     store.write_spec(job_id, spec)
@@ -300,7 +305,7 @@ def apply(
     """
     from colab_cli.common import state
     from colab_cli.job.planner import revalidate_expiry
-    from colab_cli.job.spec_io import plan_hash, spec_hash
+    from colab_cli.job.spec_io import plan_hash
     from colab_cli.job.transport import JobTransport
 
     store = _store()
@@ -340,11 +345,7 @@ def apply(
         )
         raise typer.Exit(1)
 
-    actual = (
-        plan_hash(p.spec, p.source_spec_path)
-        if p.source_spec_path is not None
-        else spec_hash(p.spec)
-    )
+    actual = plan_hash(p.spec, p.source_spec_path, p.source_files)
     if actual != p.spec_hash:
         typer.echo(
             "[colab] This plan file is inconsistent: its spec does not match "
@@ -354,6 +355,14 @@ def apply(
             err=True,
         )
         raise typer.Exit(1)
+
+    from colab_cli.job.payload_bundle import verify_source_files
+
+    try:
+        verify_source_files(p.spec, p.source_files, p.source_spec_path)
+    except ValueError as error:
+        typer.echo(f"[colab] {error}", err=True)
+        raise typer.Exit(1) from None
 
     if p.has_errors:
         typer.echo(
@@ -514,6 +523,7 @@ def _stage_payload(orch: Orchestrator, p) -> None:
         session=orch.session_state,
         remote_dir=orch.remote_dir,
         source_spec_path=p.source_spec_path,
+        source_files=p.source_files,
     )
 
 
