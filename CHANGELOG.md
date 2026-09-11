@@ -46,6 +46,11 @@ below corresponds to a tag of the same name.
   relative path, size, and SHA-256. Apply refuses added, removed, renamed, or
   changed files before assignment and stages only locked bytes. Signed-URL
   query canonicalization is unchanged.
+- **Apply stage, restart, and assignment refresh could hang unbounded.**
+  Stage, poll, cancel, and recovery now share one `JobTransport`. Contents
+  requests and assignment re-resolution use connect/read deadlines, kernel
+  restart has an explicit timeout, timed-out writes confirm before retry,
+  and exhausted stalls stay degraded unless the assignment is proven gone.
 
 - **`job` sessions did not retain the kernel that launched their detached
   runner.** The session record now persists the runtime's kernel and Jupyter

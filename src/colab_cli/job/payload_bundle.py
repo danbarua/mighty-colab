@@ -13,7 +13,6 @@ from pathlib import Path
 
 import yaml
 
-from colab_cli.contents import ContentsClient
 from colab_cli.job.spec_io import url_id
 from colab_cli.job.store import SECRET_SIDECAR_SUFFIX, SECRET_TEMP_PREFIX
 
@@ -344,7 +343,7 @@ def stage_payload(
     *,
     spec,
     job_id: str,
-    session,
+    transport,
     remote_dir: str,
     source_spec_path=None,
     source_files=None,
@@ -352,7 +351,7 @@ def stage_payload(
     """Upload public payload files before the owner-only URL channel."""
 
     del job_id
-    client = ContentsClient(session)
+    client = transport
     made_dirs: set = set()
     runtime_remote = _remote_join(remote_dir, "mighty_runtime")
     for local_path in sorted(_RUNTIME_DIR.rglob("*.py")):
@@ -447,3 +446,5 @@ def stage_payload(
             ),
             made_dirs,
         )
+
+

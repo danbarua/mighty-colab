@@ -15,7 +15,7 @@ from unittest.mock import MagicMock
 
 import pytest
 import requests
-from colab_cli.job.transport import JobTransport, ReadStatus
+from colab_cli.job.transport import JobTransport, ReadStatus, TransportError
 from colab_cli.state import SessionState
 
 
@@ -82,7 +82,7 @@ def test_401_refreshes_token_persists_state_and_retries(
 
     assert result == {"workload": "running"}
     assert status is ReadStatus.OK
-    client.list_assignments.assert_called_once_with()
+    client.list_assignments.assert_called_once_with(timeout=(2, 7))
     store.add.assert_called_once()
     persisted = store.add.call_args.args[0]
     assert persisted.name == "job-session"
@@ -108,7 +108,7 @@ def test_persistent_401_is_degraded_not_session_lost(mocker, session_state, assi
 
     assert result is None
     assert status is ReadStatus.DEGRADED
-    client.list_assignments.assert_called_once_with()
+    client.list_assignments.assert_called_once_with(timeout=(2, 7))
     assert contents_factory.call_count == 2
 
 
@@ -126,7 +126,7 @@ def test_absent_endpoint_is_session_lost(mocker, session_state):
 
     assert result is None
     assert status is ReadStatus.SESSION_LOST
-    client.list_assignments.assert_called_once_with()
+    client.list_assignments.assert_called_once_with(timeout=(2, 7))
     contents_factory.assert_called_once_with(session_state)
     store.add.assert_not_called()
 
@@ -146,7 +146,7 @@ def test_refresh_is_attempted_exactly_once_per_read(mocker, session_state, assig
 
     assert result is None
     assert status is ReadStatus.NOT_FOUND
-    client.list_assignments.assert_called_once_with()
+    client.list_assignments.assert_called_once_with(timeout=(2, 7))
     assert contents_factory.call_count == 2
 
 
@@ -167,7 +167,7 @@ def test_missing_path_on_healthy_endpoint_is_not_found(
 
     assert result is None
     assert status is ReadStatus.NOT_FOUND
-    client.list_assignments.assert_called_once_with()
+    client.list_assignments.assert_called_once_with(timeout=(2, 7))
     assert contents_factory.call_count == 2
 
 
@@ -185,7 +185,7 @@ def test_401_write_refreshes_and_retries(mocker, session_state, assignment):
     status = transport.write_json("content/cancel.json", {"cancel": True})
 
     assert status is ReadStatus.OK
-    client.list_assignments.assert_called_once_with()
+    client.list_assignments.assert_called_once_with(timeout=(2, 7))
     assert contents_factory.call_count == 2
     assert contents.upload.call_args.kwargs["timeout"] == (2, 7)
     assert refreshed_contents.upload.call_args.kwargs["timeout"] == (2, 7)
@@ -213,7 +213,7 @@ def test_repeated_missing_poll_does_not_refresh_every_time(
 
     assert first == (None, ReadStatus.NOT_FOUND)
     assert second == (None, ReadStatus.NOT_FOUND)
-    client.list_assignments.assert_called_once_with()
+    client.list_assignments.assert_called_once_with(timeout=(2, 7))
 
 
 def test_remove_deletes_and_confirms_the_remote_file_is_absent(
@@ -241,3 +241,138 @@ def test_remove_deletes_and_confirms_the_remote_file_is_absent(
         "content/jobs/x/mighty_runtime/.secrets/transfer.json",
     )
     assert contents._request.call_args_list[1].kwargs["params"] == {"content": "0"}
+
+
+def test_stalled_assignment_lookup_is_degraded_not_session_lost(
+    mocker, session_state
+):
+    contents = MagicMock()
+    contents._request.side_effect = [http_error(401)]
+    client = MagicMock()
+    client.list_assignments.side_effect = requests.exceptions.Timeout()
+    store = MagicMock()
+    transport, _factory, _refreshed = make_transport(
+        mocker, session_state, contents, client, store
+    )
+
+    result, status = transport.read_text("content/result.txt")
+
+    assert result is None
+    assert status is ReadStatus.DEGRADED
+    client.list_assignments.assert_called_once_with(timeout=(2, 7))
+    store.add.assert_not_called()
+
+
+def test_write_timeout_is_ok_when_the_file_already_landed(
+    mocker, session_state
+):
+    contents = MagicMock()
+    contents.upload.side_effect = requests.exceptions.Timeout()
+    contents._request.return_value = {
+        "format": "text",
+        "content": '{"cancel": true}',
+    }
+    client = MagicMock()
+    store = MagicMock()
+    transport, _factory, _refreshed = make_transport(
+        mocker, session_state, contents, client, store
+    )
+
+    status = transport.write_json("content/cancel.json", {"cancel": True})
+
+    assert status is ReadStatus.OK
+    contents.upload.assert_called_once()
+    client.list_assignments.assert_not_called()
+
+
+def test_write_timeout_retries_when_the_file_is_absent(mocker, session_state):
+    contents = MagicMock()
+    contents.upload.side_effect = [requests.exceptions.Timeout(), {}]
+    contents._request.side_effect = FileNotFoundError("missing")
+    client = MagicMock()
+    store = MagicMock()
+    transport, _factory, _refreshed = make_transport(
+        mocker, session_state, contents, client, store
+    )
+
+    status = transport.write_json("content/cancel.json", {"cancel": True})
+
+    assert status is ReadStatus.OK
+    assert contents.upload.call_count == 2
+    client.list_assignments.assert_not_called()
+
+
+def test_write_timeout_is_degraded_when_confirmation_also_stalls(
+    mocker, session_state
+):
+    contents = MagicMock()
+    contents.upload.side_effect = requests.exceptions.Timeout()
+    contents._request.side_effect = requests.exceptions.Timeout()
+    client = MagicMock()
+    store = MagicMock()
+    transport, _factory, _refreshed = make_transport(
+        mocker, session_state, contents, client, store
+    )
+
+    status = transport.write_json("content/cancel.json", {"cancel": True})
+
+    assert status is ReadStatus.DEGRADED
+    client.list_assignments.assert_not_called()
+
+
+def test_upload_timeout_is_ok_when_remote_size_matches(
+    mocker, session_state, tmp_path
+):
+    local = tmp_path / "train.py"
+    local.write_text("print(1)\n")
+    contents = MagicMock()
+    contents.upload.side_effect = requests.exceptions.Timeout()
+    contents._request.return_value = {"type": "file", "size": local.stat().st_size}
+    client = MagicMock()
+    store = MagicMock()
+    transport, _factory, _refreshed = make_transport(
+        mocker, session_state, contents, client, store
+    )
+
+    transport.upload(str(local), "/content/jobs/x/src/train.py")
+
+    contents.upload.assert_called_once()
+    assert contents.upload.call_args.kwargs["timeout"] == (2, 7)
+    client.list_assignments.assert_not_called()
+
+
+def test_makedirs_timeout_is_ok_when_directory_exists(mocker, session_state):
+    contents = MagicMock()
+    contents.makedirs.side_effect = requests.exceptions.Timeout()
+    contents._request.return_value = {"type": "directory"}
+    client = MagicMock()
+    store = MagicMock()
+    transport, _factory, _refreshed = make_transport(
+        mocker, session_state, contents, client, store
+    )
+
+    transport.makedirs("/content/jobs/x/src")
+
+    contents.makedirs.assert_called_once_with("/content/jobs/x/src", timeout=(2, 7))
+    client.list_assignments.assert_not_called()
+
+
+def test_stalled_upload_is_degraded_not_session_lost(
+    mocker, session_state, tmp_path
+):
+    local = tmp_path / "train.py"
+    local.write_text("print(1)\n")
+    contents = MagicMock()
+    contents.upload.side_effect = requests.exceptions.Timeout()
+    contents._request.side_effect = requests.exceptions.Timeout()
+    client = MagicMock()
+    store = MagicMock()
+    transport, _factory, _refreshed = make_transport(
+        mocker, session_state, contents, client, store
+    )
+
+    with pytest.raises(TransportError) as error:
+        transport.upload(str(local), "/content/jobs/x/src/train.py")
+
+    assert error.value.status is ReadStatus.DEGRADED
+    client.list_assignments.assert_not_called()

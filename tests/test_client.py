@@ -153,6 +153,8 @@ def test_client_list_assignments(client, mock_session):
     assert len(res) == 1
     assert res[0].endpoint == "e1"
     assert "tun/m/assignments" in mock_session.request.call_args.args[1]
+    assert mock_session.request.call_args.kwargs["timeout"] == (10.0, 30.0)
+
 
 
 def test_client_keep_alive_assignment_handles_empty_response(client, mock_session):

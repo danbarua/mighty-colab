@@ -179,7 +179,10 @@ class ColabRuntime:
         self,
         timeout: Optional[float] = None,
     ):
-        self.kernel_client.restart(timeout=timeout)
+        if timeout is None:
+            self.kernel_client.restart()
+        else:
+            self.kernel_client.restart(timeout=timeout)
 
     def execute_code(
         self,

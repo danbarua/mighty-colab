@@ -14,6 +14,8 @@ log:
 2026-09-11: Fixed and live-verified [#17](https://github.com/danbarua/mighty-colab/issues/17): `job apply` now starts the TFE keep-alive daemon after persisting the job session, propagates auth and `--config`, records daemon pid and last ping, stops the daemon on release or confirmed absence, and leaves it running on `--leave-up`.
 2026-09-11: Fixed and live-verified [#16](https://github.com/danbarua/mighty-colab/issues/16): provision persists the endpoint before keep-alive; a dead supervisor's `status --poll` absorbs complete runner results or classifies a dead runner from launch/watchdog identity, then finishes cleanup without overwriting a remote verdict.
 2026-09-11: Fixed [#20](https://github.com/danbarua/mighty-colab/issues/20): plans record each source file's relative path, size, and SHA-256; apply refuses added, removed, renamed, or changed files before assignment and stages only locked bytes. Signed-URL query canonicalization is unchanged.
+2026-09-11: Fixed [#22](https://github.com/danbarua/mighty-colab/issues/22): apply stages, polls, cancels, and recovers through one JobTransport; Contents requests and assignment re-resolution use connect/read deadlines; kernel restart has an explicit timeout; timed-out writes confirm before retry; exhausted transport stalls stay degraded unless the assignment is proven gone.
+
 
 
 
@@ -140,7 +142,7 @@ The runner maps normal exits, exceptions, signals, cancellation intent, wall-clo
 
 The watchdog is a sibling process. It enforces wall clock and reports telemetry. Job provision starts the TFE keep-alive daemon after persisting the session, the same daemon `colab new` uses; cleanup stops it on release or confirmed absence and leaves it running when the VM is deliberately left up.
 
-The local apply supervisor polls `result.json` and `watchdog.json`. `job status` additionally reads `launch.json` identity and `watchdog.json` `runner_alive` so a dead runner without `result.json` becomes `workload: unknown`. `JobTransport` gives those polling/cancel reads connect/read deadlines and refreshes assignment metadata once after selected 401/404 failures, rate-limited to one resolution per 60 seconds. Payload staging uses a raw `ContentsClient` snapshot without those refresh and timeout wrappers. A long stage can therefore cross token expiry before the runner starts.
+The local apply supervisor polls `result.json` and `watchdog.json`. `job status` additionally reads `launch.json` identity and `watchdog.json` `runner_alive` so a dead runner without `result.json` becomes `workload: unknown`. Stage, poll, cancel, and recovery share one `JobTransport`: Contents requests carry connect/read deadlines, assignment re-resolution is bounded by the same timeout, and a timed-out write is confirmed before retry. Exhausted transport stalls stay `degraded` unless the assignment is proven gone.
 
 `waitpid()` cannot always provide a Python exception. `os._exit()`, SIGKILL/OOM, and native crashes can produce `workload: failed` with exit/signal information and no exception.
 
@@ -183,7 +185,7 @@ plan.json
 
 `install` precedes `stage`, so a bad dependency pin fails before source upload and disk is measured after installation. Data GET is executed by the remote runner during `run`, not by the local stage phase.
 
-The explicit public `restart-kernel` path is live-verified while a detached consumer runs. A platform-initiated replacement/crash is still unverified. The restart POST used during apply has no explicit timeout.
+The explicit public `restart-kernel` path is live-verified while a detached consumer runs. A platform-initiated replacement/crash is still unverified. Apply's own restart POST uses an explicit 60s timeout and classifies a stall as `retry_same`.
 
 Apply tries one attempt. `RetryClass` is advice for the next caller action, not an automatic retry engine. Planning rejects non-default `retry.when`, `max_attempts`, and `mode` values until retry/recreate/resume exist. Some errors are classified (`fix_code`, `fix_human`, `retry_same`, `retry_different`, `refresh_urls`, `do_not_retry`); cancellation, offload failure, and cleanup failure do not all receive the earlier table's promised class.
 
@@ -249,7 +251,7 @@ The local JSON writes use atomic replacement, but the store has no cross-process
 
 The permanent suite covers model validation, plan diagnostics without reflected inputs, redacted plan/spec persistence with owner-only hydration, canonical URL identity and credential-marker hashing, source-bundle credential rejection against immutable upload snapshots, expiry revalidation, isolated descriptor handoff and unlinking, interrupted-recovery deletion/forced teardown, healthy-supervisor race exclusion, runner exit/cancel behavior, duplicate remote launch, transport refresh, phase transitions, CLI parsing, and envelope truth tables. Live integrations cover CPU and T4 jobs, signed GCS data/artifact/control-result paths, dependency restart/verify, workload failure, token refresh recovery, explicit launch-kernel restart, cancel-only termination with assignment retention, and job-owned TFE keep-alive through idle leave-up and destroy.
 
-The current gaps need regression coverage before their claims can be promoted: concurrent apply exclusion; long-stage refresh/timeouts; bounded restart; streamed transfer; aggregate bundle limits; optional-upload semantics; control log; and a shipped-path setsid escapee case.
+The current gaps need regression coverage before their claims can be promoted: concurrent apply exclusion; streamed transfer; aggregate bundle limits; optional-upload semantics; control log; and a shipped-path setsid escapee case.
 
 ## Spike results (2026-09-11, live CPU VM)
 
@@ -436,7 +438,6 @@ These are current implementation limits, not hypothetical polish:
 - **Idle retention:** job provision owns the TFE keep-alive daemon. A multi-hour GPU run through the proxy refresh boundary has not been completed.
 - **Crash recovery:** there is still a short window between `assign` returning and the first envelope persist. Apply's own poll loop does not classify a dead remote runner from `launch.json`; `status --poll` does.
 - **Concurrency:** repeated or concurrent apply of one plan has no interprocess lock or active-job guard.
-- **Transport bounds:** source/manifests are staged with a raw `ContentsClient` that lacks `JobTransport` refresh/deadline handling. The restart request has no explicit timeout. Control-plane assignment refresh is also not bounded by the job transport's HTTP deadlines.
 - **Memory and size:** data GET and artifact PUT buffer whole objects in RAM. The 250 MB source limit is per file, enforced after allocation; there is no aggregate bundle ceiling.
 - **Signed secrets:** generated specs, plans, manifests, envelopes, events, diagnostics, and kernel launch history contain query-free URL identities and opaque credential references only. Caller-owned source specs and generated owner-mode `.mighty-colab-secrets.json` sidecars still contain full URLs and require credential handling.
 - **Declared but inactive controls:** planning rejects non-default retry/recreate/resume settings, `control.log`, and `on_run_fail: skip`. `control.result.get_url` remains manual, and PUT/GET object equivalence is not validated.

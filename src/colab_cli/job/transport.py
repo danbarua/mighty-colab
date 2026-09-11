@@ -22,6 +22,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import os
 import tempfile
 import time
 from collections.abc import Callable, Mapping
@@ -43,6 +44,14 @@ class ReadStatus(str, Enum):
     NOT_FOUND = "not_found"
     DEGRADED = "degraded"
     SESSION_LOST = "session_lost"
+
+
+class TransportError(Exception):
+    """A bounded Contents operation failed without a successful payload."""
+
+    def __init__(self, status: ReadStatus, message: str):
+        super().__init__(message)
+        self.status = status
 
 
 class JobTransport:
@@ -180,6 +189,82 @@ class JobTransport:
 
         return self._write(remote_path, value)
 
+    def upload(self, local_path: str, remote_path: str, timeout=None) -> None:
+        """Upload a local file through the same bounded Contents path as control writes."""
+        del timeout
+        size = os.path.getsize(local_path)
+        refresh_attempted = False
+        transient_retries = 0
+        while True:
+            try:
+                self._contents.upload(local_path, remote_path, timeout=self.timeout)
+                return
+            except Exception as error:  # Contents and Requests expose several exception types.
+                status_code = self._status_code(error)
+                if status_code in (401, 404) and not refresh_attempted:
+                    refresh_attempted = True
+                    if status_code == 404:
+                        self._last_404_refresh_at = time.monotonic()
+                    refresh_status = self._refresh_token()
+                    if refresh_status is not ReadStatus.OK:
+                        raise TransportError(
+                            refresh_status, f"upload failed: {remote_path}"
+                        ) from error
+                    continue
+                if isinstance(error, requests.exceptions.Timeout):
+                    confirmed = self._confirm_size(remote_path, size)
+                    if confirmed is True:
+                        return
+                    if confirmed is None:
+                        raise TransportError(
+                            ReadStatus.DEGRADED, f"upload failed: {remote_path}"
+                        ) from error
+                if self._is_transient(error) and transient_retries < self.max_retries:
+                    self._sleep(self.backoff_factor * (2**transient_retries))
+                    transient_retries += 1
+                    continue
+                raise TransportError(
+                    self._classify_endpoint(), f"upload failed: {remote_path}"
+                ) from error
+
+
+    def makedirs(self, remote_dir: str, timeout=None) -> None:
+        """Create remote directories with the job connect/read deadline."""
+        del timeout
+        refresh_attempted = False
+        transient_retries = 0
+        while True:
+            try:
+                self._contents.makedirs(remote_dir, timeout=self.timeout)
+                return
+            except Exception as error:  # Contents and Requests expose several exception types.
+                status_code = self._status_code(error)
+                if status_code in (401, 404) and not refresh_attempted:
+                    refresh_attempted = True
+                    refresh_status = self._refresh_token()
+                    if refresh_status is not ReadStatus.OK:
+                        raise TransportError(
+                            refresh_status, f"could not create {remote_dir}"
+                        ) from error
+                    continue
+                if isinstance(error, requests.exceptions.Timeout):
+                    confirmed = self._confirm_directory(remote_dir)
+                    if confirmed is True:
+                        return
+                    if confirmed is None:
+                        raise TransportError(
+                            ReadStatus.DEGRADED, f"could not create {remote_dir}"
+                        ) from error
+                if self._is_transient(error) and transient_retries < self.max_retries:
+                    self._sleep(self.backoff_factor * (2**transient_retries))
+                    transient_retries += 1
+                    continue
+                raise TransportError(
+                    self._classify_endpoint(), f"could not create {remote_dir}"
+                ) from error
+
+
+
     def remove(self, remote_path: str) -> ReadStatus:
         """Delete a remote file and confirm it cannot still be read."""
         refresh_attempted = False
@@ -265,6 +350,14 @@ class JobTransport:
                         return ReadStatus.DEGRADED
                     continue
 
+                if isinstance(error, requests.exceptions.Timeout):
+                    confirmed = self._confirm_text(remote_path, payload)
+                    if confirmed is True:
+                        return ReadStatus.OK
+                    if confirmed is None:
+                        return ReadStatus.DEGRADED
+
+
                 if self._is_transient(error) and transient_retries < self.max_retries:
                     self._sleep(self.backoff_factor * (2**transient_retries))
                     transient_retries += 1
@@ -315,6 +408,59 @@ class JobTransport:
                 if status_code in (401, 404):
                     return None, self._classify_endpoint()
                 return None, self._classify_endpoint()
+
+    def _confirm_text(self, remote_path: str, payload: str) -> bool | None:
+        """True if the remote file matches, False if absent, None if unknown."""
+        try:
+            raw = self._contents._request(
+                "GET",
+                remote_path,
+                params={"content": "1"},
+                timeout=self.timeout,
+            )
+        except FileNotFoundError:
+            return False
+        except Exception:  # Confirmation must not promote a stall into session_lost.
+            return None
+        decoded, status = self._decode_contents_payload(raw)
+        if status is not ReadStatus.OK:
+            return None
+        return decoded == payload
+
+    def _confirm_size(self, remote_path: str, size: int) -> bool | None:
+        """True if the remote file exists at `size`, False if absent, None if unknown."""
+        try:
+            raw = self._contents._request(
+                "GET",
+                remote_path,
+                params={"content": "0"},
+                timeout=self.timeout,
+            )
+        except FileNotFoundError:
+            return False
+        except Exception:  # Confirmation must not promote a stall into session_lost.
+            return None
+        if not isinstance(raw, Mapping):
+            return None
+        remote_size = raw.get("size")
+        if remote_size is None:
+            return None
+        try:
+            return int(remote_size) == size
+        except (TypeError, ValueError):
+            return None
+
+    def _confirm_directory(self, remote_dir: str) -> bool | None:
+        """True if the remote path is a directory, False if absent, None if unknown."""
+        try:
+            raw = self._contents._request("GET", remote_dir, timeout=self.timeout)
+        except FileNotFoundError:
+            return False
+        except Exception:  # Confirmation must not promote a stall into session_lost.
+            return None
+        if not isinstance(raw, Mapping):
+            return None
+        return raw.get("type") == "directory"
 
     def _should_refresh_404(self) -> bool:
         if self._last_404_refresh_at is None:
@@ -370,7 +516,7 @@ class JobTransport:
 
     def _find_assignment(self) -> tuple[Any | None, bool | None]:
         try:
-            assignments = self.client.list_assignments()
+            assignments = self.client.list_assignments(timeout=self.timeout)
             for assignment in assignments:
                 if self._assignment_endpoint(assignment) == self.endpoint:
                     return assignment, True

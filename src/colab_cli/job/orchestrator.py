@@ -37,7 +37,6 @@ from typing import Callable, List, Optional, Tuple
 
 
 from colab_cli.auto_update import get_app_version
-from colab_cli.contents import ContentsClient
 from colab_cli.job.models import (
     ArtifactResult,
     Cleanup,
@@ -65,6 +64,7 @@ REMOTE_ROOT = "/content/jobs"
 LAUNCH_TIMEOUT = 120.0
 INSTALL_TIMEOUT = 1800.0
 VERIFY_TIMEOUT = 180.0
+RESTART_TIMEOUT = 60.0
 
 
 def _now() -> str:
@@ -137,6 +137,8 @@ class Orchestrator:
             or self.spec.artifacts
             or getattr(result_channel, "put_url", None)
         )
+        self._job_transport = None
+
         self._secret_channel_prepared = False
 
     # -- envelope bookkeeping -------------------------------------------
@@ -153,6 +155,13 @@ class Orchestrator:
     @property
     def remote_dir(self) -> str:
         return f"{REMOTE_ROOT}/{self.job_id}"
+
+    def job_transport(self):
+        """One refreshable Contents transport for stage, poll, cancel, and recovery."""
+        if self._job_transport is None:
+            self._job_transport = self.transport_factory(self.session_state)
+        return self._job_transport
+
 
     # -- provision -------------------------------------------------------
 
@@ -376,9 +385,16 @@ class Orchestrator:
         self._set_phase(Phase.RESTART)
         runtime = self._runtime_handle()
         try:
-            runtime.restart()
+            runtime.restart(timeout=RESTART_TIMEOUT)
+        except Exception as error:
+            raise PhaseError(
+                Phase.RESTART,
+                f"kernel restart did not complete within {RESTART_TIMEOUT:.0f}s ({error})",
+                RetryClass.RETRY_SAME,
+            ) from error
         finally:
             self._sync_runtime_identity()
+
 
     def verify(self) -> None:
         """A gate, not a hope.
@@ -530,21 +546,14 @@ class Orchestrator:
             pass
 
         contents_absent = False
-        contents = ContentsClient(self.session_state)
         try:
-            contents.rm(secret_path)
-        except FileNotFoundError:
-            contents_absent = True
-        except Exception:  # noqa: BLE001 - absence check below is authoritative
-            pass
-        try:
-            contents.list_dir(secret_path)
-        except FileNotFoundError:
-            contents_absent = True
+            from colab_cli.job.transport import ReadStatus
+
+            status = self.job_transport().remove(secret_path)
+            contents_absent = status in (ReadStatus.OK, ReadStatus.SESSION_LOST)
         except Exception:  # noqa: BLE001 - kernel proof may still be available
             pass
-        else:
-            contents_absent = False
+
 
         removed = kernel_absent or contents_absent
         if removed:

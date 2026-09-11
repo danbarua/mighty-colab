@@ -378,11 +378,10 @@ def test_staged_payload_and_runner_share_a_secret_channel_without_persisting_it(
             Path(destination).parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(source, destination)
 
-    monkeypatch.setattr(payload_bundle, "ContentsClient", lambda _session: LocalContents())
     payload_bundle.stage_payload(
         spec=spec,
         job_id="producer-consumer",
-        session=object(),
+        transport=LocalContents(),
         remote_dir=str(remote_dir),
     )
 
