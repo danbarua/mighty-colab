@@ -248,6 +248,36 @@ class Orchestrator:
             )
         return self._runtime
 
+    def _sync_runtime_identity(self) -> None:
+        if self.session_state is None or self._runtime is None:
+            return
+        changed = False
+        for field in ("kernel_id", "session_id"):
+            value = getattr(self._runtime, field, None)
+            if value and getattr(self.session_state, field, None) != value:
+                setattr(self.session_state, field, value)
+                changed = True
+        if changed:
+            self.session_store.add(self.session_state)
+
+    def _execute_code(self, code: str, *, timeout: float):
+        runtime = self._runtime_handle()
+        try:
+            return runtime.execute_code(code, timeout=timeout)
+        finally:
+            self._sync_runtime_identity()
+
+    def _close_runtime(self) -> None:
+        runtime, self._runtime = self._runtime, None
+        if runtime is None:
+            return
+        try:
+            runtime.stop()
+        except Exception as e:  # noqa: BLE001 - local cleanup must not hide the verdict
+            self.env.hints.append(
+                f"local runtime client close failed ({type(e).__name__})"
+            )
+
     def install(self) -> None:
         if not self.spec.deps:
             return
@@ -263,7 +293,7 @@ class Orchestrator:
             "print(r.stderr[-4000:])\n"
             "print('PIP_RC=%d' % r.returncode)\n"
         )
-        outputs = self._runtime_handle().execute_code(code, timeout=INSTALL_TIMEOUT)
+        outputs = self._execute_code(code, timeout=INSTALL_TIMEOUT)
         text = _outputs_text(outputs)
         if "PIP_RC=0" not in text:
             raise PhaseError(
@@ -285,7 +315,11 @@ class Orchestrator:
         if not self.spec.deps:
             return
         self._set_phase(Phase.RESTART)
-        self._runtime_handle().restart()
+        runtime = self._runtime_handle()
+        try:
+            runtime.restart()
+        finally:
+            self._sync_runtime_identity()
 
     def verify(self) -> None:
         """A gate, not a hope.
@@ -318,7 +352,7 @@ class Orchestrator:
             "free = shutil.disk_usage('/content').free\n"
             "print('VERIFY=' + json.dumps({'deps': got, 'device': dev, 'free': free}))\n"
         )
-        outputs = self._runtime_handle().execute_code(code, timeout=VERIFY_TIMEOUT)
+        outputs = self._execute_code(code, timeout=VERIFY_TIMEOUT)
         payload = _extract_tagged(_outputs_text(outputs), "VERIFY=")
         if payload is None:
             raise PhaseError(
@@ -409,7 +443,7 @@ class Orchestrator:
             "                     stdin=subprocess.DEVNULL, start_new_session=True)\n"
             "print('LAUNCHED_PID=%d' % p.pid)\n"
         )
-        outputs = self._runtime_handle().execute_code(code, timeout=LAUNCH_TIMEOUT)
+        outputs = self._execute_code(code, timeout=LAUNCH_TIMEOUT)
         text = _outputs_text(outputs)
         pid = _extract_tagged(text, "LAUNCHED_PID=", raw=True)
         if pid is None:
@@ -541,6 +575,7 @@ class Orchestrator:
 
     def cleanup(self, force_leave_up: bool = False) -> None:
         """Always runs. Records its own outcome; never edits the verdict."""
+        self._close_runtime()
         self._set_phase(Phase.CLEANUP)
         leave = force_leave_up or (
             self.env.offload is Offload.FAILED

@@ -10,6 +10,23 @@ below corresponds to a tag of the same name.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`job` sessions did not retain the kernel that launched their detached
+  runner.** The session record now persists the runtime's kernel and Jupyter
+  session identifiers, so public `restart-kernel -s job-<id>` targets the
+  launch kernel instead of creating and restarting an unrelated kernel.
+- **`job apply` could remain alive after emitting its terminal envelope.**
+  Cleanup now closes the local kernel client on release and `--leave-up`
+  paths without changing the remote workload verdict.
+
+### Added
+
+- **Live launch-kernel restart coverage** in
+  `integration/repro_job_kernel_restart/`: a detached CPU consumer retains
+  its process identity, advances after the public kernel restart, exits 0, and
+  is followed by verified assignment teardown.
+
 ## [0.8.0] - 2026-09-11
 
 ### Fixed

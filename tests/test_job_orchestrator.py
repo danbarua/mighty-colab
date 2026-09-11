@@ -74,7 +74,7 @@ def _plan(spec: JobSpec) -> Plan:
     return Plan(job_id="unit-job", spec_hash="deadbeef", created_at="now", spec=spec)
 
 
-def _orch(tmp_path, spec=None, client=None, runtime=None):
+def _orch(tmp_path, spec=None, client=None, runtime=None, session_store=None):
     spec = spec or _spec()
     return Orchestrator(
         plan=_plan(spec),
@@ -82,7 +82,7 @@ def _orch(tmp_path, spec=None, client=None, runtime=None):
         client=client or MagicMock(),
         runtime_factory=lambda url, token: runtime or MagicMock(),
         transport_factory=lambda s: MagicMock(),
-        session_store=MagicMock(),
+        session_store=session_store or MagicMock(),
     )
 
 
@@ -131,6 +131,25 @@ def test_launch_delivers_control_result_url_before_consumer_args(tmp_path):
     assert runtime.argv[result_option + 1] == put_url
     assert result_option < separator
     assert runtime.argv[separator + 1 :] == ["--deadline", "user"]
+
+def test_launch_persists_the_kernel_target_for_session_commands(tmp_path):
+    runtime = _LaunchRuntime()
+    runtime.kernel_id = "kernel-used-to-launch"
+    runtime.session_id = "session-used-to-launch"
+    session_store = MagicMock()
+    orch = _orch(tmp_path, runtime=runtime, session_store=session_store)
+    orch.session_state = SimpleNamespace(
+        url="https://vm",
+        token="token",
+        kernel_id=None,
+        session_id=None,
+    )
+
+    orch.launch("/content/jobs/unit-job/mighty_runtime")
+
+    assert orch.session_state.kernel_id == "kernel-used-to-launch"
+    assert orch.session_state.session_id == "session-used-to-launch"
+    session_store.add.assert_called_once_with(orch.session_state)
 
 
 def test_job_envelope_identifies_the_cli_that_created_it(tmp_path):
@@ -521,6 +540,17 @@ def test_leave_up_records_the_endpoint_and_a_destroy_hint(tmp_path):
     assert orch.env.cleanup is Cleanup.LEFT_UP
     client.unassign.assert_not_called()
     assert any("job destroy" in h for h in orch.env.hints)
+
+def test_cleanup_closes_the_kernel_client_when_the_vm_is_left_up(tmp_path):
+    runtime = MagicMock()
+    orch = _orch(tmp_path, runtime=runtime)
+    orch.session_state = SimpleNamespace(url="https://vm", token="token")
+    orch._runtime_handle()
+    orch.env.endpoint = "m-s-abc"
+
+    orch.cleanup(force_leave_up=True)
+
+    runtime.stop.assert_called_once_with()
 
 
 # --------------------------------------------------------------------------

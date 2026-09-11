@@ -2,6 +2,7 @@
 log:
 2026-09-11: First version. Usage guide for `mighty-colab job`, written for an agent (or a human) running real science unattended. Design rationale lives in `docs/08_job.md`; this file is how to drive it.
 2026-09-11: Added the GCS `control.result` signing sequence after live testing exposed two requirements: pre-create the object before signing GET, and pass the signed PUT through to the remote runner. The repaired path overwrote the placeholder with a terminal result; nested job envelopes now identify their creating CLI version. Signed GCS data input and artifact output were also verified live.
+2026-09-11: Live-verified the detached boundary with `integration/repro_job_kernel_restart/`. Job sessions now retain their launch kernel identity, public `restart-kernel` targets it, the consumer survives with unchanged process identity and continued progress, and apply closes its local kernel client before returning.
 ---
 
 # Running a job
@@ -272,7 +273,6 @@ Be aware of these before trusting a long run:
 - **No GPU run has yet outlived the ~60 minute token boundary.** The refresh
   is implemented and the boundary is characterised, but the combination is
   unproven.
-- **Independent kernel restart mid-run** is untested.
 - Log offload is whole-file replace, not append.
 - Detected escapees are reported, not killed.
 
@@ -284,6 +284,12 @@ after the restart; the failure path (`KeyError` ->
 `workload: failed`, `exception` carried off-VM, `retry_class: fix_code`,
 `cleanup: released`, `apply` exits 1); and token expiry at t+61min recovering
 via re-adopt.
+
+The launch-kernel boundary is verified live by
+`integration/repro_job_kernel_restart/test.sh`. The test invokes the public
+`restart-kernel` command while a detached workload is running, observes the
+same consumer process identity with later progress after the restart, then
+requires `workload: succeeded` / exit 0 and releases the assignment.
 
 The signed-URL paths are also verified against a real GCS bucket: a declared
 input passed sha256 validation, a declared artifact was recovered
