@@ -43,6 +43,7 @@ RESERVED_PATH = "reserved_path"
 DUPLICATE_DESTINATION = "duplicate_destination"
 DATA_DEST_COLLIDES_WITH_ARTIFACT = "data_dest_collides_with_artifact"
 RETRY_NOT_IMPLEMENTED = "retry_not_implemented"
+POLICY_NOT_IMPLEMENTED = "policy_not_implemented"
 CODE_ENTRY_MISSING = "code_entry_missing"
 ENTRY_NOT_UNDER_BUNDLE = "entry_not_under_bundle"
 URL_EXPIRY_TOO_SOON = "url_expiry_too_soon"
@@ -60,6 +61,8 @@ DIAGNOSTIC_CODES = frozenset(
         RESERVED_PATH,
         DUPLICATE_DESTINATION,
         DATA_DEST_COLLIDES_WITH_ARTIFACT,
+        RETRY_NOT_IMPLEMENTED,
+        POLICY_NOT_IMPLEMENTED,
         CODE_ENTRY_MISSING,
         ENTRY_NOT_UNDER_BUNDLE,
         URL_EXPIRY_TOO_SOON,
@@ -449,20 +452,39 @@ def build_plan(spec: JobSpec, job_id: str, probe: bool = True) -> Plan:
             )
         )
 
-    # `max_attempts` is accepted by the model but `apply` runs exactly one
-    # attempt. Surfacing that here is the only free place to discover it:
-    # otherwise a spec asking for 3 attempts silently gets 1, and the
-    # caller learns only by not seeing a retry that never comes.
-    if spec.retry.max_attempts > 1:
+    unsupported_retry = []
+    if spec.retry.max_attempts != 1:
+        unsupported_retry.append(f"max_attempts={spec.retry.max_attempts}")
+    if spec.retry.when != [RetryClass.RETRY_SAME]:
+        unsupported_retry.append("when")
+    if spec.retry.mode != "recreate":
+        unsupported_retry.append(f"mode={spec.retry.mode}")
+    if unsupported_retry:
         diagnostics.append(
             _diagnostic(
-                "warn",
+                "error",
                 RETRY_NOT_IMPLEMENTED,
-                f"retry.max_attempts={spec.retry.max_attempts} but `apply` "
-                "runs exactly one attempt; retry is not implemented yet",
+                "retry is not implemented; unsupported settings: "
+                + ", ".join(unsupported_retry),
                 RetryClass.DO_NOT_RETRY,
-                "Remove retry.max_attempts, or re-run `job apply` yourself "
-                "after inspecting the envelope's retry_class.",
+                "Use retry.max_attempts=1, retry.when=[retry_same], and "
+                "retry.mode=recreate.",
+            )
+        )
+
+    unsupported_policy = []
+    if spec.on_run_fail != "offload_anyway":
+        unsupported_policy.append(f"on_run_fail={spec.on_run_fail}")
+    if spec.control.log is not None:
+        unsupported_policy.append("control.log")
+    if unsupported_policy:
+        diagnostics.append(
+            _diagnostic(
+                "error",
+                POLICY_NOT_IMPLEMENTED,
+                "unsupported inactive setting(s): " + ", ".join(unsupported_policy),
+                RetryClass.DO_NOT_RETRY,
+                "Remove these settings until their behavior is implemented.",
             )
         )
 

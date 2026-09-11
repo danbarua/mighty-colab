@@ -177,7 +177,7 @@ def main(argv):
         )
         return 2
 
-    cancel_sent = os.path.exists(os.path.join(job_dir, "cancel.json"))
+    cancel_sent = False
     kill_sent = False
     escalate_at = None
     # Fallback only. The authoritative start is the runner's own
@@ -209,14 +209,18 @@ def main(argv):
         if os.path.exists(os.path.join(job_dir, "result.json")):
             return 0
 
-        if deadline_value is not None and now >= deadline_value:
-            if not cancel_sent:
+        cancel_requested = os.path.exists(os.path.join(job_dir, "cancel.json"))
+        deadline_reached = deadline_value is not None and now >= deadline_value
+        if not cancel_sent and (cancel_requested or deadline_reached):
+            if cancel_requested:
+                _safe_killpg(shim_pgid, signal.SIGTERM)
+            else:
                 _cancel(job_dir, shim_pgid, now)
-                cancel_sent = True
-                escalate_at = now + GRACE_SECONDS
-            elif not kill_sent and escalate_at is not None and now >= escalate_at:
-                _safe_killpg(shim_pgid, signal.SIGKILL)
-                kill_sent = True
+            cancel_sent = True
+            escalate_at = now + GRACE_SECONDS
+        elif not kill_sent and escalate_at is not None and now >= escalate_at:
+            _safe_killpg(shim_pgid, signal.SIGKILL)
+            kill_sent = True
 
         # Poll more frequently than the report cadence only when a deadline is
         # close. This keeps the normal 30-second report contract while making
@@ -225,6 +229,9 @@ def main(argv):
         if deadline_value is not None and not kill_sent:
             until_deadline = max(0.05, deadline_value - time.time())
             sleep_for = min(sleep_for, until_deadline)
+        if escalate_at is not None and not kill_sent:
+            until_escalation = max(0.05, escalate_at - time.time())
+            sleep_for = min(sleep_for, until_escalation)
         time.sleep(sleep_for)
 
 

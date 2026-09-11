@@ -37,7 +37,7 @@ deps:
 data:
   - url: https://storage.googleapis.com/my-bucket/cls/x.npy?X-Goog-Signature=...
     dest: /content/data/x.npy
-    sha256: 7d793037a0760186574b0282f2f435e7
+    sha256: "0000000000000000000000000000000000000000000000000000000000000000"  # replace with object digest
     size_bytes: 104857600
 
 # Pushed by the VM after your code exits -- including when it FAILED. A
@@ -73,8 +73,8 @@ budgets:
 retry:
   # `when`, not `on`: YAML 1.1 reads a bare `on:` key as boolean true.
   when: [retry_same]      # an explicit allow-list, never "anything that failed"
-  # `apply` runs exactly one attempt today; anything above 1 is a plan
-  # warning rather than a silent no-op. Raise it once retry lands.
+  # Retry execution is not implemented; non-default retry settings are plan
+  # errors rather than accepted no-ops.
   max_attempts: 1
   budget_seconds: 14400
   mode: recreate

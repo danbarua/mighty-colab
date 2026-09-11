@@ -230,9 +230,9 @@ mighty-colab adopt <ENDPOINT> -n recovered
 mighty-colab adopt --orphanage
 ```
 
-Re-adopting the same endpoint also refreshes an expired runtime proxy token,
-without throwing away the VM and starting over. Add `--keep-alive` when the
-original owner is no longer keeping the session alive.
+Re-adopting the same endpoint refreshes its runtime access metadata without
+throwing away the VM. Add `--keep-alive` when the original owner is no longer
+keeping the session alive.
 
 ## What this fork adds
 

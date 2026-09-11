@@ -425,3 +425,227 @@ def test_the_suite_does_not_write_job_records_into_the_repo():
 
     assert not _Path("MagicMock").exists()
     assert not _Path("jobs").exists()
+
+
+
+def test_stage_payload_uploads_the_control_put_url_outside_kernel_code(
+    tmp_path, monkeypatch
+):
+    from pathlib import Path
+
+    from colab_cli.job.models import Control, ControlChannel
+
+    entry = tmp_path / "train.py"
+    entry.write_text("print('ok')\n")
+    put_url = "https://storage.example/result?secret=signature"
+    get_url = "https://storage.example/result?secret=reader"
+    spec = JobSpec(
+        name="staged-control",
+        code=CodeSpec(root=str(tmp_path), entry="train.py"),
+        control=Control(
+            result=ControlChannel(
+                put_url=put_url,
+                get_url=get_url,
+            )
+        ),
+    )
+    client = MagicMock()
+    uploaded = {}
+
+    def capture(local_path, remote_path):
+        uploaded[remote_path] = Path(local_path).read_text()
+
+    client.upload.side_effect = capture
+    monkeypatch.setattr(payload_bundle, "ContentsClient", lambda _session: client)
+
+    payload_bundle.stage_payload(
+        spec=spec,
+        job_id="staged-control",
+        session=MagicMock(),
+        remote_dir="/content/jobs/staged-control",
+    )
+
+    assert uploaded[
+        "/content/jobs/staged-control/mighty_runtime/result.put-url"
+    ] == put_url
+    assert all(get_url not in content for content in uploaded.values())
+
+
+def _persist_running_job(mock_common_state, job_id="destroy-me"):
+    from colab_cli.commands.job import _store
+    from colab_cli.job.models import JobEnvelope, Plan, Supervisor
+    from colab_cli.job.spec_io import spec_hash
+
+    spec = JobSpec(
+        name=job_id,
+        code=CodeSpec(kind="file", entry="train.py"),
+        accelerator=Accelerator(prefer=[], accept_cpu=True),
+        budgets=Budgets(wall_clock=60),
+    )
+    plan = Plan(
+        job_id=job_id,
+        spec_hash=spec_hash(spec),
+        created_at="now",
+        spec=spec,
+    )
+    store = _store()
+    store.write_plan(plan)
+    store.write_envelope(
+        JobEnvelope(
+            job_id=job_id,
+            phase=Phase.RUN,
+            workload=Workload.RUNNING,
+            supervisor=Supervisor.INTERRUPTED,
+            session="job-session",
+            endpoint="m-s-endpoint",
+        )
+    )
+    mock_common_state.store.get.return_value = MagicMock()
+    return store
+
+
+def test_destroy_reconciles_remote_success_before_unassign(
+    monkeypatch, mock_common_state
+):
+    from colab_cli.job.transport import ReadStatus
+
+    store = _persist_running_job(mock_common_state)
+    transport = MagicMock()
+    events = []
+    transport.read_json.side_effect = lambda _path: (
+        events.append("read") or ({"workload": "succeeded", "exit_code": 0}, ReadStatus.OK)
+    )
+    transport.write_json.return_value = ReadStatus.OK
+    mock_common_state.client.unassign.side_effect = lambda _endpoint: events.append(
+        "unassign"
+    )
+    monkeypatch.setattr(
+        "colab_cli.job.transport.JobTransport", lambda *_args: transport
+    )
+
+    result = runner.invoke(app, ["job", "destroy", "destroy-me"])
+
+    assert result.exit_code == 0
+    env = store.read_envelope("destroy-me")
+    assert events[:2] == ["read", "unassign"]
+    assert env.workload is Workload.SUCCEEDED
+    assert env.exit_code == 0
+    transport.write_json.assert_not_called()
+
+
+def test_destroy_without_remote_verdict_records_unknown(
+    monkeypatch, mock_common_state
+):
+    from colab_cli.job.transport import ReadStatus
+
+    store = _persist_running_job(mock_common_state)
+    transport = MagicMock()
+    transport.read_json.return_value = (None, ReadStatus.NOT_FOUND)
+    transport.write_json.return_value = ReadStatus.OK
+    monkeypatch.setattr(
+        "colab_cli.job.transport.JobTransport", lambda *_args: transport
+    )
+
+    result = runner.invoke(app, ["job", "destroy", "destroy-me"])
+
+    assert result.exit_code == 0
+    env = store.read_envelope("destroy-me")
+    assert env.workload is Workload.UNKNOWN
+    assert "verdict" in env.reason
+    mock_common_state.client.unassign.assert_called_once_with("m-s-endpoint")
+
+
+def test_cancel_only_writes_intent_without_unassign(monkeypatch, mock_common_state):
+    from colab_cli.job.transport import ReadStatus
+
+    store = _persist_running_job(mock_common_state)
+    transport = MagicMock()
+    transport.read_json.return_value = (None, ReadStatus.NOT_FOUND)
+    transport.write_json.return_value = ReadStatus.OK
+    monkeypatch.setattr(
+        "colab_cli.job.transport.JobTransport", lambda *_args: transport
+    )
+
+    result = runner.invoke(
+        app, ["job", "destroy", "destroy-me", "--cancel-only"]
+    )
+
+    assert result.exit_code == 0
+    env = store.read_envelope("destroy-me")
+    assert env.workload is Workload.RUNNING
+    assert "intent written" in env.reason
+    transport.write_json.assert_called_once()
+    mock_common_state.client.unassign.assert_not_called()
+
+
+def test_cancel_only_reports_when_intent_write_failed(monkeypatch, mock_common_state):
+    from colab_cli.job.transport import ReadStatus
+
+    store = _persist_running_job(mock_common_state)
+    transport = MagicMock()
+    transport.read_json.return_value = (None, ReadStatus.DEGRADED)
+    transport.write_json.return_value = ReadStatus.DEGRADED
+    monkeypatch.setattr(
+        "colab_cli.job.transport.JobTransport", lambda *_args: transport
+    )
+
+    result = runner.invoke(
+        app, ["job", "destroy", "destroy-me", "--cancel-only"]
+    )
+
+    assert result.exit_code == 1
+    assert "could not be confirmed" in store.read_envelope("destroy-me").reason
+    mock_common_state.client.unassign.assert_not_called()
+
+
+def test_unexpected_apply_exception_emits_a_terminal_envelope(
+    tmp_path, monkeypatch, mock_common_state
+):
+    from colab_cli.commands.job import _store
+    from colab_cli.job.models import Plan
+    from colab_cli.job.orchestrator import Orchestrator
+    from colab_cli.job.spec_io import spec_hash
+
+    spec = JobSpec(
+        name="unexpected",
+        code=CodeSpec(kind="file", entry="train.py"),
+        accelerator=Accelerator(prefer=[], accept_cpu=True),
+        budgets=Budgets(wall_clock=60),
+    )
+    plan = Plan(
+        job_id="unexpected",
+        spec_hash=spec_hash(spec),
+        created_at="now",
+        spec=spec,
+    )
+    plan_file = tmp_path / "plan.json"
+    plan_file.write_text(plan.model_dump_json())
+    monkeypatch.setattr(
+        Orchestrator,
+        "provision",
+        lambda _self: (_ for _ in ()).throw(RuntimeError("supervisor boom")),
+    )
+    mock_common_state.debug = False
+    _json_mode(mock_common_state)
+
+    result = runner.invoke(app, ["job", "apply", str(plan_file)])
+
+    assert result.exit_code == 1
+    payload = json.loads(_clean(result.output).strip().splitlines()[-1])
+    assert payload["job"]["workload"] == "failed"
+    assert payload["job"]["supervisor"] == "finished"
+    assert payload["done"] is True
+    env = _store().read_envelope("unexpected")
+    assert env.done
+    assert env.retry_class is RetryClass.DO_NOT_RETRY
+    assert env.reason == "internal supervisor failure (RuntimeError)"
+
+
+def test_status_poll_help_matches_result_observer_behavior():
+    result = runner.invoke(
+        app, ["job", "status", "--help"], env={"COLUMNS": "160"}
+    )
+    output = _clean(result.output)
+    assert result.exit_code == 0
+    assert "until remote result.json is available" in output
+    assert "until the job is done" not in output

@@ -89,28 +89,43 @@ def _orch(tmp_path, spec=None, client=None, runtime=None, session_store=None):
 class _LaunchRuntime:
     """Execute the launch cell while capturing what the runner receives."""
 
-    def __init__(self):
+    def __init__(self, control_url=None):
         self.argv = None
+        self.code = None
+        self.env = None
+        self.control_url = control_url
+        self.chmod = None
+        self.unlinked = None
+
+        self.namespace = None
 
     def execute_code(self, code, timeout):
-        def capture(argv, **_kwargs):
+        self.code = code
+
+        def capture(argv, **kwargs):
             self.argv = argv
+            self.env = dict(kwargs["env"])
             return SimpleNamespace(pid=4312)
+
+        def control_exists(path):
+            return bool(self.control_url and path.endswith("result.put-url"))
 
         stdout = StringIO()
         with (
             patch("os.makedirs"),
-            patch("os.path.exists", return_value=False),
-            patch("builtins.open", mock_open()),
+            patch("os.path.exists", side_effect=control_exists),
+            patch("os.chmod", side_effect=lambda path, mode: setattr(self, "chmod", (path, mode))),
+            patch("os.unlink", side_effect=lambda path: setattr(self, "unlinked", path)),
+            patch("builtins.open", mock_open(read_data=self.control_url or "")),
             patch("subprocess.Popen", side_effect=capture),
             redirect_stdout(stdout),
         ):
-            exec(code, {})
+            self.namespace = {}
+            exec(code, self.namespace)
         return [{"text": stdout.getvalue()}]
 
 
-
-def test_launch_delivers_control_result_url_before_consumer_args(tmp_path):
+def test_launch_reads_control_result_url_from_a_staged_file(tmp_path):
     put_url = "https://storage.example/result.json?secret=signature"
     spec = _spec(
         code=CodeSpec(kind="file", entry="train.py", args=["--deadline", "user"]),
@@ -121,16 +136,21 @@ def test_launch_delivers_control_result_url_before_consumer_args(tmp_path):
             )
         ),
     )
-    runtime = _LaunchRuntime()
+    runtime = _LaunchRuntime(control_url=put_url)
     orch = _orch(tmp_path, spec=spec, runtime=runtime)
     orch.session_state = SimpleNamespace(url="https://vm", token="token")
 
     assert orch.launch("/content/jobs/unit-job/mighty_runtime") == 4312
     separator = runtime.argv.index("--")
-    result_option = runtime.argv.index("--result-put-url")
-    assert runtime.argv[result_option + 1] == put_url
-    assert result_option < separator
+    assert "--result-put-url" not in runtime.argv
+    assert put_url not in runtime.code
+    assert put_url not in runtime.argv
+    assert runtime.env["MIGHTY_CONTROL_RESULT_PUT_URL"] == put_url
+    assert put_url not in repr(runtime.namespace)
+    assert runtime.chmod[1] == 0o600
+    assert runtime.unlinked.endswith("result.put-url")
     assert runtime.argv[separator + 1 :] == ["--deadline", "user"]
+
 
 def test_launch_persists_the_kernel_target_for_session_commands(tmp_path):
     runtime = _LaunchRuntime()
@@ -383,6 +403,24 @@ def test_verify_passes_on_cpu_when_no_gpu_was_requested(tmp_path):
     orch.env.actual_accelerator = "NONE"
 
     orch.verify()  # must not raise
+def test_verify_counts_declared_artifact_space_before_launch(tmp_path):
+    spec = _spec(
+        accelerator=Accelerator(prefer=[], accept_cpu=True),
+        artifacts=[
+            ArtifactItem(
+                path="/content/out/model.pt",
+                url="https://x/model.pt",
+                size_bytes=10_000,
+                required=False,
+            )
+        ],
+    )
+    orch = _orch(tmp_path, spec=spec)
+
+    with pytest.raises(PhaseError) as exc:
+        orch._check_disk(1000)
+
+    assert "inputs and artifacts" in exc.value.reason
 
 
 # --------------------------------------------------------------------------
@@ -568,3 +606,38 @@ def test_envelope_is_persisted_on_every_phase_transition(tmp_path):
     reloaded = JobStore(tmp_path / "jobs").read_envelope("unit-job")
     assert reloaded is not None
     assert reloaded.phase is Phase.PROVISION
+
+
+def test_launch_clears_an_inherited_control_url(tmp_path):
+    runtime = _LaunchRuntime()
+    orch = _orch(tmp_path, runtime=runtime)
+    orch.session_state = SimpleNamespace(url="https://vm", token="token")
+
+    with patch.dict(
+        "os.environ",
+        {"MIGHTY_CONTROL_RESULT_PUT_URL": "https://stale.example?secret=old"},
+    ):
+        orch.launch("/content/jobs/unit-job/mighty_runtime")
+
+    assert runtime.env.get("MIGHTY_CONTROL_RESULT_PUT_URL") is None
+
+
+def test_absorb_result_honors_remote_offload_failure_and_phase(tmp_path):
+    spec = _spec(
+        artifacts=[ArtifactItem(path="/content/out/model.pt", url="https://x/model")]
+    )
+    orch = _orch(tmp_path, spec=spec)
+
+    orch._absorb_result(
+        {
+            "workload": "succeeded",
+            "exit_code": 0,
+            "phase": "offload",
+            "offload": "failed",
+            "artifacts": [],
+        }
+    )
+
+    assert orch.env.workload is Workload.SUCCEEDED
+    assert orch.env.phase is Phase.OFFLOAD
+    assert orch.env.offload is Offload.FAILED

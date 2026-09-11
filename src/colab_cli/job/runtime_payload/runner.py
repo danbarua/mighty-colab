@@ -510,19 +510,22 @@ def main(argv):
                     exit_code = os.WEXITSTATUS(status)
                 break
             now = time.time()
-            if deadline and now > deadline:
-                if not term_sent:
+            cancel_path = os.path.join(job_dir, "cancel.json")
+            cancel_requested = os.path.exists(cancel_path)
+            deadline_reached = bool(deadline and now > deadline)
+            if not term_sent and (cancel_requested or deadline_reached):
+                if deadline_reached and not cancel_requested:
                     _atomic_write_json(
-                        os.path.join(job_dir, "cancel.json"),
+                        cancel_path,
                         {"cancelled_by": "wall_clock", "at": now},
                     )
-                    _safe_killpg(shim_pgid, signal.SIGTERM)
-                    term_sent = True
-                    escalate_at = now + GRACE_SECONDS
-                elif not kill_sent and now > escalate_at:
-                    # Only escalate if SIGTERM did not do the job.
-                    _safe_killpg(shim_pgid, signal.SIGKILL)
-                    kill_sent = True
+                _safe_killpg(shim_pgid, signal.SIGTERM)
+                term_sent = True
+                escalate_at = now + GRACE_SECONDS
+            elif term_sent and not kill_sent and now > escalate_at:
+                # Only escalate if SIGTERM did not do the job.
+                _safe_killpg(shim_pgid, signal.SIGKILL)
+                kill_sent = True
             time.sleep(0.2)
     except BaseException as e:  # noqa: BLE001 - verdict must still land
         runner_error = f"{type(e).__name__}: {e}"
@@ -555,6 +558,10 @@ def main(argv):
 
     if runner_error is not None and exit_code is None and term_signal is None:
         workload = "unknown"
+    elif term_sent and intent:
+        # A consumer can handle SIGTERM and exit zero. The accepted cancel
+        # request remains the authoritative verdict in that case.
+        workload = "cancelled"
     elif term_signal is not None:
         workload = "cancelled" if intent else "failed"
     elif exit_code == 0:

@@ -27,8 +27,11 @@ from colab_cli.job.models import (
     Accelerator,
     ArtifactItem,
     CodeSpec,
+    Control,
+    ControlChannel,
     DataItem,
     JobSpec,
+    Retry,
 )
 from colab_cli.job.planner import (
     ACCELERATOR_UNKNOWN,
@@ -37,11 +40,13 @@ from colab_cli.job.planner import (
     DATA_DEST_COLLIDES_WITH_ARTIFACT,
     DATA_SIZE_UNKNOWN,
     DESTINATION_OUTSIDE_JOB_DIR,
+    DIAGNOSTIC_CODES,
     DUPLICATE_DESTINATION,
     ENTRY_NOT_UNDER_BUNDLE,
     RANGED_GET_FAILED,
     RANGED_GET_IGNORED_RANGE,
     RESERVED_PATH,
+    RETRY_NOT_IMPLEMENTED,
     URL_EXPIRY_TOO_SOON,
     URL_HOST_NOT_PUBLIC,
     URL_SCHEME_NOT_HTTPS,
@@ -57,7 +62,6 @@ from colab_cli.job.spec_io import (
     spec_hash,
     url_id,
 )
-
 
 JOB_ID = "planner-test"
 PUBLIC_URL = "https://storage.example.test/bucket/input.bin"
@@ -77,6 +81,23 @@ def make_spec(tmp_path: Path, *, data: list[DataItem] | None = None, **updates) 
 
 def diagnostic_codes(plan) -> set[str]:
     return {diagnostic.code for diagnostic in plan.diagnostics}
+
+
+def test_data_sha256_must_have_64_hexadecimal_characters():
+    with pytest.raises(ValueError, match="64 hexadecimal"):
+        DataItem(url=PUBLIC_URL, dest="/content/x", sha256="a" * 32)
+    with pytest.raises(ValueError, match="64 hexadecimal"):
+        DataItem(url=PUBLIC_URL, dest="/content/x", sha256="a" * 65)
+
+
+def test_data_sha256_rejects_non_hexadecimal_characters():
+    with pytest.raises(ValueError, match="64 hexadecimal"):
+        DataItem(url=PUBLIC_URL, dest="/content/x", sha256="z" * 64)
+
+
+def test_data_sha256_normalizes_uppercase_hexadecimal():
+    item = DataItem(url=PUBLIC_URL, dest="/content/x", sha256="A" * 64)
+    assert item.sha256 == "a" * 64
 
 
 def test_load_spec_yaml_and_resolves_default_root(tmp_path):
@@ -250,6 +271,34 @@ def test_unknown_accelerator_diagnostic(tmp_path):
     plan = build_plan(spec, JOB_ID, probe=False)
     assert ACCELERATOR_UNKNOWN in diagnostic_codes(plan)
     assert ACCELERATOR_UNKNOWN not in diagnostic_codes(build_plan(make_spec(tmp_path), JOB_ID, probe=False))
+def test_retry_request_is_rejected_until_retry_is_implemented(tmp_path):
+    plan = build_plan(
+        make_spec(tmp_path, retry=Retry(max_attempts=2)), JOB_ID, probe=False
+    )
+    assert plan.has_errors
+    assert RETRY_NOT_IMPLEMENTED in diagnostic_codes(plan)
+    assert diagnostic_codes(plan) <= DIAGNOSTIC_CODES
+
+
+def test_resume_mode_is_rejected_until_resume_is_implemented(tmp_path):
+    plan = build_plan(
+        make_spec(tmp_path, retry=Retry(mode="resume")), JOB_ID, probe=False
+    )
+    assert plan.has_errors
+    assert RETRY_NOT_IMPLEMENTED in diagnostic_codes(plan)
+
+
+def test_run_fail_skip_is_rejected_until_skip_is_implemented(tmp_path):
+    plan = build_plan(make_spec(tmp_path, on_run_fail="skip"), JOB_ID, probe=False)
+    assert plan.has_errors
+
+
+def test_control_log_is_rejected_until_log_streaming_is_implemented(tmp_path):
+    channel = ControlChannel(put_url=PUBLIC_URL, get_url=PUBLIC_URL)
+    plan = build_plan(
+        make_spec(tmp_path, control=Control(log=channel)), JOB_ID, probe=False
+    )
+    assert plan.has_errors
 
 
 def test_non_https_url_diagnostic(tmp_path):
@@ -388,3 +437,15 @@ def test_data_size_unknown_warning(tmp_path):
     data = [DataItem(url=PUBLIC_URL, dest="/content/jobs/planner-test/x")]
     plan = build_plan(make_spec(tmp_path, data=data), JOB_ID, probe=False)
     assert DATA_SIZE_UNKNOWN in diagnostic_codes(plan)
+
+
+def test_nondefault_retry_class_is_rejected_until_retry_is_implemented(tmp_path):
+    from colab_cli.job.models import RetryClass
+
+    plan = build_plan(
+        make_spec(tmp_path, retry=Retry(when=[RetryClass.FIX_CODE])),
+        JOB_ID,
+        probe=False,
+    )
+    assert plan.has_errors
+    assert RETRY_NOT_IMPLEMENTED in diagnostic_codes(plan)

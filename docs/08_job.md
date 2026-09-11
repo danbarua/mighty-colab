@@ -8,6 +8,8 @@ log:
 2026-09-11: **Signed-URL data plane live-verified and control backstop repaired.** A live run pulled a sha256-locked GCS input and pushed a byte-identical artifact. It also exposed that `Orchestrator.launch()` did not pass the declared `control.result.put_url` to the runner, so the off-VM result remained its `{}` placeholder while the primary envelope succeeded. Added the missing runner option, retained `cli_version` on the local job envelope, documented GCS's create-before-signing-GET order, and reran a live CPU job: the control object contained `workload: succeeded` / `exit_code: 0`, apply reported `done=true` / `ok=true`, cleanup released the VM, and no session remained.
 2026-09-11: **Launch-kernel restart live-verified.** The first attempt exposed that the job session record omitted the active kernel and session identifiers, so the public `restart-kernel` command could not target the kernel that launched the runner; cleanup also left the local kernel client open after the terminal envelope. Both are fixed. `integration/repro_job_kernel_restart/test.sh` now launches a detached CPU workload, restarts its recorded launch kernel through the public command, proves the consumer's process identity is unchanged while progress advances, observes `workload: succeeded` / exit 0, releases the assignment, and verifies the endpoint is absent.
 2026-09-11: Audited the implemented contract against source, executable help, tests, and five adversarial domain reviews. Corrected the public CLI and schema, current phase and persistence behavior, plan-hash scope, transport boundaries, signed-URL handling, and supervisor recovery claims. Added the load-bearing implementation gaps that remain.
+2026-09-11: Addressed PR #15 peer review: external cancel intent now reaches runner and watchdog, destroy preserves remote verdicts, SHA-256 values are validated, unexpected supervisor exceptions terminalize, control PUT credentials are staged outside kernel history, unsupported policy values fail planning, status absorbs complete remote results, and declared artifact sizes count in the disk gate. Source-byte locking remains tracked by [#20](https://github.com/danbarua/mighty-colab/issues/20).
+2026-09-11: **Cancel-only live-verified.** `integration/repro_job_cancel_only/test.sh` observed a running CPU workload, issued the public `destroy --cancel-only`, observed a terminal `workload: cancelled` result while the assignment remained listed, then performed full destroy and verified the endpoint disappeared.
 ---
 
 # Design: `job` — Agent job supervisor
@@ -96,9 +98,9 @@ Optional `data[]` entries contain `url`, `dest`, `sha256`, and `size_bytes`. Opt
 
 For a GCS-backed `control.result`, first sign PUT, PUT a fresh `{}` placeholder using `Content-Type: application/octet-stream`, and then sign GET for the same unique object. The runner replaces the placeholder with its terminal result. `{}` is not a verdict. The CLI does not automatically read `control.result.get_url`; it is a manual recovery channel.
 
-Signed query strings are credentials. Current persistence does **not** redact them: `spec.json`, `plan.json`, an explicit `--out` file, remote manifests, and the launch source containing `control.result.put_url` can contain the full query. The launch source is sent through normal kernel execution history. Protect those files and kernel history accordingly. Envelopes and event messages do not intentionally include URL queries.
+Signed query strings are credentials. Current persistence does **not** redact them: `spec.json`, `plan.json`, an explicit `--out` file, and remote data/artifact manifests can contain the full query. The control-result PUT URL is staged in a mode-0600 file, read and unlinked by the launch kernel, and does not appear in launch source or runner argv. Envelopes and event messages do not intentionally include URL queries.
 
-`apply` runs exactly one attempt. `retry.when`, `max_attempts`, `budget_seconds`, and `mode` are accepted and recorded, but there is no retry, recreate, resume, or checkpoint implementation. `max_attempts > 1` produces a plan warning, which apply rejects unless `ignore_warnings: true` accepts it. `on_run_fail` is accepted but currently ignored: declared artifacts are attempted after a failed run even when it is `skip`. `control.log` is accepted by the schema but is not uploaded or consumed.
+`apply` runs exactly one attempt. The only executable policy values are `retry.when: [retry_same]`, `max_attempts: 1`, `mode: recreate`, `on_run_fail: offload_anyway`, and no `control.log`; planning rejects other values instead of accepting inactive behavior. `retry.budget_seconds` remains active for control-URL expiry validation. There is no retry, resume, checkpoint, or control-log implementation.
 
 Relative data destinations and artifact paths resolve under `/content/jobs/<id>`. Absolute paths are accepted only after canonical resolution below `/content`; launcher-owned paths below the job directory are reserved.
 
@@ -125,7 +127,7 @@ Before launch, the local stage phase uploads `mighty_runtime`, user code, and ma
 
 The runner creates `launch.json` with `O_EXCL`, starts the shim in its own session/process group, and remains its parent so it can `waitpid()`. The shim sets the entry's real `sys.argv`, `__file__`, and `sys.path[0]`, then uses `runpy.run_path(..., run_name="__main__")`. A duplicate runner sees the existing live launch identity and exits without starting a second consumer; the launch RPC does not promise to return the original runner PID.
 
-The runner maps normal exits, exceptions, signals, cancellation intent, wall-clock expiry, and descendant-survival checks into `result.json`. It then attempts declared artifact PUTs and, when configured, `control.result.put_url`. `control.log` is not used. An optional artifact that is absent does not fail offload, but any artifact PUT recorded as `failed` currently makes scalar `offload: failed`, irrespective of `required`.
+The runner maps normal exits, exceptions, signals, cancellation intent, wall-clock expiry, and descendant-survival checks into `result.json`. Both runner and watchdog consume an externally written `cancel.json`, send SIGTERM, and escalate after the grace period; `destroy --cancel-only` writes that intent without unassigning. The runner then attempts declared artifact PUTs and, when configured, `control.result.put_url`. An optional artifact that is absent does not fail offload, but any artifact PUT recorded as `failed` currently makes scalar `offload: failed`, irrespective of `required`.
 
 The watchdog is a sibling process. It enforces wall clock and reports telemetry. The job provision path currently does **not** start the TFE keep-alive daemon used by `colab new`; an idle launch kernel therefore lacks the documented idle-pruning protection.
 
@@ -143,7 +145,7 @@ The public-host check rejects literal private/link-local addresses that it recog
 
 The runner reads each data response fully into memory before writing and hashing it, and reads each artifact fully into memory before PUT. These are not streaming paths. Source staging also uploads each file as one Contents API payload. The enforced 250 MB ceiling is per source file and is checked during apply, after provisioning; there is no aggregate bundle limit and no corresponding artifact-size ceiling.
 
-Each staged data item can carry `size_bytes` and `sha256`; the runner verifies both when present. Each artifact result records status, hash, and byte count when available. PUT failures are not retried automatically. A 403 caused by an expired signature may be labelled `refresh_urls` by some classified paths, but not every phase failure currently receives a `retry_class`.
+Each staged data item can carry `size_bytes` and an exact 64-hex-character `sha256`; the model normalizes the digest to lowercase and the runner verifies both fields when present. Declared data and artifact sizes both contribute to the free-disk refusal. Each artifact result records status, hash, and byte count when available. PUT failures are not retried automatically. A 403 caused by an expired signature may be labelled `refresh_urls` by some classified paths, but not every phase failure currently receives a `retry_class`.
 
 ## Plan
 
@@ -174,9 +176,9 @@ plan.json
 
 The explicit public `restart-kernel` path is live-verified while a detached consumer runs. A platform-initiated replacement/crash is still unverified. The restart POST used during apply has no explicit timeout.
 
-Apply tries one attempt. `RetryClass` is advice for the next caller action, not an automatic retry engine. The accepted `retry.when`, `max_attempts`, and `mode` fields do not cause a retry, a new VM, artifact deletion, or `--resume` injection. Some errors are classified (`fix_code`, `fix_human`, `retry_same`, `retry_different`, `refresh_urls`, `do_not_retry`); cancellation, offload failure, cleanup failure, and unwrapped ordinary exceptions do not all receive the earlier table's promised class.
+Apply tries one attempt. `RetryClass` is advice for the next caller action, not an automatic retry engine. Planning rejects non-default `retry.when`, `max_attempts`, and `mode` values until retry/recreate/resume exist. Some errors are classified (`fix_code`, `fix_human`, `retry_same`, `retry_different`, `refresh_urls`, `do_not_retry`); cancellation, offload failure, and cleanup failure do not all receive the earlier table's promised class.
 
-Ordinary exceptions outside `PhaseError` and `KeyboardInterrupt` can escape apply after its `finally` block, leaving a non-terminal persisted envelope and no emitted terminal verdict. Endpoint persistence also follows the session-store write rather than happening immediately after assignment, so there is a small allocation-without-envelope crash window. Concurrent or repeated apply of the same plan has no interprocess lock or active-apply guard and can provision twice or overwrite local state.
+Unexpected exceptions are caught unless `--debug` is active. The supervisor persists and emits a terminal envelope: pre-run failures become `workload: failed`; failures during or after run without a remote verdict become `unknown`; terminal remote verdicts are preserved. Endpoint persistence still follows the session-store write rather than happening immediately after assignment, so there is a small allocation-without-envelope crash window. Concurrent or repeated apply of the same plan has no interprocess lock or active-apply guard and can provision twice or overwrite local state.
 
 ## Envelope, `done`, `ok`
 
@@ -201,7 +203,7 @@ Therefore `ok` can be true while `done` is still false; consumers must poll `don
 
 `not_required` means the spec declared no artifacts. `skipped` is a terminal schema value but the current runner normally attempts declared artifacts even after failure. Per-artifact results are preserved; any recorded upload failure currently makes scalar offload fail, including a failed optional upload.
 
-`job status --poll` is currently an observer, not supervisor takeover. It stops when `result.json` appears, copies only workload/exit/signal/exception plus supervisor state, and does not absorb artifact/offload state or finish cleanup. It can therefore return `done: false` after finding a remote terminal result. A dead local PID is marked `supervisor: interrupted`, but status does not guarantee `cleanup: left_up` or identity-based `workload: unknown`; PID liveness is also susceptible to PID reuse.
+`job status --poll` is an observer, not supervisor takeover. It stops when `result.json` appears and absorbs the remote phase, workload, exit/signal/exception, artifact, and offload fields, but it does not finish cleanup. It can therefore return `done: false` after finding a remote terminal result. A dead local PID is marked `supervisor: interrupted`, but status does not guarantee `cleanup: left_up` or identity-based `workload: unknown`; PID liveness is also susceptible to PID reuse.
 
 Every envelope carries schema/CLI versions, phase, requested/actual accelerator, ordered string hints, timestamps, and relevant result details. The local files are:
 
@@ -236,9 +238,9 @@ The local JSON writes use atomic replacement, but the store has no cross-process
 
 ## Testing strategy
 
-The permanent suite covers model validation, plan diagnostics, canonical spec hashing, expiry revalidation, runner exit/cancel behavior, duplicate remote launch, transport refresh, phase transitions, CLI parsing, and envelope truth tables. Live integrations cover CPU and T4 jobs, signed GCS data/artifact/control-result paths, dependency restart/verify, workload failure, token refresh recovery, and explicit launch-kernel restart.
+The permanent suite covers model validation, plan diagnostics, canonical spec hashing, expiry revalidation, runner exit/cancel behavior, duplicate remote launch, transport refresh, phase transitions, CLI parsing, and envelope truth tables. Live integrations cover CPU and T4 jobs, signed GCS data/artifact/control-result paths, dependency restart/verify, workload failure, token refresh recovery, explicit launch-kernel restart, and cancel-only termination with assignment retention.
 
-The current gaps need regression coverage before their claims can be promoted: keep-alive ownership; endpoint persist-before-side-effect; ordinary-exception terminalization; concurrent apply exclusion; status takeover through offload and cleanup; code-content locking; signed-URL redaction and kernel history; long-stage refresh/timeouts; bounded restart; streamed transfer; aggregate bundle limits; optional-upload semantics; control log; and a shipped-path setsid escapee case.
+The current gaps need regression coverage before their claims can be promoted: keep-alive ownership; endpoint persist-before-side-effect; concurrent apply exclusion; status takeover through cleanup; source-content locking ([#20](https://github.com/danbarua/mighty-colab/issues/20)); signed-URL redaction in durable local/remote files; long-stage refresh/timeouts; bounded restart; streamed transfer; aggregate bundle limits; optional-upload semantics; control log; and a shipped-path setsid escapee case.
 
 ## Spike results (2026-09-11, live CPU VM)
 
@@ -344,7 +346,7 @@ nothing.
 over a second wrong conclusion. `adopt` does two things at once — it mints a
 fresh proxy **token** and re-resolves the assignment's proxy **URL**. Token
 expiry and endpoint rebinding predict identical observations here, so the
-script's `VERDICT=TOKEN_EXPIRY` label overstates what the run measured. The
+original script's `VERDICT=TOKEN_EXPIRY` label overstates what the run measured; the current script reports `VERDICT=ACCESS_BINDING_REFRESH`. The
 endpoint *id* was unchanged (we re-adopted the same one), which rules out
 reassignment to a different VM, but not a changed proxy URL.
 
@@ -423,14 +425,14 @@ This also reclassifies the `transport_degraded` vs `session_lost` question from
 These are current implementation limits, not hypothetical polish:
 
 - **Idle retention:** job provision does not start or own the TFE keep-alive daemon. A detached run with an idle kernel can therefore be idle-pruned. No multi-hour GPU run through the refresh boundary has been completed.
-- **Crash recovery:** endpoint persistence has a post-assignment crash window; ordinary phase exceptions can escape without a terminal envelope; `status --poll` observes a result but does not take over offload or cleanup; dead-runner identity classification is not wired into the local supervisor.
+- **Crash recovery:** endpoint persistence has a post-assignment crash window; `status --poll` observes and absorbs a result but does not take over cleanup; dead-runner identity classification is not wired into the local supervisor.
 - **Concurrency:** repeated or concurrent apply of one plan has no interprocess lock or active-job guard.
-- **Plan integrity:** `spec_hash` does not lock source bytes or a bundle manifest. Apply can run code that differs from what existed at plan time.
+- **Plan integrity:** `spec_hash` does not lock source bytes or a bundle manifest. Apply can run code that differs from what existed at plan time. Exact source locking is tracked by [#20](https://github.com/danbarua/mighty-colab/issues/20).
 - **Transport bounds:** source/manifests are staged with a raw `ContentsClient` that lacks `JobTransport` refresh/deadline handling. The restart request has no explicit timeout. Control-plane assignment refresh is also not bounded by the job transport's HTTP deadlines.
-- **Memory and size:** data GET and artifact PUT buffer whole objects in RAM. The 250 MB source limit is per file, enforced after allocation; there is no aggregate bundle ceiling. Declared artifact size is not included in the current free-disk refusal.
-- **Signed secrets:** raw signed URLs are persisted in local spec/plan files and explicit `--out` plans, in remote manifests, and in launch source/kernel history for the control-result PUT URL. There is no redacted sidecar representation.
-- **Declared but inactive controls:** retries/recreate/resume are not implemented; `control.log` is unused; `on_run_fail: skip` is ignored; `control.result.get_url` is manual; PUT/GET object equivalence is not validated.
+- **Memory and size:** data GET and artifact PUT buffer whole objects in RAM. The 250 MB source limit is per file, enforced after allocation; there is no aggregate bundle ceiling.
+- **Signed secrets:** raw signed URLs are persisted in local spec/plan files and explicit `--out` plans, and in remote data/artifact manifests. There is no redacted sidecar representation.
+- **Declared but inactive controls:** planning rejects non-default retry/recreate/resume settings, `control.log`, and `on_run_fail: skip`. `control.result.get_url` remains manual, and PUT/GET object equivalence is not validated.
 - **Network containment:** host checks do not resolve DNS and miss at least IPv6 link-local forms.
 - **Process containment:** tagged escapees are reported, not killed. The dedicated shipped-path setsid case remains unverified.
-- **CLI/JSON consistency:** the job-group help summary omits `list`, and `status --poll` help promises to poll until `done` although it stops at `result.json`. Some early file/plan read failures still emit stderr rather than a JSON envelope. A failed apply can exit the process with status 1 while its outer JSON wrapper says `exit_code: 0`.
+- **CLI/JSON consistency:** the job-group help summary omits `list`. Some early file/plan read failures still emit stderr rather than a JSON envelope. A failed apply can exit the process with status 1 while its outer JSON wrapper says `exit_code: 0`.
 - **Remote provenance:** the runner's off-VM control result does not carry `cli_version`; only the local job envelope does.

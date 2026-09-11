@@ -384,24 +384,19 @@ class Orchestrator:
         self._persist()
 
     def _check_disk(self, free: Optional[int]) -> None:
-        """Refuse a job whose declared inputs cannot fit.
-
-        The maths is only as good as the spec: artifact sizes are usually
-        unknown at plan time, so this warns rather than pretends. Sizes that
-        *are* declared are checked properly.
-        """
+        """Refuse a job whose declared inputs and artifacts cannot fit."""
         if not free:
             return
         declared = sum(d.size_bytes or 0 for d in self.spec.data)
+        declared += sum(a.size_bytes or 0 for a in self.spec.artifacts)
         if declared and declared > free * 0.8:
             raise PhaseError(
                 Phase.VERIFY,
-                f"declared inputs are {declared} bytes but only {free} free on /content",
+                f"declared inputs and artifacts are {declared} bytes but only "
+                f"{free} free on /content",
                 RetryClass.RETRY_DIFFERENT,
-                ["request a high-RAM/larger-disk shape, or stage a subset"],
+                ["request a high-RAM/larger-disk shape, or reduce staged data/output"],
             )
-
-    # -- run --------------------------------------------------------------
 
     def launch(self, payload_remote_path: str) -> int:
         """One short kernel RPC. Returns the runner pid.
@@ -413,22 +408,27 @@ class Orchestrator:
         """
         self._set_phase(Phase.RUN)
         args = json.dumps(self.spec.code.args)
-        result_put_url = (
-            self.spec.control.result.put_url if self.spec.control.result else None
-        )
         code = (
             "import json, os, subprocess, sys\n"
             f"d = {self.remote_dir!r}\n"
             "os.makedirs(d, exist_ok=True)\n"
             "env = dict(os.environ)\n"
+            "for name in ('MIGHTY_CONTROL_RESULT_PUT_URL', "
+            "'MIGHTY_RESULT_PUT_URL', 'CONTROL_RESULT_PUT_URL'): "
+            "env.pop(name, None)\n"
             f"env['MIGHTY_JOB_ID'] = {self.job_id!r}\n"
             "cmd = [sys.executable, '-m', 'mighty_runtime.runner',\n"
             "       '--job-dir', d,\n"
             f"      '--deadline', str({self.spec.budgets.wall_clock}),\n"
             f"      '--entry', os.path.join(d, 'src', {self.spec.code.entry!r})]\n"
-            f"result_put_url = {result_put_url!r}\n"
-            "if result_put_url is not None:\n"
-            "    cmd += ['--result-put-url', result_put_url]\n"
+            "control_path = os.path.join(d, 'mighty_runtime', 'result.put-url')\n"
+            "if os.path.exists(control_path):\n"
+            "    os.chmod(control_path, 0o600)\n"
+            "    with open(control_path, encoding='utf-8') as f:\n"
+            "        result_put_url = f.read().strip()\n"
+            "    os.unlink(control_path)\n"
+            "    if not result_put_url: raise RuntimeError('empty result control file')\n"
+            "    env['MIGHTY_CONTROL_RESULT_PUT_URL'] = result_put_url\n"
             "if os.path.exists(os.path.join(d, 'stage.manifest.json')):\n"
             "    cmd += ['--stage-manifest', os.path.join(d, 'stage.manifest.json')]\n"
             "if os.path.exists(os.path.join(d, 'offload.manifest.json')):\n"
@@ -439,8 +439,12 @@ class Orchestrator:
             # swallowed by the runner's parser.
             f"cmd += ['--'] + {args}\n"
             "log = open(os.path.join(d, 'runner.log'), 'ab')\n"
-            "p = subprocess.Popen(cmd, cwd=d, env=env, stdout=log, stderr=log,\n"
-            "                     stdin=subprocess.DEVNULL, start_new_session=True)\n"
+            "try:\n"
+            "    p = subprocess.Popen(cmd, cwd=d, env=env, stdout=log, stderr=log,\n"
+            "                         stdin=subprocess.DEVNULL, start_new_session=True)\n"
+            "finally:\n"
+            "    env.pop('MIGHTY_CONTROL_RESULT_PUT_URL', None)\n"
+            "    if 'result_put_url' in locals(): del result_put_url\n"
             "print('LAUNCHED_PID=%d' % p.pid)\n"
         )
         outputs = self._execute_code(code, timeout=LAUNCH_TIMEOUT)
@@ -511,65 +515,78 @@ class Orchestrator:
         self.env.retry_class = RetryClass.RETRY_SAME
         self._persist()
 
-    def _absorb_result(self, result: dict) -> None:
-        self.env.workload = Workload(result.get("workload", "unknown"))
-        self.env.exit_code = result.get("exit_code")
-        self.env.signal = result.get("signal")
-        self.env.exception = result.get("exception")
-        self.env.surviving_descendants = result.get("surviving_descendants", []) or []
-        self.env.finished_at = _now()
-        for a in result.get("artifacts", []) or []:
-            self.env.artifacts.append(ArtifactResult(**a))
+    @staticmethod
+    def absorb_result(env: JobEnvelope, spec: JobSpec, result: dict) -> None:
+        remote_phase = result.get("phase")
+        if remote_phase:
+            try:
+                env.phase = Phase(remote_phase)
+            except ValueError:
+                pass
 
-        if not self.spec.artifacts:
-            self.env.offload = Offload.NOT_REQUIRED
-        elif any(a.status == "failed" for a in self.env.artifacts):
-            self.env.offload = Offload.FAILED
-        elif any(
-            a.status == "missing" and decl.required
-            for a, decl in _pair_artifacts(self.env.artifacts, self.spec.artifacts)
+        env.workload = Workload(result.get("workload", "unknown"))
+        env.exit_code = result.get("exit_code")
+        env.signal = result.get("signal")
+        env.exception = result.get("exception")
+        env.surviving_descendants = result.get("surviving_descendants", []) or []
+        env.finished_at = _now()
+        env.artifacts = [
+            ArtifactResult(**artifact)
+            for artifact in (result.get("artifacts", []) or [])
+        ]
+
+        result_paths = {artifact.path for artifact in env.artifacts}
+        missing_required = any(
+            declared.required
+            and (
+                declared.path not in result_paths
+                or any(
+                    artifact.path == declared.path and artifact.status == "missing"
+                    for artifact in env.artifacts
+                )
+            )
+            for declared in spec.artifacts
+        )
+        if not spec.artifacts:
+            env.offload = Offload.NOT_REQUIRED
+        elif missing_required:
+            env.offload = Offload.FAILED
+            env.reason = "a required artifact was not produced"
+            env.retry_class = RetryClass.FIX_CODE
+        elif result.get("offload") == "failed" or any(
+            artifact.status == "failed" for artifact in env.artifacts
         ):
-            self.env.offload = Offload.FAILED
-            self.env.reason = "a required artifact was not produced"
-            self.env.retry_class = RetryClass.FIX_CODE
+            env.offload = Offload.FAILED
+            env.reason = "artifact offload failed"
+            env.retry_class = RetryClass.RETRY_SAME
         else:
-            self.env.offload = Offload.OK
+            env.offload = Offload.OK
 
-        # A stage failure is not a code failure: telling an agent to "fix
-        # your code" when a fetch was refused sends it editing a script
-        # that was never wrong. `phase` distinguishes them -- the runner
-        # records where it died, and the class follows from that, never
-        # from the phase the supervisor happened to be in.
-        #
-        # `fix_human`, not `refresh_urls`: the runner deliberately discards
-        # the error text (urllib messages can embed a signed query string,
-        # and a signature in a durable record is a leaked credential), so
-        # all that survives is the exception class. That cannot separate an
-        # expired signature from a wrong object path from a checksum
-        # mismatch -- and only the first of those is fixed by re-signing.
-        # Claiming `refresh_urls` would send an agent re-signing URLs for a
-        # sha256 mismatch, forever. Narrowing this needs a redacted
-        # structured field (http_status + a reason enum) set at the raise
-        # site; recorded in the design's known gaps.
-        phase = result.get("phase")
-        if phase == "stage" and self.env.workload is Workload.FAILED:
-            self.env.phase = Phase.STAGE
-            self.env.retry_class = RetryClass.FIX_HUMAN
-            self.env.reason = (
+        # Stage errors are deliberately redacted by the runner because urllib
+        # exception strings can contain signed query parameters. The surviving
+        # evidence cannot distinguish expiry, access, and checksum failures.
+        if env.phase is Phase.STAGE and env.workload is Workload.FAILED:
+            env.retry_class = RetryClass.FIX_HUMAN
+            env.reason = (
                 "staging failed: a declared input could not be fetched, or "
                 "failed its sha256 check. The consumer never started."
             )
-            self.env.hints.append(
+            env.hints.append(
                 "check, in order: the URL has not expired; the object exists "
                 "and the grant covers it; data[].sha256 matches the object"
             )
-        elif self.env.workload is Workload.FAILED and self.env.retry_class is None:
-            self.env.retry_class = RetryClass.FIX_CODE
-        if self.env.surviving_descendants:
-            self.env.hints.append(
-                f"{len(self.env.surviving_descendants)} descendant(s) outlived the "
+        elif env.workload is Workload.FAILED and env.retry_class is None:
+            env.retry_class = RetryClass.FIX_CODE
+        if env.surviving_descendants:
+            hint = (
+                f"{len(env.surviving_descendants)} descendant(s) outlived the "
                 "workload and may still hold the GPU"
             )
+            if hint not in env.hints:
+                env.hints.append(hint)
+
+    def _absorb_result(self, result: dict) -> None:
+        self.absorb_result(self.env, self.spec, result)
 
     # -- cleanup -----------------------------------------------------------
 
@@ -644,15 +661,6 @@ class Orchestrator:
 
 
 # -- helpers ---------------------------------------------------------------
-
-
-def _pair_artifacts(results, declared):
-    by_path = {d.path: d for d in declared}
-    for r in results:
-        d = by_path.get(r.path)
-        if d is not None:
-            yield r, d
-
 
 def _dep_name(dep: str) -> str:
     for sep in ("==", ">=", "<=", "~=", "!=", ">", "<", "["):

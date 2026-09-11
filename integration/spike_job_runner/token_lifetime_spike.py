@@ -4,14 +4,14 @@ raw data only; do NOT re-run it to answer anything.
 
 This script observed the failure but could not explain it, and its first
 write-up drew the wrong conclusion ("the VM was reset under a live
-assignment"). The discriminator settled it: the loss at ~61min is
-runtime-proxy **token expiry**, the files are intact the whole time, and
-re-adopting restores access. See `docs/08_job.md`'s long-run section.
+assignment"). The discriminator showed that fresh assignment metadata
+restored access and that the files remained intact. Because `adopt` refreshes
+both the token and proxy endpoint, it did not distinguish token expiry from
+endpoint rebinding. See `docs/08_job.md`'s long-run section.
 
 Original docstring follows.
 
-Half of doc step 6: does Contents-API polling still work after the
-runtime-proxy token expires (~hourly), on a job that outlives it?
+Half of doc step 6: does Contents-API polling remain usable for a multi-hour job?
 SCOPE -- READ THIS BEFORE BELIEVING A GREEN RESULT.
 This run measures the Contents-poll half ONLY. It does NOT exercise
 `control.result.put_url`: the spike runner has no signed-URL PUT, and
@@ -144,7 +144,7 @@ print("LAUNCHED_PID", p.pid)
                 # Disambiguate, or the whole run is uninterpretable: a
                 # dead keep-alive daemon gets the VM idle-reaped, and
                 # that produces a Contents error indistinguishable from
-                # proxy-token expiry.
+                # an access-binding failure.
                 try:
                     sess = cli_json("sessions", check=False, timeout=180)
                     names = [s.get("endpoint") for s in (sess.get("sessions") or [])]
@@ -169,11 +169,11 @@ print("LAUNCHED_PID", p.pid)
                 except Exception as e:  # noqa: BLE001
                     say(f"  attribution: status query failed: {e}")
                 say(
-                    "  verdict: token-expiry IF the assignment is still listed and "
-                    "keep-alive is alive; idle-reap otherwise"
+                    "  observation: assignment and keep-alive state alone cannot "
+                    "distinguish token expiry from endpoint rebinding"
                 )
 
-        # The verdict itself, after the token should long since have expired.
+        # Read the verdict again at the end of the observation window.
         res_local = os.path.join(tempfile.gettempdir(), "token-spike-result.json")
         proc = cli("download", "-s", SESSION, f"{job_dir}/result.json", res_local,
                    check=False, timeout=180)
@@ -182,7 +182,7 @@ print("LAUNCHED_PID", p.pid)
                 result = json.load(f)
             say(f"VERDICT READABLE after {MINUTES}min: workload={result['workload']} "
                 f"exit={result['exit_code']}")
-            say("RESULT: Contents polling SURVIVED past token expiry")
+            say("RESULT: Contents verdict readable at the final sample")
         else:
             say(f"VERDICT UNREADABLE: {proc.stderr.strip()[-400:]}")
             say("RESULT: architecture NEEDS the control.result.put_url durable push")

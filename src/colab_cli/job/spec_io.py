@@ -12,11 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""I/O and redaction helpers for job specifications.
+"""I/O and URL-identity helpers for job specifications.
 
-The spec is deliberately a Pydantic object at the planner boundary. URL query
-parameters are credentials for signed URLs, not part of object identity, and
-are removed whenever a URL is persisted or hashed.
+Signed-URL query parameters are credentials rather than object identity, so
+canonical URL identities and hashes remove them. Stored specifications and
+remote manifests retain their full URLs; callers must protect those files.
 """
 
 from __future__ import annotations

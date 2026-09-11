@@ -187,6 +187,15 @@ class DataItem(BaseModel):
     sha256: Optional[str] = None
     size_bytes: Optional[int] = None
 
+    @field_validator("sha256")
+    @classmethod
+    def _sha256_is_full_hex_digest(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        if len(value) != 64 or any(c not in "0123456789abcdefABCDEF" for c in value):
+            raise ValueError("sha256 must contain exactly 64 hexadecimal characters")
+        return value.lower()
+
 
 class ArtifactItem(BaseModel):
     model_config = ConfigDict(extra="forbid")

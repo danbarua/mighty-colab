@@ -12,6 +12,23 @@ below corresponds to a tag of the same name.
 
 ### Fixed
 
+- **`job destroy --cancel-only` did not stop detached workloads.** Runner and
+  watchdog now consume the intent, terminate the consumer with grace-period
+  escalation, and leave the VM assigned. Full destroy now reads and preserves
+  any remote workload verdict before unassigning; an absent verdict becomes
+  `unknown` instead of an invented cancellation.
+- **Control-result PUT credentials entered kernel history.** Apply now stages the
+  URL in a mode-0600 remote file that launch reads and unlinks, keeps it out of
+  launch source and runner argv, and clears inherited control URL variables.
+- **Invalid or inactive job inputs could pass planning.** Data SHA-256 values now
+  require exactly 64 hexadecimal characters; unsupported retry, resume,
+  `control.log`, and `on_run_fail: skip` settings are plan errors; declared
+  artifact sizes now contribute to the remote disk-space gate.
+- **Unexpected supervisor exceptions could leave non-terminal job records.**
+  Non-debug apply now persists and emits a terminal verdict, while status and
+  destroy share complete remote result absorption including artifact/offload
+  state. `status --poll` help now states that it waits for `result.json`.
+
 - **`job` sessions did not retain the kernel that launched their detached
   runner.** The session record now persists the runtime's kernel and Jupyter
   session identifiers, so public `restart-kernel -s job-<id>` targets the
@@ -22,6 +39,9 @@ below corresponds to a tag of the same name.
 
 ### Added
 
+- **Live cancel-only coverage** in `integration/repro_job_cancel_only/`: a
+  running CPU workload reaches `cancelled` while its assignment remains live,
+  then explicit full destroy removes the endpoint.
 - **Live launch-kernel restart coverage** in
   `integration/repro_job_kernel_restart/`: a detached CPU consumer retains
   its process identity, advances after the public kernel restart, exits 0, and

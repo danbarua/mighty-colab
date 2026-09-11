@@ -392,6 +392,30 @@ def apply(
         orch.env.hints.append(
             f"reattach with `mighty-colab job status {p.job_id}`"
         )
+    except Exception as e:  # noqa: BLE001 - every non-debug path needs a verdict
+        if state.debug:
+            raise
+        if not orch.env.workload.terminal:
+            before_run = orch.env.phase in {
+                Phase.PLAN,
+                Phase.PROVISION,
+                Phase.INSTALL,
+                Phase.RESTART,
+                Phase.VERIFY,
+                Phase.STAGE,
+            }
+            orch.env.workload = Workload.FAILED if before_run else Workload.UNKNOWN
+        if not orch.env.offload.terminal:
+            if not p.spec.artifacts:
+                orch.env.offload = Offload.NOT_REQUIRED
+            elif orch.env.phase is Phase.OFFLOAD:
+                orch.env.offload = Offload.FAILED
+            else:
+                orch.env.offload = Offload.SKIPPED
+        orch.env.supervisor = Supervisor.FINISHED
+        orch.env.reason = f"internal supervisor failure ({type(e).__name__})"
+        orch.env.retry_class = RetryClass.DO_NOT_RETRY
+        orch.env.hints.append("re-run with --debug to inspect the local traceback")
     finally:
         # Teardown is how you leave, not a phase you reach: an early
         # failure must still release the VM, or the cost of a typo is an
@@ -418,7 +442,7 @@ def apply(
 
 
 def _stage_payload(orch: Orchestrator, p) -> None:
-    """Upload the runtime package, the user's code, and the two manifests.
+    """Upload runtime, code, manifests, and the control-result secret file.
 
     The manifests are written here rather than on the VM so that signed
     URLs never pass through `execute_code` -- kernel input is echoed into
@@ -438,7 +462,10 @@ def _stage_payload(orch: Orchestrator, p) -> None:
 def status(
     job_id: Annotated[str, typer.Argument(help="Job id")],
     poll: Annotated[
-        bool, typer.Option("--poll", help="Keep polling until the job is done")
+        bool,
+        typer.Option(
+            "--poll", help="Keep polling until remote result.json is available"
+        ),
     ] = False,
     interval: Annotated[int, typer.Option("--interval", help="Poll interval (s)")] = 15,
 ):
@@ -474,10 +501,14 @@ def status(
                     f"/content/jobs/{job_id}/result.json"
                 )
                 if st.name == "OK" and result:
-                    env.workload = Workload(result.get("workload", "unknown"))
-                    env.exit_code = result.get("exit_code")
-                    env.signal = result.get("signal")
-                    env.exception = result.get("exception")
+                    saved_plan = store.read_plan(job_id)
+                    if saved_plan is not None:
+                        Orchestrator.absorb_result(env, saved_plan.spec, result)
+                    else:
+                        env.workload = Workload(result.get("workload", "unknown"))
+                        env.exit_code = result.get("exit_code")
+                        env.signal = result.get("signal")
+                        env.exception = result.get("exception")
                     env.supervisor = Supervisor.FINISHED
                     break
                 if st.name == "SESSION_LOST":
@@ -529,26 +560,61 @@ def destroy(
         typer.echo(f"[colab] No local record of job {job_id!r}; nothing to destroy.")
         raise typer.Exit(0)
 
+    saved_plan = store.read_plan(job_id)
+    transport = None
+    intent_status = None
     if env.session:
-        s = state.store.get(env.session)
-        if s is not None:
+        session = state.store.get(env.session)
+        if session is not None:
+            transport = JobTransport(session, state.client, state.store)
             try:
-                transport = JobTransport(s, state.client, state.store)
-                transport.write_json(
-                    f"/content/jobs/{job_id}/cancel.json",
-                    {
-                        "intent": "cancelled",
-                        "by": "job destroy",
-                        "at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                    },
+                result, read_status = transport.read_json(
+                    f"/content/jobs/{job_id}/result.json"
                 )
-            except Exception as e:  # noqa: BLE001 - best effort; unassign follows
-                typer.echo(f"[colab] Could not write cancel intent: {e}", err=True)
+                if read_status.name == "OK" and result:
+                    if saved_plan is not None:
+                        Orchestrator.absorb_result(env, saved_plan.spec, result)
+                    else:
+                        env.workload = Workload(result.get("workload", "unknown"))
+                        env.exit_code = result.get("exit_code")
+                        env.signal = result.get("signal")
+                        env.exception = result.get("exception")
+                    env.supervisor = Supervisor.FINISHED
+            except Exception as e:  # noqa: BLE001 - teardown still must proceed
+                typer.echo(
+                    f"[colab] Could not reconcile remote result ({type(e).__name__}).",
+                    err=True,
+                )
+
+    if not env.workload.terminal and transport is not None:
+        try:
+            intent_status = transport.write_json(
+                f"/content/jobs/{job_id}/cancel.json",
+                {
+                    "intent": "cancelled",
+                    "by": "job destroy",
+                    "at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                },
+            )
+        except Exception as e:  # noqa: BLE001 - teardown still must proceed
+            typer.echo(
+                f"[colab] Could not write cancel intent ({type(e).__name__}).",
+                err=True,
+            )
 
     if cancel_only:
-        env.reason = "cancel intent written; VM left running"
+        if env.workload.terminal:
+            env.reason = env.reason or "workload already terminal; VM left running"
+        elif intent_status is not None and intent_status.name == "OK":
+            env.reason = "cancel intent written; VM left running"
+        else:
+            env.reason = "cancel intent could not be confirmed; VM left running"
         store.write_envelope(env)
         _emit(env, "destroy")
+        if not env.workload.terminal and (
+            intent_status is None or intent_status.name != "OK"
+        ):
+            raise typer.Exit(1)
         return
 
     if env.endpoint:
@@ -556,23 +622,35 @@ def destroy(
             state.client.unassign(env.endpoint)
             env.cleanup = Cleanup.RELEASED
         except Exception as e:  # noqa: BLE001
-            # Already-absent is success for a desired-state verb; only a
-            # real failure is worth a nonzero exit.
             if "404" in str(e) or "not found" in str(e).lower():
                 env.cleanup = Cleanup.ALREADY_ABSENT
             else:
                 env.cleanup = Cleanup.FAILED
-                env.hints.append(f"unassign failed: {e}")
+                env.hints.append(f"unassign failed: {type(e).__name__}")
     else:
         env.cleanup = Cleanup.ALREADY_ABSENT
 
-    if env.session:
+    if env.session and env.cleanup is not Cleanup.FAILED:
         try:
             state.store.remove(env.session)
         except Exception:  # noqa: BLE001
             pass
     if not env.workload.terminal:
-        env.workload = Workload.CANCELLED
+        env.workload = Workload.UNKNOWN
+        if not env.offload.terminal:
+            env.offload = (
+                Offload.NOT_REQUIRED
+                if saved_plan is None or not saved_plan.spec.artifacts
+                else Offload.SKIPPED
+            )
+        wrote_intent = intent_status is not None and intent_status.name == "OK"
+        env.reason = (
+            "VM destroyed after cancellation was requested; remote workload "
+            "verdict unavailable"
+            if wrote_intent
+            else "VM destroyed; cancellation intent and remote workload verdict unavailable"
+        )
+        env.retry_class = RetryClass.DO_NOT_RETRY
     env.supervisor = Supervisor.FINISHED
     store.write_envelope(env)
     _emit(env, "destroy")

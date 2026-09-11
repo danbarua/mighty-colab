@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import signal
 import shutil
 
 import subprocess
@@ -160,6 +161,79 @@ def test_duplicate_live_launch_is_noop(tmp_path):
         assert "duplicate launch" in duplicate.stdout
     finally:
         first.wait(timeout=20)
+def test_external_cancel_terminates_the_running_consumer(tmp_path):
+    _package, entry, job_dir = _prepare(tmp_path, "import time; time.sleep(60)\n")
+    runner = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "mighty_runtime.runner",
+            "--job-dir",
+            str(job_dir),
+            str(entry),
+        ],
+        cwd=tmp_path,
+        env=_runtime_env(tmp_path),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        launch = job_dir / "launch.json"
+        for _ in range(200):
+            if launch.exists() and launch.stat().st_size:
+                break
+            time.sleep(0.01)
+        assert launch.exists() and launch.stat().st_size
+
+        (job_dir / "cancel.json").write_text(
+            json.dumps({"intent": "cancelled", "by": "job destroy"})
+        )
+        runner.wait(timeout=10)
+
+        result = json.loads((job_dir / "result.json").read_text())
+        assert result["workload"] == "cancelled"
+        assert result["signal"] == signal.SIGTERM
+    finally:
+        if runner.poll() is None:
+            (job_dir / "cancel.json").write_text(
+                json.dumps({"intent": "cancelled", "by": "test cleanup"})
+            )
+            runner.wait(timeout=10)
+
+
+def test_watchdog_forwards_a_preexisting_cancel_intent(tmp_path, monkeypatch):
+    from colab_cli.job.runtime_payload import watchdog
+
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    (job_dir / "cancel.json").write_text('{"intent":"cancelled"}')
+    killed = []
+    records = 0
+
+    monkeypatch.setattr(
+        watchdog,
+        "_runner_identity",
+        lambda _job_dir: (os.getpid(), "", "", None, time.time()),
+    )
+
+    def record(*_args):
+        nonlocal records
+        records += 1
+        if records == 2:
+            (job_dir / "result.json").write_text("{}")
+
+    monkeypatch.setattr(watchdog, "_record", record)
+    monkeypatch.setattr(watchdog.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        watchdog,
+        "_safe_killpg",
+        lambda pgid, sig: killed.append((pgid, sig)),
+    )
+
+    assert watchdog.main(
+        ["--job-dir", str(job_dir), "--shim-pgid", "4321", "--interval", "0.01"]
+    ) == 0
+    assert killed == [(4321, signal.SIGTERM)]
 
 
 def test_stage_hash_mismatch_does_not_run_consumer(tmp_path):

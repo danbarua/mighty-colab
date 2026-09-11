@@ -177,8 +177,19 @@ def _write_manifest(client, remote_dir, name, rows, made_dirs=None):
         local_path.unlink(missing_ok=True)
 
 
+
+def _write_secret(client, remote_path, value, made_dirs=None):
+    with tempfile.NamedTemporaryFile(mode="w", delete=False) as f:
+        f.write(value)
+        f.flush()
+        local_path = Path(f.name)
+    try:
+        _upload_checked(client, local_path, remote_path, made_dirs)
+    finally:
+        local_path.unlink(missing_ok=True)
+
 def stage_payload(*, spec, job_id: str, session, remote_dir: str) -> None:
-    """Upload runtime/code and signed manifests through the Contents API.
+    """Upload runtime/code, manifests, and the control-result secret file.
 
     Every upload is checked before calling the API. This prevents the
     Contents chunked PUT path from receiving a payload above its known live
@@ -225,3 +236,13 @@ def stage_payload(*, spec, job_id: str, session, remote_dir: str) -> None:
     _write_manifest(
         client, remote_dir, "offload.manifest.json", artifact_rows, made_dirs
     )
+    control = _job_attr(spec, "control")
+    result_channel = _job_attr(control, "result") if control is not None else None
+    result_put_url = _job_attr(result_channel, "put_url")
+    if result_put_url:
+        _write_secret(
+            client,
+            _remote_join(runtime_remote, "result.put-url"),
+            result_put_url,
+            made_dirs,
+        )

@@ -1,21 +1,20 @@
 #!/usr/bin/env python3
-"""Discriminates proxy-token expiry from real filesystem loss, in one session.
+"""Tests whether fresh assignment metadata restores lost Contents access.
 
 Background: `token_lifetime_spike.py` lost Contents access at t+61min with
-404s on files written at t=0, and the first write-up concluded the VM had
-been recycled under a live assignment. Issue #3 says otherwise: the
-runtime-proxy token has a TTL the CLI never refreshes, expiry returns
-401/404, and it reproduces "at ~60 minute intervals". 61 != coincidence.
+404s on files written at t=0. The first write-up incorrectly concluded that
+the VM had been recycled under a live assignment. Issue #3 identifies
+runtime-proxy token expiry as one mechanism that causes periodic 401/404s.
 
-The two hypotheses make opposite predictions about ONE cheap action:
+The discriminating action here is:
 
     at first failure, run `adopt <ENDPOINT> --keep-alive`, retry the read
-      files come back  -> token expiry. Files were there the whole time.
-      files still gone  -> filesystem really went. Activity hypothesis lives.
+      files come back  -> access binding refreshed; files remained intact
+      files still gone  -> filesystem loss remains possible
 
-THIS SCRIPT MUST NOT REFRESH THE TOKEN ITSELF. The refresh is what the
-supervisor contract will do (docs/08_job.md launcher step 6); a spike that
-auto-refreshes never reaches the failure and proves nothing. Let it break.
+`adopt` both mints a token and re-resolves the proxy endpoint. A successful
+retry therefore does not distinguish token expiry from endpoint rebinding.
+The script reports only what that intervention proves.
 
   uv run python integration/spike_job_runner/token_discriminator_spike.py
 Env: SPIKE_MINUTES (default 80, needs to exceed ~60), SPIKE_SESSION.
@@ -154,9 +153,9 @@ print("LAUNCHED_PID", p.pid)
             say(f"  retry after adopt: {'OK' if ok2 else 'FAIL ' + err2}")
 
             if ok2:
-                verdict = "TOKEN_EXPIRY"
-                say("  VERDICT: proxy-token expiry. Files were intact all along.")
-                say("  => supervisor MUST refresh the token; activity hypothesis is dead.")
+                verdict = "ACCESS_BINDING_REFRESH"
+                say("  VERDICT: fresh assignment metadata restored Contents access.")
+                say("  => files remained intact; token refresh and endpoint rebinding are confounded.")
             else:
                 verdict = "FILESYSTEM_LOSS"
                 say("  VERDICT: files still unreadable after a successful re-adopt.")
@@ -165,7 +164,7 @@ print("LAUNCHED_PID", p.pid)
 
         if first_fail_min is None:
             verdict = "NO_FAILURE"
-            say(f"no failure within {MINUTES}min -- token outlived the window this time")
+            say(f"no Contents failure within the {MINUTES}min observation window")
     except Exception as e:
         say(f"ERROR {type(e).__name__}: {e}")
     finally:
