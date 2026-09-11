@@ -40,6 +40,36 @@ mighty-colab job destroy <id>               # unconditional. safe to run twice.
 many times as you like before anything bills. Under `--json` every one of these
 emits a validated envelope.
 
+### Chaining them from a script
+
+`plan` mints the job id, so take it from the envelope rather than scraping
+the human-readable line:
+
+```bash
+JID=$(mighty-colab --json job plan spec.yaml | jq -r .job_id)
+mighty-colab job apply --job-id "$JID"
+mighty-colab --json job status "$JID" | jq '{done, ok}'
+```
+
+### Exit codes
+
+This distinction is the one a scripted consumer most often gets wrong:
+
+| command | exits non-zero when |
+|---|---|
+| `job plan` | the spec has errors (allocates nothing either way) |
+| `job apply` | **the job did not succeed** (`ok: false`) |
+| `job status` | the *query* failed. A successfully-reported failed job exits **0** |
+| `job destroy` | teardown actually failed. Already-gone exits 0 |
+
+So `job apply ... && evaluate.py` is safe: a run that raised will not
+advance. But `job status ... && evaluate.py` is **not** — `status`
+succeeding only means it got an answer. Branch on `ok` from the envelope:
+
+```bash
+mighty-colab --json job status "$JID" | jq -e .ok >/dev/null && evaluate.py
+```
+
 ## A minimal spec
 
 ```yaml
@@ -221,7 +251,10 @@ Be aware of these before trusting a long run:
 - Detected escapees are reported, not killed.
 
 Verified live on 2026-09-11: CPU and T4 GPU runs end to end (`done=True
-ok=True`, real CUDA matmul, clean teardown); the failure path (`KeyError` ->
+ok=True`, real CUDA matmul, clean teardown); the full
+`install -> restart -> verify` sequence with a real pin, where the workload's
+own `assert numpy.__version__ == "2.1.0"` passed, proving the pin was live
+after the restart; the failure path (`KeyError` ->
 `workload: failed`, `exception` carried off-VM, `retry_class: fix_code`,
 `cleanup: released`, `apply` exits 1); and token expiry at t+61min recovering
 via re-adopt.

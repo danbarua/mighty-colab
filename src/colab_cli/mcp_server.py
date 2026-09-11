@@ -53,7 +53,13 @@ EXCLUDED_COMMANDS = {
     "drivemount",  # can block on /dev/tty for a Drive re-auth ceremony
     "mcp",  # the MCP server command itself
     "help",  # redundant with MCP's own tool discovery,
-    "pay" # user-facing accounts + billing
+    "pay",  # user-facing accounts + billing
+    # `job apply` blocks for the job's entire wall_clock -- hours -- and
+    # returns output only at the very end. That is exactly the failure
+    # mode `log --follow` is excluded for below. An agent drives a job
+    # through `job_plan` then polls `job_status`, which is the shape the
+    # supervisor was designed for anyway.
+    "job_apply",
 }
 
 
@@ -159,9 +165,14 @@ def _iter_exposable(
         sub_commands = getattr(cmd, "commands", None)
         if sub_commands:
             for sub_name, sub_cmd in sorted(sub_commands.items()):
-                if not _is_exposable(sub_name, sub_cmd) or sub_cmd.hidden:
+                flat = f"{prefix}{name}_{sub_name}"
+                # Exclusions are matched against the FLATTENED name: the
+                # leaf's own name is ambiguous ("apply", "list") and would
+                # either miss the exclusion or blanket-exclude an unrelated
+                # top-level command that happens to share it.
+                if flat in EXCLUDED_COMMANDS or sub_cmd.hidden:
                     continue
-                found.append((f"{prefix}{name}_{sub_name}", sub_cmd))
+                found.append((flat, sub_cmd))
             continue
         found.append((f"{prefix}{name}", cmd))
     return found

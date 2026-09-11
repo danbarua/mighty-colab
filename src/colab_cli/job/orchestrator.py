@@ -491,7 +491,25 @@ class Orchestrator:
         else:
             self.env.offload = Offload.OK
 
-        if self.env.workload is Workload.FAILED and self.env.retry_class is None:
+        # A stage failure is not a code failure, and telling an agent to
+        # "fix your code" when a signature expired sends it editing a
+        # perfectly good script. `phase` distinguishes them: the runner
+        # records where it died, and the retry class follows from that,
+        # never from the phase the supervisor happened to be in.
+        phase = result.get("phase")
+        if phase == "stage" and self.env.workload is Workload.FAILED:
+            self.env.phase = Phase.STAGE
+            self.env.retry_class = RetryClass.REFRESH_URLS
+            self.env.reason = (
+                "staging failed: an input could not be fetched or failed its "
+                "sha256 check. The consumer never started."
+            )
+            self.env.hints.append(
+                "if the URL is still valid, this is a checksum mismatch and "
+                "`refresh_urls` will not help -- compare data[].sha256 "
+                "against the object"
+            )
+        elif self.env.workload is Workload.FAILED and self.env.retry_class is None:
             self.env.retry_class = RetryClass.FIX_CODE
         if self.env.surviving_descendants:
             self.env.hints.append(

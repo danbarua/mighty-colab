@@ -105,8 +105,16 @@ def _runner_identity(job_dir):
         pid = int(launch.get("pid", -1))
     except (TypeError, ValueError):
         pid = -1
-    return pid, launch.get("starttime", ""), launch.get("boot_id", ""), launch.get(
-        "deadline"
+    try:
+        started = float(launch.get("started_at"))
+    except (TypeError, ValueError):
+        started = None
+    return (
+        pid,
+        launch.get("starttime", ""),
+        launch.get("boot_id", ""),
+        launch.get("deadline"),
+        started,
     )
 
 
@@ -172,16 +180,29 @@ def main(argv):
     cancel_sent = os.path.exists(os.path.join(job_dir, "cancel.json"))
     kill_sent = False
     escalate_at = None
-    started = time.time()
+    # Fallback only. The authoritative start is the runner's own
+    # `started_at` from `launch.json`: the watchdog boots *after* the
+    # runner, so its own clock under-reports elapsed time, and it would be
+    # a second slightly-wrong clock alongside the one the liveness check
+    # already reads from that same record.
+    watchdog_started = time.time()
     while True:
         now = time.time()
-        pid, expected_start, expected_boot, deadline = _runner_identity(job_dir)
+        pid, expected_start, expected_boot, deadline, launched_at = _runner_identity(
+            job_dir
+        )
         runner_alive = ident.alive(pid, expected_start, expected_boot)
         try:
             deadline_value = float(deadline) if deadline is not None else None
         except (TypeError, ValueError):
             deadline_value = None
-        _record(job_dir, runner_alive, deadline_value, now, started)
+        _record(
+            job_dir,
+            runner_alive,
+            deadline_value,
+            now,
+            launched_at if launched_at is not None else watchdog_started,
+        )
 
         # A result means the runner has completed its durable work. Stop the
         # sibling rather than leave a detached process behind.

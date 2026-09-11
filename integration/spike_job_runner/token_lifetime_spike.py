@@ -1,7 +1,17 @@
 #!/usr/bin/env python3
-"""Half of doc step 6: does Contents-API polling still work after the
-runtime-proxy token expires (~hourly), on a job that outlives it?
+"""SUPERSEDED 2026-09-11 by `token_discriminator_spike.py`. Kept for the
+raw data only; do NOT re-run it to answer anything.
 
+This script observed the failure but could not explain it, and its first
+write-up drew the wrong conclusion ("the VM was reset under a live
+assignment"). The discriminator settled it: the loss at ~61min is
+runtime-proxy **token expiry**, the files are intact the whole time, and
+re-adopting restores access. See `docs/08_job.md`'s long-run section.
+
+Original docstring follows.
+
+Half of doc step 6: does Contents-API polling still work after the
+runtime-proxy token expires (~hourly), on a job that outlives it?
 SCOPE -- READ THIS BEFORE BELIEVING A GREEN RESULT.
 This run measures the Contents-poll half ONLY. It does NOT exercise
 `control.result.put_url`: the spike runner has no signed-URL PUT, and

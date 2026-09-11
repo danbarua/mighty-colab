@@ -36,7 +36,7 @@ from typing import Optional
 import typer
 from typing_extensions import Annotated
 
-from colab_cli.common import build_envelope, emit_json, state
+from colab_cli.common import build_envelope, emit_json
 from colab_cli.envelopes import (
     JobEnvelopeWrapper,
     JobListEnvelope,
@@ -68,6 +68,7 @@ def _store() -> JobStore:
     for sessions: a test or a second agent pointed at a scratch config must
     not write into the developer's real job history.
     """
+    from colab_cli.common import state
     if state.config_path:
         root = Path(state.config_path).parent / "jobs"
     else:
@@ -89,6 +90,7 @@ def _emit(env: JobEnvelope, command: str) -> None:
     Collapsing the two is how a caller ends up retrying the CLI instead of
     fixing their code.
     """
+    from colab_cli.common import state
     if state.json_output:
         emit_json(
             build_envelope(
@@ -145,6 +147,7 @@ def _human(env: JobEnvelope) -> str:
 
 def _emit_spec_errors(exc) -> None:
     """Render pydantic validation failures in the plan-diagnostic shape."""
+    from colab_cli.common import state
     diags = []
     for err in exc.errors():
         loc = ".".join(str(p) for p in err.get("loc", ())) or "<spec>"
@@ -188,6 +191,7 @@ def plan(
     agent can iterate on a broken spec for free, and the first thing that
     costs money is the thing the caller explicitly asked for.
     """
+    from colab_cli.common import state
     from pydantic import ValidationError
 
     from colab_cli.job.planner import build_plan
@@ -270,8 +274,10 @@ def apply(
     durable artifact that may be applied hours after it was written, and
     "the thing I reviewed" must be the thing that runs.
     """
+    from colab_cli.common import state
     from colab_cli.job.models import Plan
     from colab_cli.job.planner import revalidate_expiry
+    from colab_cli.job.spec_io import spec_hash
     from colab_cli.job.transport import JobTransport
 
     store = _store()
@@ -284,6 +290,27 @@ def apply(
             raise typer.Exit(1)
     else:
         typer.echo("[colab] Pass a plan file or --job-id.", err=True)
+        raise typer.Exit(1)
+
+    # The thing that was reviewed must be the thing that runs. A plan is a
+    # durable file: it can be edited, or hand-written, between `plan` and
+    # `apply`. Re-derive the hash rather than trusting the one recorded
+    # inside the same file -- a self-certifying document certifies nothing.
+    #
+    # The hash canonicalises URL query strings out, so re-signing the same
+    # object does NOT invalidate a plan, while pointing at a different
+    # object does. That is the distinction worth enforcing: it is also what
+    # stops a hand-edited plan from bypassing the plan-time gates (unknown
+    # accelerator, path escape, non-HTTPS URL) that `apply` itself does not
+    # re-run.
+    actual = spec_hash(p.spec)
+    if actual != p.spec_hash:
+        typer.echo(
+            "[colab] This plan's spec does not match its recorded hash "
+            f"(plan says {p.spec_hash[:12]}, spec hashes to {actual[:12]}). "
+            "The spec was changed after planning. Re-run `job plan`.",
+            err=True,
+        )
         raise typer.Exit(1)
 
     if p.has_errors:
@@ -419,6 +446,7 @@ def status(
     that reads only the local record will happily report a healthy session
     for twenty minutes after the VM has gone.
     """
+    from colab_cli.common import state
     from colab_cli.job.transport import JobTransport
 
     store = _store()
@@ -490,6 +518,7 @@ def destroy(
     unconditional teardown is that a caller can run it without first
     working out whether it is needed.
     """
+    from colab_cli.common import state
     from colab_cli.job.transport import JobTransport
 
     store = _store()
@@ -551,6 +580,7 @@ def destroy(
 
 def list_jobs():
     """List local job records."""
+    from colab_cli.common import state
     store = _store()
     ids = store.list_jobs()
     if state.json_output:

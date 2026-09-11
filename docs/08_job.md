@@ -7,9 +7,7 @@ log:
 2026-09-11: **Implemented** (`src/colab_cli/job/`, `mighty-colab job plan|apply|status|destroy|list`). Four-field envelope with separate `done`/`ok`; stage+run+offload behind one kernel RPC so a dropped websocket cannot lose the run; `JobTransport` refreshes the proxy token once per 401/404 (rate-limited so routine "result.json not there yet" 404s don't re-resolve every poll). Live CPU runs: `done=True ok=True`, exit 0, VM released. Three defects found by running it rather than reading it — Contents PUT into a non-existent directory returns a bare HTTP 500 that the client attributes to the size limit (now `makedirs` first); the watchdog inherits `MIGHTY_JOB_ID` and reported itself as a surviving descendant on every job (now excluded); `retry.on` is unusable in a YAML spec because YAML 1.1 resolves a bare `on:` key to boolean true (renamed `retry.when`). Still untested: GPU session, independent kernel restart mid-run, and a real signed-URL data plane.
 ---
 
-# Design: `job` — Agent job supervisor
-
-Draft. No code in tree yet. Settled contract is written as MUST. `[open]` items are alternatives the live spike must resolve — the spike tests them, it does not implement a launcher this doc has already fully decided.
+**Implemented and live-verified** (2026-09-11). `mighty-colab job plan|apply|status|destroy|list` ships in `src/colab_cli/job/`; usage lives in `docs/09_job_usage.md`. This document is the design and the evidence behind it, not a proposal. Settled contract is written as MUST. The falsifier that gated the design — whether an unattended multi-hour job can keep a verdict without a long-lived kernel execute — is **resolved**: the loss at ~61min was proxy-token expiry, not VM loss, and the supervisor refreshes the token. Remaining `[open]` items and untested surfaces are listed at the end; the largest is that the signed-URL data plane has never run against a real bucket.
 
 `run` stays the shebang (`new` + text-into-kernel + `stop`). `job` is the unit of work an unattended agent actually has: code, deps, data, artifacts, accelerator policy, two clocks, teardown.
 
@@ -89,7 +87,7 @@ control:
     get_url: "https://…"
   # both methods' expiries MUST cover retry.budget + cleanup slack
 retry:
-  on: [retry_same]
+  when: [retry_same]      # `when`, not `on`: YAML 1.1 reads a bare `on:` as boolean true
   max_attempts: 3
   budget: 4h              # job-total from apply start; wall_clock is per attempt
   mode: recreate | resume
@@ -98,6 +96,8 @@ on_run_fail: offload_anyway | skip
 ```
 
 `resume` is an argv contract (`--resume <path>` we pass when checkpoint files exist). We do not invent a JAX training loop. No matching files → `recreate` or `stop`, never a lie. `mode: resume` on preempt/session_lost cannot use VM-local globs — those files died with the VM. v0: resume is same-VM only; lost-VM is always `recreate`. Checkpoint URL rotation is a later door.
+
+**Not implemented in v0: `apply` runs exactly one attempt.** `max_attempts`/`mode` are accepted and recorded, but no retry loop exists yet. Whoever implements it MUST handle this: `recreate` wipes the job directory, and `data[].dest`/`artifacts[].path` are validated against `/content`, not against the job dir — so declared paths like `/content/out/model.pt` **survive a recreate**. Staging re-fetches and re-verifies every `data[]` entry by sha256 on each attempt, so stale inputs are overwritten and checked; artifacts are not. An artifact left by attempt 1 that attempt 2 never rewrites would be uploaded as if attempt 2 had produced it — a silently wrong result, invisible in the envelope. **Attempt N>1 MUST delete every declared `artifacts[].path` before starting the consumer.** The containment rule deliberately allows conventional Colab paths so an unmodified script is a valid job; this is the cost of that choice, and it is paid here rather than by forcing every spec to be job-id-aware.
 
 `ignore_warnings` lives in the spec. Plan will not write `-out` while warnings exist and this is false.
 
