@@ -111,6 +111,8 @@ class Orchestrator:
         transport_factory: Callable[..., object],
         session_store,
         emit: Optional[Callable[[str], None]] = None,
+        auth_provider=None,
+        config_path: Optional[str] = None,
     ):
         self.plan = plan
         self.spec: JobSpec = plan.spec
@@ -121,6 +123,8 @@ class Orchestrator:
         self.transport_factory = transport_factory
         self.session_store = session_store
         self.emit = emit or (lambda _m: None)
+        self.auth_provider = auth_provider
+        self.config_path = config_path
 
         self.env = JobEnvelope(
             cli_version=get_app_version(), job_id=self.job_id, phase=Phase.PLAN
@@ -227,8 +231,8 @@ class Orchestrator:
             # Persist BEFORE spawning the keep-alive daemon: the daemon reads
             # this record, and it can win the race against its parent's first
             # write (AGENTS.md item 17).
-            self.session_store.add(self.session_state)
             self.env.session = session_name
+            self._start_keep_alive()
             self._persist()
             self.emit(f"[job] provisioned {res.endpoint} accel={granted}")
             return
@@ -246,6 +250,54 @@ class Orchestrator:
                 "genuinely useful without a GPU.",
             ],
         )
+
+    def _start_keep_alive(self) -> None:
+        """Own the TFE daemon for this assignment.
+
+        Persist the session first so the detached child cannot observe an
+        empty store and exit with `session_not_found`.
+        """
+        from colab_cli.client import ColabRequestError
+        from colab_cli.commands.session import _is_scope_error, spawn_keep_alive
+        from colab_cli.utils import get_status_code
+
+        session = self.session_state
+        try:
+            self.client.keep_alive_assignment(session.endpoint)
+        except ColabRequestError as exc:
+            if get_status_code(exc) == 403 and _is_scope_error(exc):
+                try:
+                    self.client.unassign(session.endpoint)
+                except Exception:  # noqa: BLE001
+                    pass
+                self.env.endpoint = None
+                self.env.session = None
+                self.session_state = None
+                raise PhaseError(
+                    Phase.PROVISION,
+                    "keep-alive pre-flight failed: credentials are missing "
+                    "an OAuth scope required by Colab",
+                    RetryClass.FIX_HUMAN,
+                    [
+                        "re-authenticate with the colaboratory and "
+                        "userinfo.email scopes"
+                    ],
+                ) from exc
+        else:
+            session.last_keep_alive_ping = _now()
+
+        self.session_store.add(session)
+        session.keep_alive_pid = spawn_keep_alive(
+            session.endpoint,
+            session.name,
+            auth_provider=self.auth_provider,
+            config_path=self.config_path,
+        )
+        self.session_store.add(session)
+
+    def _stop_keep_alive(self) -> None:
+        stop_session_keep_alive(self.session_state)
+
 
     # -- install / restart / verify --------------------------------------
 
@@ -709,6 +761,8 @@ class Orchestrator:
             and self.spec.on_offload_fail == "leave_up"
         )
         if not self.env.endpoint:
+            self._stop_keep_alive()
+            self._drop_session()
             self.env.cleanup = Cleanup.ALREADY_ABSENT
             self._persist()
             return
@@ -751,6 +805,7 @@ class Orchestrator:
                 )
             self._persist()
             return
+        self._stop_keep_alive()
         try:
             self.client.unassign(self.env.endpoint)
             self.env.cleanup = Cleanup.RELEASED
@@ -762,15 +817,30 @@ class Orchestrator:
                 f"`mighty-colab job destroy {self.job_id}`"
             )
         finally:
-            if self.session_state is not None:
-                try:
-                    self.session_store.remove(self.session_state.name)
-                except Exception:  # noqa: BLE001
-                    pass
+            self._drop_session()
             self._persist()
+
+    def _drop_session(self) -> None:
+        if self.session_state is None:
+            return
+        try:
+            self.session_store.remove(self.session_state.name)
+        except Exception:  # noqa: BLE001
+            pass
+
 
 
 # -- helpers ---------------------------------------------------------------
+
+def stop_session_keep_alive(session) -> None:
+    """Stop a job session's keep-alive daemon if one is recorded."""
+    pid = getattr(session, "keep_alive_pid", None) if session is not None else None
+    if not pid:
+        return
+    from colab_cli.common import kill_process
+
+    kill_process(pid)
+
 
 def _dep_name(dep: str) -> str:
     for sep in ("==", ">=", "<=", "~=", "!=", ">", "<", "["):

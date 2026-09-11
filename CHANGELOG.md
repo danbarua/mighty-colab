@@ -24,6 +24,11 @@ below corresponds to a tag of the same name.
   handoff consumed through an inherited descriptor by an isolated runner.
   Interrupted recovery confirms deletion or forces assignment teardown; source
   bundles exclude secret records and reject signed-credential query parameters.
+- **`job apply` did not start or own keep-alive.** Provision now persists the
+  job session, starts the TFE daemon with the parent's `--auth` and `--config`,
+  and records pid plus last ping. Cleanup and destroy stop the daemon after
+  release or confirmed absence; `--leave-up` and `--cancel-only` leave it
+  running.
 - **Invalid or inactive job inputs could pass planning.** Data SHA-256 values now
   require exactly 64 hexadecimal characters; unsupported retry, resume,
   `control.log`, and `on_run_fail: skip` settings are plan errors; declared
@@ -55,6 +60,10 @@ below corresponds to a tag of the same name.
   `integration/repro_job_signed_url_redaction/`: a CPU job consumes a signed
   data URL while a unique sentinel is absent from plan/apply output, durable
   records, remote files, and kernel history; teardown leaves no active session.
+- **Live job keep-alive coverage** in `integration/repro_job_keep_alive/`: a
+  CPU job leaves the launch kernel idle, the daemon stays alive past a
+  post-preflight tick, destroy reaps it, and `sessions` is empty.
+
 
 ## [0.8.0] - 2026-09-11
 

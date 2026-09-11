@@ -765,7 +765,9 @@ def _persist_running_job(mock_common_state, job_id="destroy-me"):
             endpoint="m-s-endpoint",
         )
     )
-    mock_common_state.store.get.return_value = MagicMock()
+    session = MagicMock()
+    session.keep_alive_pid = None
+    mock_common_state.store.get.return_value = session
     return store
 
 
@@ -959,6 +961,61 @@ def test_destroy_scrubs_secret_before_a_failed_unassign(
 
     assert result.exit_code == 1
     assert events == ["scrub", "unassign"]
+
+
+def test_destroy_stops_keep_alive_before_unassign(monkeypatch, mock_common_state):
+    from colab_cli.job.transport import ReadStatus
+
+    _persist_running_job(mock_common_state)
+    session = mock_common_state.store.get.return_value
+    session.keep_alive_pid = 4242
+    killed = []
+    monkeypatch.setattr(
+        "colab_cli.common.kill_process", lambda pid: killed.append(pid)
+    )
+    transport = MagicMock()
+    events = []
+    transport.read_json.return_value = (None, ReadStatus.NOT_FOUND)
+    transport.write_json.return_value = ReadStatus.OK
+    transport.remove.return_value = ReadStatus.OK
+    mock_common_state.client.unassign.side_effect = lambda _endpoint: events.append(
+        "unassign"
+    )
+    monkeypatch.setattr(
+        "colab_cli.job.transport.JobTransport", lambda *_args: transport
+    )
+
+    result = runner.invoke(app, ["job", "destroy", "destroy-me"])
+
+    assert result.exit_code == 0
+    assert killed == [4242]
+    assert events == ["unassign"]
+
+
+def test_cancel_only_preserves_keep_alive(monkeypatch, mock_common_state):
+    from colab_cli.job.transport import ReadStatus
+
+    _persist_running_job(mock_common_state)
+    session = mock_common_state.store.get.return_value
+    session.keep_alive_pid = 4242
+    killed = []
+    monkeypatch.setattr(
+        "colab_cli.common.kill_process", lambda pid: killed.append(pid)
+    )
+    transport = MagicMock()
+    transport.read_json.return_value = (None, ReadStatus.NOT_FOUND)
+    transport.write_json.return_value = ReadStatus.OK
+    transport.remove.return_value = ReadStatus.OK
+    monkeypatch.setattr(
+        "colab_cli.job.transport.JobTransport", lambda *_args: transport
+    )
+
+    result = runner.invoke(app, ["job", "destroy", "destroy-me", "--cancel-only"])
+
+    assert result.exit_code == 0
+    assert killed == []
+    mock_common_state.client.unassign.assert_not_called()
+    mock_common_state.store.remove.assert_not_called()
 
 def test_unexpected_apply_exception_emits_a_terminal_envelope(
     tmp_path, monkeypatch, mock_common_state

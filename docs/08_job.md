@@ -11,11 +11,13 @@ log:
 2026-09-11: Addressed PR #15 peer review: external cancel intent now reaches runner and watchdog, destroy preserves remote verdicts, SHA-256 values are validated, unexpected supervisor exceptions terminalize, control PUT credentials are staged outside kernel history, unsupported policy values fail planning, status absorbs complete remote results, and declared artifact sizes count in the disk gate. Source-byte locking remains tracked by [#20](https://github.com/danbarua/mighty-colab/issues/20).
 2026-09-11: **Cancel-only live-verified.** `integration/repro_job_cancel_only/test.sh` observed a running CPU workload, issued the public `destroy --cancel-only`, observed a terminal `workload: cancelled` result while the assignment remained listed, then performed full destroy and verified the endpoint disappeared.
 2026-09-11: Fixed and live-verified [#18](https://github.com/danbarua/mighty-colab/issues/18): generated specs, plans, manifests, envelopes, events, diagnostics, and kernel launch history now contain only canonical URL identities and credential references. Full URLs remain only in caller-owned source specs, owner-mode local sidecars, and a short-lived owner-mode VM handoff that the isolated runner inherits by file descriptor and unlinks before consumer launch. Missing required handoffs fail closed; interrupted recovery scrubs or tears down; source bundles reject credential-bearing URLs from immutable snapshots. A live CPU job proved the signed data URL was consumed while the sentinel was absent from output, durable local records, remote files, and kernel history, then released the assignment.
+2026-09-11: Fixed and live-verified [#17](https://github.com/danbarua/mighty-colab/issues/17): `job apply` now starts the TFE keep-alive daemon after persisting the job session, propagates auth and `--config`, records daemon pid and last ping, stops the daemon on release or confirmed absence, and leaves it running on `--leave-up`.
+
 ---
 
 # Design: `job` — Agent job supervisor
 
-**Implemented and live-verified in the paths identified below** (2026-09-11). `mighty-colab job plan|apply|status|destroy|list` ships in `src/colab_cli/job/`; usage lives in `docs/09_job_usage.md`. This document describes the current implementation and names its gaps. Long-run evidence proves that the VM, assignment, and files survived the first Contents failure at about one hour; `JobTransport` refreshing assignment metadata restored access. The probe did not distinguish bearer-token expiry from proxy endpoint rebinding. A multi-hour GPU job through that refresh remains untested, and the current job path does not start the TFE keep-alive daemon.
+**Implemented and live-verified in the paths identified below** (2026-09-11). `mighty-colab job plan|apply|status|destroy|list` ships in `src/colab_cli/job/`; usage lives in `docs/09_job_usage.md`. This document describes the current implementation and names its gaps. Long-run evidence proves that the VM, assignment, and files survived the first Contents failure at about one hour; `JobTransport` refreshing assignment metadata restored access. The probe did not distinguish bearer-token expiry from proxy endpoint rebinding. A multi-hour GPU job through that refresh remains untested. Job provision now owns the TFE keep-alive daemon used by `colab new`.
 
 `run` stays the shebang (`new` + text-into-kernel + `stop`). `job` is the unit of work an unattended agent actually has: code, deps, data, artifacts, accelerator policy, two clocks, teardown.
 
@@ -132,7 +134,7 @@ The runner creates `launch.json` with `O_EXCL`, starts the shim in its own sessi
 
 The runner maps normal exits, exceptions, signals, cancellation intent, wall-clock expiry, and descendant-survival checks into `result.json`. Both runner and watchdog consume an externally written `cancel.json`, send SIGTERM, and escalate after the grace period; `destroy --cancel-only` writes that intent without unassigning. The runner then attempts declared artifact PUTs and, when configured, `control.result.put_url`. An optional artifact that is absent does not fail offload, but any artifact PUT recorded as `failed` currently makes scalar `offload: failed`, irrespective of `required`.
 
-The watchdog is a sibling process. It enforces wall clock and reports telemetry. The job provision path currently does **not** start the TFE keep-alive daemon used by `colab new`; an idle launch kernel therefore lacks the documented idle-pruning protection.
+The watchdog is a sibling process. It enforces wall clock and reports telemetry. Job provision starts the TFE keep-alive daemon after persisting the session, the same daemon `colab new` uses; cleanup stops it on release or confirmed absence and leaves it running when the VM is deliberately left up.
 
 The local apply supervisor polls `result.json` and `watchdog.json`; it does not poll `launch.json` or implement the launch-identity rule for a dead runner. `JobTransport` gives those polling/cancel reads connect/read deadlines and refreshes assignment metadata once after selected 401/404 failures, rate-limited to one resolution per 60 seconds. Payload staging uses a raw `ContentsClient` snapshot without those refresh and timeout wrappers. A long stage can therefore cross token expiry before the runner starts.
 
@@ -164,7 +166,7 @@ The implemented phase order is:
 
 ```
 plan.json
-  -> provision   assign; write the session store; then persist endpoint/session in envelope
+  -> provision   assign; persist the session; start keep-alive; persist endpoint/session in envelope
   -> install     install pinned dependencies
   -> restart     restart the launch kernel
   -> verify      probe dependencies, device, and declared input disk need
@@ -241,9 +243,9 @@ The local JSON writes use atomic replacement, but the store has no cross-process
 
 ## Testing strategy
 
-The permanent suite covers model validation, plan diagnostics without reflected inputs, redacted plan/spec persistence with owner-only hydration, canonical URL identity and credential-marker hashing, source-bundle credential rejection against immutable upload snapshots, expiry revalidation, isolated descriptor handoff and unlinking, interrupted-recovery deletion/forced teardown, healthy-supervisor race exclusion, runner exit/cancel behavior, duplicate remote launch, transport refresh, phase transitions, CLI parsing, and envelope truth tables. Live integrations cover CPU and T4 jobs, signed GCS data/artifact/control-result paths, dependency restart/verify, workload failure, token refresh recovery, explicit launch-kernel restart, and cancel-only termination with assignment retention.
+The permanent suite covers model validation, plan diagnostics without reflected inputs, redacted plan/spec persistence with owner-only hydration, canonical URL identity and credential-marker hashing, source-bundle credential rejection against immutable upload snapshots, expiry revalidation, isolated descriptor handoff and unlinking, interrupted-recovery deletion/forced teardown, healthy-supervisor race exclusion, runner exit/cancel behavior, duplicate remote launch, transport refresh, phase transitions, CLI parsing, and envelope truth tables. Live integrations cover CPU and T4 jobs, signed GCS data/artifact/control-result paths, dependency restart/verify, workload failure, token refresh recovery, explicit launch-kernel restart, cancel-only termination with assignment retention, and job-owned TFE keep-alive through idle leave-up and destroy.
 
-The current gaps need regression coverage before their claims can be promoted: keep-alive ownership; endpoint persist-before-side-effect; concurrent apply exclusion; status takeover through cleanup; source-content locking ([#20](https://github.com/danbarua/mighty-colab/issues/20)); long-stage refresh/timeouts; bounded restart; streamed transfer; aggregate bundle limits; optional-upload semantics; control log; and a shipped-path setsid escapee case.
+The current gaps need regression coverage before their claims can be promoted: endpoint persist-before-side-effect; concurrent apply exclusion; status takeover through cleanup; source-content locking ([#20](https://github.com/danbarua/mighty-colab/issues/20)); long-stage refresh/timeouts; bounded restart; streamed transfer; aggregate bundle limits; optional-upload semantics; control log; and a shipped-path setsid escapee case.
 
 ## Spike results (2026-09-11, live CPU VM)
 
@@ -427,7 +429,7 @@ This also reclassifies the `transport_degraded` vs `session_lost` question from
 
 These are current implementation limits, not hypothetical polish:
 
-- **Idle retention:** job provision does not start or own the TFE keep-alive daemon. A detached run with an idle kernel can therefore be idle-pruned. No multi-hour GPU run through the refresh boundary has been completed.
+- **Idle retention:** job provision owns the TFE keep-alive daemon. A multi-hour GPU run through the proxy refresh boundary has not been completed.
 - **Crash recovery:** endpoint persistence has a post-assignment crash window; `status --poll` observes and absorbs a result but does not take over cleanup; dead-runner identity classification is not wired into the local supervisor.
 - **Concurrency:** repeated or concurrent apply of one plan has no interprocess lock or active-job guard.
 - **Plan integrity:** `spec_hash` does not lock source bytes or a bundle manifest. Apply can run code that differs from what existed at plan time. Exact source locking is tracked by [#20](https://github.com/danbarua/mighty-colab/issues/20).
