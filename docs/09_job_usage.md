@@ -8,6 +8,8 @@ log:
 2026-09-11: Live-verified `destroy --cancel-only` against a running CPU workload: the remote verdict became `cancelled`, the assignment remained listed until full destroy, and final teardown removed the endpoint.
 2026-09-11: Fixed and live-verified [#18](https://github.com/danbarua/mighty-colab/issues/18): generated records and remote manifests redact signed URL queries; owner-mode sidecars and an ephemeral descriptor handoff hold the credentials; missing required handoffs fail closed; recovery scrubs or tears down; credential-bearing source files are rejected. The live CPU regression proved a signed data URL remained usable while its sentinel stayed absent from command output, durable job records, remote files, and kernel history, then confirmed teardown.
 2026-09-11: Fixed and live-verified [#16](https://github.com/danbarua/mighty-colab/issues/16): `status --poll` recovers an orphaned supervisor by absorbing a complete remote result or classifying a dead runner, then finishing cleanup.
+2026-09-11: Fixed [#20](https://github.com/danbarua/mighty-colab/issues/20): plans lock source path/size/SHA-256; apply refuses drift before assignment and stages only locked bytes.
+
 
 2026-09-11: Fixed and live-verified [#17](https://github.com/danbarua/mighty-colab/issues/17): `job apply` starts and owns the TFE keep-alive daemon; destroy/cleanup stop it except on deliberate leave-up.
 
@@ -224,7 +226,8 @@ credentials.
 
 `sha256` must be exactly 64 hexadecimal characters. It is worth the trouble: it is the only thing that distinguishes your dataset from a truncated copy, and a silently truncated input produces a result that looks plausible and is wrong.
 
-The plan's `spec_hash` does not hash code bytes. If source changes after plan, apply stages the changed bytes without a hash mismatch. Re-run `job plan` after every source change. Exact source locking is tracked by [#20](https://github.com/danbarua/mighty-colab/issues/20).
+The plan records each source file's relative path, size, and SHA-256. Apply refuses added, removed, renamed, or changed files before assignment and stages only those locked bytes. Re-run `job plan` after every source change.
+
 ## Things that will bite you
 
 **The ~60 minute wall.** The runtime-proxy token expires about an hour in, and
@@ -284,7 +287,6 @@ Be aware of these before trusting a long run:
 
 - No GPU run has yet outlived the approximately 60-minute proxy refresh boundary.
 - Concurrent or repeated apply of one plan has no lock.
-- Source bytes are not part of `spec_hash`; exact locking is tracked by [#20](https://github.com/danbarua/mighty-colab/issues/20).
 - Stage uploads lack the result poller's refresh/deadline wrapper; restart has no explicit timeout.
 - Data GET and artifact PUT buffer whole objects; source size is limited per file only after allocation, with no aggregate bundle ceiling.
 - Caller-owned source specs and generated `.mighty-colab-secrets.json` sidecars still contain full signed URLs and require credential handling.

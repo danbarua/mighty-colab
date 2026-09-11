@@ -13,6 +13,8 @@ log:
 2026-09-11: Fixed and live-verified [#18](https://github.com/danbarua/mighty-colab/issues/18): generated specs, plans, manifests, envelopes, events, diagnostics, and kernel launch history now contain only canonical URL identities and credential references. Full URLs remain only in caller-owned source specs, owner-mode local sidecars, and a short-lived owner-mode VM handoff that the isolated runner inherits by file descriptor and unlinks before consumer launch. Missing required handoffs fail closed; interrupted recovery scrubs or tears down; source bundles reject credential-bearing URLs from immutable snapshots. A live CPU job proved the signed data URL was consumed while the sentinel was absent from output, durable local records, remote files, and kernel history, then released the assignment.
 2026-09-11: Fixed and live-verified [#17](https://github.com/danbarua/mighty-colab/issues/17): `job apply` now starts the TFE keep-alive daemon after persisting the job session, propagates auth and `--config`, records daemon pid and last ping, stops the daemon on release or confirmed absence, and leaves it running on `--leave-up`.
 2026-09-11: Fixed and live-verified [#16](https://github.com/danbarua/mighty-colab/issues/16): provision persists the endpoint before keep-alive; a dead supervisor's `status --poll` absorbs complete runner results or classifies a dead runner from launch/watchdog identity, then finishes cleanup without overwriting a remote verdict.
+2026-09-11: Fixed [#20](https://github.com/danbarua/mighty-colab/issues/20): plans record each source file's relative path, size, and SHA-256; apply refuses added, removed, renamed, or changed files before assignment and stages only locked bytes. Signed-URL query canonicalization is unchanged.
+
 
 
 ---
@@ -70,7 +72,7 @@ The MCP server exposes `job_plan`, `job_status`, `job_destroy`, and `job_list`. 
 
 `provision` is a phase of apply, not another command.
 
-Apply consumes a plan file directly or retrieves one by `--job-id`. Generated plans replace credential-bearing URL queries with canonical identities plus markers; apply hydrates them from the adjacent owner-only sidecar before allocation. It verifies the plan hash, including source-spec path and credential markers, and never re-reads the original YAML. The hash does **not** include entry bytes, bundle contents, or a git commit; code can change between plan and apply without invalidating the plan.
+Apply consumes a plan file directly or retrieves one by `--job-id`. Generated plans replace credential-bearing URL queries with canonical identities plus markers; apply hydrates them from the adjacent owner-only sidecar before allocation. It verifies the plan hash, including source-spec path, credential markers, and the source-file lock (relative path, size, SHA-256). Added, removed, renamed, or changed source files fail before assignment. Staging uploads only files covered by that lock.
 
 ## Spec (v0)
 
@@ -160,7 +162,7 @@ Each staged data item can carry `size_bytes` and an exact 64-hex-character `sha2
 
 Errors make `plan` exit non-zero and make `apply` refuse the saved plan. Warnings make apply refuse unless the embedded spec has `ignore_warnings: true`. The current planner checks accelerator names, code-entry containment/existence, destination containment below `/content`, reserved/colliding paths, HTTPS and recognized literal private hosts, signed-URL expiry, and data ranged GETs. It does not implement several earlier design gates: aggregate bundle/data size, dependency resolution, ADC scope validation, file-mode sibling-import analysis, PUT/GET object equivalence, or artifact/control mutation probes.
 
-The job ID is `<name>-<UTC timestamp>-<six random hex characters>`. `spec_hash` is a canonical hash of the modeled spec with URL identities, source-spec path, and credential-presence markers; `plan_hash` binds the full generated plan and its marker set. Neither is a source-content hash. Apply hydrates from the owner-only sidecar, revalidates URL expiry and both hashes before assignment, but stages whatever code bytes are present at apply time.
+The job ID is `<name>-<UTC timestamp>-<six random hex characters>`. `spec_hash` on the stored plan is `plan_hash`: canonical modeled spec (URL identities and credential-presence markers), source-spec path, and the source-file lock. Re-signing the same object does not change the spec identity. Apply hydrates from the owner-only sidecar, revalidates URL expiry, the plan hash, and the on-disk source bytes before assignment.
 
 ## Apply phases
 
@@ -247,7 +249,7 @@ The local JSON writes use atomic replacement, but the store has no cross-process
 
 The permanent suite covers model validation, plan diagnostics without reflected inputs, redacted plan/spec persistence with owner-only hydration, canonical URL identity and credential-marker hashing, source-bundle credential rejection against immutable upload snapshots, expiry revalidation, isolated descriptor handoff and unlinking, interrupted-recovery deletion/forced teardown, healthy-supervisor race exclusion, runner exit/cancel behavior, duplicate remote launch, transport refresh, phase transitions, CLI parsing, and envelope truth tables. Live integrations cover CPU and T4 jobs, signed GCS data/artifact/control-result paths, dependency restart/verify, workload failure, token refresh recovery, explicit launch-kernel restart, cancel-only termination with assignment retention, and job-owned TFE keep-alive through idle leave-up and destroy.
 
-The current gaps need regression coverage before their claims can be promoted: concurrent apply exclusion; source-content locking ([#20](https://github.com/danbarua/mighty-colab/issues/20)); long-stage refresh/timeouts; bounded restart; streamed transfer; aggregate bundle limits; optional-upload semantics; control log; and a shipped-path setsid escapee case.
+The current gaps need regression coverage before their claims can be promoted: concurrent apply exclusion; long-stage refresh/timeouts; bounded restart; streamed transfer; aggregate bundle limits; optional-upload semantics; control log; and a shipped-path setsid escapee case.
 
 ## Spike results (2026-09-11, live CPU VM)
 
@@ -434,7 +436,6 @@ These are current implementation limits, not hypothetical polish:
 - **Idle retention:** job provision owns the TFE keep-alive daemon. A multi-hour GPU run through the proxy refresh boundary has not been completed.
 - **Crash recovery:** there is still a short window between `assign` returning and the first envelope persist. Apply's own poll loop does not classify a dead remote runner from `launch.json`; `status --poll` does.
 - **Concurrency:** repeated or concurrent apply of one plan has no interprocess lock or active-job guard.
-- **Plan integrity:** `spec_hash` does not lock source bytes or a bundle manifest. Apply can run code that differs from what existed at plan time. Exact source locking is tracked by [#20](https://github.com/danbarua/mighty-colab/issues/20).
 - **Transport bounds:** source/manifests are staged with a raw `ContentsClient` that lacks `JobTransport` refresh/deadline handling. The restart request has no explicit timeout. Control-plane assignment refresh is also not bounded by the job transport's HTTP deadlines.
 - **Memory and size:** data GET and artifact PUT buffer whole objects in RAM. The 250 MB source limit is per file, enforced after allocation; there is no aggregate bundle ceiling.
 - **Signed secrets:** generated specs, plans, manifests, envelopes, events, diagnostics, and kernel launch history contain query-free URL identities and opaque credential references only. Caller-owned source specs and generated owner-mode `.mighty-colab-secrets.json` sidecars still contain full URLs and require credential handling.

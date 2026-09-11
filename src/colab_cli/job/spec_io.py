@@ -258,10 +258,23 @@ def spec_hash(spec: JobSpec) -> str:
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
-def plan_hash(spec: JobSpec, source_spec_path: str) -> str:
-    """Bind the source exclusion path into a plan's integrity digest."""
-    encoded = f"{spec_hash(spec)}\0{source_spec_path}".encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+def plan_hash(spec: JobSpec, source_spec_path: str | None, source_files=()) -> str:
+    """Bind spec identity, source exclusion path, and source bytes."""
+    manifest = [
+        {"path": item.path, "size_bytes": item.size_bytes, "sha256": item.sha256}
+        for item in source_files
+    ]
+    encoded = json.dumps(
+        {
+            "spec": spec_hash(spec),
+            "source_spec_path": source_spec_path,
+            "source_files": manifest,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def _response_status(response: Any) -> int | None:
