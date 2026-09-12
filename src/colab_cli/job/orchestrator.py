@@ -37,6 +37,7 @@ from typing import Callable, List, Optional, Tuple
 
 
 from colab_cli.auto_update import get_app_version
+from colab_cli.job import RESULT_SCHEMA_VERSION
 from colab_cli.job.models import (
     ArtifactResult,
     Cleanup,
@@ -50,6 +51,7 @@ from colab_cli.job.models import (
     Workload,
 )
 from colab_cli.job.store import JobStore
+from colab_cli.job.runtime_payload import RUNTIME_PAYLOAD_VERSION
 
 # Remote layout. Everything the job owns lives under one directory so
 # `destroy` has exactly one thing to remove and `plan` has exactly one
@@ -127,7 +129,10 @@ class Orchestrator:
         self.config_path = config_path
 
         self.env = JobEnvelope(
-            cli_version=get_app_version(), job_id=self.job_id, phase=Phase.PLAN
+            cli_version=get_app_version(),
+            runtime_payload_version=RUNTIME_PAYLOAD_VERSION,
+            job_id=self.job_id,
+            phase=Phase.PLAN,
         )
         self.session_state = None
         self._runtime = None
@@ -583,6 +588,7 @@ class Orchestrator:
             "        cmd = [sys.executable, '-I', '-S', '-c', bootstrap,\n"
             "               '--job-dir', d,\n"
             f"              '--deadline', str({self.spec.budgets.wall_clock}),\n"
+            f"              '--cli-version', {self.env.cli_version!r},\n"
             f"              '--entry', os.path.join(d, 'src', {self.spec.code.entry!r})]\n"
             "        secret_path = os.path.join(d, 'mighty_runtime', '.secrets', 'transfer.json')\n"
             f"        secrets_required = {self._secrets_required!r}\n"
@@ -693,6 +699,18 @@ class Orchestrator:
                 env.phase = Phase(remote_phase)
             except ValueError:
                 pass
+
+        has_provenance = False
+        cli_version = result.get("cli_version")
+        if isinstance(cli_version, str) and cli_version:
+            env.cli_version = cli_version
+            has_provenance = True
+        runtime_payload_version = result.get("runtime_payload_version")
+        if isinstance(runtime_payload_version, str) and runtime_payload_version:
+            env.runtime_payload_version = runtime_payload_version
+            has_provenance = True
+        if has_provenance:
+            env.schema_version = RESULT_SCHEMA_VERSION
 
         env.workload = Workload(result.get("workload", "unknown"))
         env.exit_code = result.get("exit_code")

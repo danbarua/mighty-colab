@@ -21,6 +21,7 @@ value of the envelope is that an unattended agent can act on it without
 reading the implementation.
 """
 
+import json
 import os
 import tempfile
 from contextlib import redirect_stdout
@@ -207,6 +208,8 @@ def test_launch_passes_transfer_secrets_only_by_inherited_fd(tmp_path):
     secret_index = runtime.argv.index("--secrets-fd") + 1
     assert int(runtime.argv[secret_index]) == runtime.pass_fds[0]
     assert runtime.argv[1:4] == ["-I", "-S", "-c"]
+    cli_version_index = runtime.argv.index("--cli-version") + 1
+    assert runtime.argv[cli_version_index] == orch.env.cli_version
     assert put_url not in runtime.code
     assert put_url not in runtime.argv
     assert all(put_url not in value for value in runtime.env.values())
@@ -707,6 +710,46 @@ def test_verify_counts_declared_artifact_space_before_launch(tmp_path):
 # --------------------------------------------------------------------------
 # Result absorption
 # --------------------------------------------------------------------------
+
+def test_remote_result_updates_terminal_provenance(tmp_path):
+    orch = _orch(tmp_path)
+    orch.env.schema_version = "1"
+
+    orch._absorb_result(
+        {
+            "workload": "succeeded",
+            "exit_code": 0,
+            "cli_version": "1.2.3",
+            "runtime_payload_version": "sha256:remote-payload",
+        }
+    )
+
+    assert orch.env.cli_version == "1.2.3"
+    assert orch.env.runtime_payload_version == "sha256:remote-payload"
+    assert orch.env.schema_version == "2"
+
+def test_schema_one_envelope_without_runtime_version_remains_readable(tmp_path):
+    store = JobStore(tmp_path / "jobs")
+    envelope_dir = store.job_dir("legacy-job")
+    envelope_dir.mkdir(parents=True)
+    (envelope_dir / "envelope.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "1",
+                "cli_version": "legacy-cli",
+                "job_id": "legacy-job",
+            }
+        )
+    )
+
+    envelope = store.read_envelope("legacy-job")
+
+    assert envelope is not None
+    assert envelope.schema_version == "1"
+    assert envelope.cli_version == "legacy-cli"
+    assert envelope.runtime_payload_version == ""
+    assert _plan(_spec()).schema_version == "1"
+
 
 
 def test_missing_required_artifact_fails_offload_even_on_a_clean_exit(tmp_path):

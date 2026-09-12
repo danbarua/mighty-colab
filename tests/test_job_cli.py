@@ -1026,16 +1026,30 @@ def test_destroy_recovers_terminal_result_from_control_get_url(
             return None
 
         def read(self, _size):
-            return b'{"workload":"succeeded","exit_code":0}'
+            return json.dumps(
+                {
+                    "schema_version": "2",
+                    "cli_version": "producer-cli",
+                    "runtime_payload_version": "sha256:producer-payload",
+                    "workload": "succeeded",
+                    "exit_code": 0,
+                }
+            ).encode()
 
     monkeypatch.setattr("urllib.request.urlopen", lambda *_args, **_kwargs: Response())
+    _json_mode(mock_common_state)
 
     result = runner.invoke(app, ["job", "destroy", "destroy-me"])
-
     assert result.exit_code == 0
     env = store.read_envelope("destroy-me")
     assert env.workload is Workload.SUCCEEDED
     assert env.exit_code == 0
+    assert env.cli_version == "producer-cli"
+    assert env.runtime_payload_version == "sha256:producer-payload"
+    emitted = json.loads(result.stdout)["job"]
+    assert emitted["schema_version"] == "2"
+    assert emitted["cli_version"] == "producer-cli"
+    assert emitted["runtime_payload_version"] == "sha256:producer-payload"
     mock_common_state.client.unassign.assert_called_once_with("m-s-endpoint")
 
 
@@ -1400,6 +1414,8 @@ def test_status_recovers_terminal_result_from_control_get_url(
     store = _persist_running_job(
         mock_common_state, job_id="lost-result", control=control
     )
+    original = store.read_envelope("lost-result")
+    assert original is not None
     mock_common_state.store.get.return_value = None
     requests = []
 
@@ -1426,6 +1442,8 @@ def test_status_recovers_terminal_result_from_control_get_url(
     env = store.read_envelope("lost-result")
     assert env.workload is Workload.SUCCEEDED
     assert env.exit_code == 0
+    assert env.cli_version == original.cli_version
+    assert env.runtime_payload_version == original.runtime_payload_version
 
 
 def test_status_ignores_control_result_placeholder(monkeypatch, mock_common_state):
