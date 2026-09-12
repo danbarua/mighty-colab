@@ -271,10 +271,10 @@ question is what your code will actually import, not what pip reported.
 **`retry.when`, not `retry.on`.** YAML 1.1 resolves a bare `on:` key to boolean
 `true`, so the field is named `when`.
 
-**Escaped descendants.** If your code spawns something with `setsid`, it can
-outlive the run and keep holding the GPU. The runner detects these by scanning
-for its own job tag and reports them in `surviving_descendants`. Detection is
-not containment: it tells you, it does not currently kill them.
+**Escaped descendants.** The runner and watchdog scan for their job tag and
+terminate tagged `setsid` processes with identity-checked SIGTERM/SIGKILL. The
+runner refuses `succeeded` when `/proc` detection is unavailable or a tagged
+process survives the reap.
 
 ## If the supervisor dies
 

@@ -283,17 +283,16 @@ only**, never `execute_code`.
 | `wall_clock` breach → `cancelled` + intent, signal 15 | ok (SIGTERM sufficed; no escalation needed) |
 | duplicate launch refused via `O_EXCL launch.json` | ok |
 
-**Confirmed hole, and a fix for half of it:** a `setsid` grandchild outlived a
-`succeeded` verdict on the VM and was **invisible to the process-group scan** —
-reproduced locally and live. The process group is provably not a containment
-boundary.
+**Confirmed hole, now closed in the shipped runner:** a `setsid` grandchild
+outlived a `succeeded` verdict on the VM and was invisible to the process-group
+scan. The process group is not a containment boundary.
 
-The shipped Linux job-tag sweep has now executed live. It initially exposed that the watchdog inherited `MIGHTY_JOB_ID` and falsely appeared as a surviving descendant; the watchdog is now excluded. The sweep reports process-group and job-tag survivors separately. A dedicated setsid escapee case through the shipped integration path has not yet been recorded.
-
-**Killing** the escapee is still open: detection is not containment. cgroup
-`cgroup.kill` or `PR_SET_CHILD_SUBREAPER` remains required to actually reap
-one, and the runner must refuse to report a clean terminal state while a
-tagged survivor exists.
+The Linux job-tag sweep excludes the watchdog, finds process-group and job-tag
+survivors separately, and terminates tagged processes with identity-checked
+SIGTERM/SIGKILL. The runner refuses `succeeded` when `/proc` detection is
+unavailable or a tagged process survives the reap. The permanent Linux `/proc`
+case exercises the shipped payload; a dedicated live Colab escapee run has not
+been recorded.
 
 **Two bugs the spike caught before implementation**, both in the runner's own
 cleanup rather than in the workload:
