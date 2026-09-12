@@ -727,12 +727,11 @@ def test_stage_payload_keeps_signed_queries_only_in_private_channel(
         uploads.append((remote_path, path.read_bytes(), path.stat().st_mode & 0o777))
 
     client.upload.side_effect = capture
-    monkeypatch.setattr(payload_bundle, "ContentsClient", lambda _session: client)
 
     payload_bundle.stage_payload(
         spec=spec,
         job_id="staged-control",
-        session=MagicMock(),
+        transport=client,
         remote_dir="/content/jobs/staged-control",
         source_spec_path=source_spec,
     )
@@ -775,13 +774,12 @@ def test_stage_payload_rejects_a_sibling_job_spec_with_signed_queries(
         uploaded.append((remote_path, Path(local_path).read_bytes()))
 
     client.upload.side_effect = capture
-    monkeypatch.setattr(payload_bundle, "ContentsClient", lambda _session: client)
 
     with pytest.raises(ValueError, match="credential-bearing URL"):
         payload_bundle.stage_payload(
             spec=spec,
             job_id="sibling-spec",
-            session=MagicMock(),
+            transport=client,
             remote_dir="/content/jobs/sibling-spec",
             source_spec_path=source_spec,
         )
@@ -808,12 +806,11 @@ def test_stage_payload_allows_benign_http_query_parameters(tmp_path, monkeypatch
         uploaded[remote_path] = Path(local_path).read_text()
 
     client.upload.side_effect = capture
-    monkeypatch.setattr(payload_bundle, "ContentsClient", lambda _session: client)
 
     payload_bundle.stage_payload(
         spec=spec,
         job_id="benign-query",
-        session=MagicMock(),
+        transport=client,
         remote_dir="/content/jobs/benign-query",
     )
 
@@ -830,13 +827,11 @@ def test_stage_payload_refuses_an_undeclared_source_file(tmp_path, monkeypatch):
     )
     locked = collect_source_files(spec)
     (tmp_path / "sneak.py").write_text("print(2)\n")
-    monkeypatch.setattr(payload_bundle, "ContentsClient", lambda _session: MagicMock())
-
     with pytest.raises(ValueError, match="undeclared source file: sneak.py"):
         payload_bundle.stage_payload(
             spec=spec,
             job_id="locked-stage",
-            session=MagicMock(),
+            transport=MagicMock(),
             remote_dir="/content/jobs/locked-stage",
             source_files=locked,
         )
