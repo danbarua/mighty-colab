@@ -954,6 +954,7 @@ def _persist_running_job(mock_common_state, job_id="destroy-me", control=None):
     store.write_plan(plan)
     store.write_envelope(
         JobEnvelope(
+            schema_version="1",
             job_id=job_id,
             phase=Phase.RUN,
             workload=Workload.RUNNING,
@@ -974,10 +975,21 @@ def test_destroy_reconciles_remote_success_before_unassign(
     from colab_cli.job.transport import ReadStatus
 
     store = _persist_running_job(mock_common_state)
+    (store.job_dir("destroy-me") / "plan.json").unlink()
     transport = MagicMock()
     events = []
     transport.read_json.side_effect = lambda _path: (
-        events.append("read") or ({"workload": "succeeded", "exit_code": 0}, ReadStatus.OK)
+        events.append("read")
+        or (
+            {
+                "schema_version": "2",
+                "cli_version": "producer-cli",
+                "runtime_payload_version": "sha256:producer-payload",
+                "workload": "succeeded",
+                "exit_code": 0,
+            },
+            ReadStatus.OK,
+        )
     )
     transport.write_json.return_value = ReadStatus.OK
     transport.remove.return_value = ReadStatus.OK
@@ -995,6 +1007,9 @@ def test_destroy_reconciles_remote_success_before_unassign(
     assert events[:2] == ["read", "unassign"]
     assert env.workload is Workload.SUCCEEDED
     assert env.exit_code == 0
+    assert env.schema_version == "2"
+    assert env.cli_version == "producer-cli"
+    assert env.runtime_payload_version == "sha256:producer-payload"
     transport.write_json.assert_not_called()
 
 
