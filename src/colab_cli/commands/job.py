@@ -237,8 +237,14 @@ def plan(
         )
         raise typer.Exit(1) from None
     job_id = _new_job_id(spec.name)
-    p = build_plan(spec, job_id, probe=not no_probe)
-    p.source_spec_path = str(Path(spec_file).expanduser().resolve(strict=False))
+    source_spec_path = str(Path(spec_file).expanduser().resolve(strict=False))
+    p = build_plan(
+        spec,
+        job_id,
+        probe=not no_probe,
+        source_spec_path=source_spec_path,
+    )
+    p.source_spec_path = source_spec_path
     try:
         p.source_files = collect_source_files(spec, p.source_spec_path)
     except (FileNotFoundError, ValueError):
@@ -357,13 +363,27 @@ def apply(
         )
         raise typer.Exit(1)
 
-    from colab_cli.job.payload_bundle import verify_source_files
+    from colab_cli.job.payload_bundle import CONTENTS_UPLOAD_CEILING, verify_source_files
 
     try:
         verify_source_files(p.spec, p.source_files, p.source_spec_path)
     except ValueError as error:
         typer.echo(f"[colab] {error}", err=True)
         raise typer.Exit(1) from None
+    oversized = [
+        item.path
+        for item in (p.source_files or [])
+        if item.size_bytes > CONTENTS_UPLOAD_CEILING
+    ]
+    if oversized:
+        typer.echo(
+            "[colab] Source files exceed the 250 MB Contents ceiling: "
+            + ", ".join(oversized)
+            + ". Move them to a data URL and re-plan.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
 
     if p.has_errors:
         typer.echo(

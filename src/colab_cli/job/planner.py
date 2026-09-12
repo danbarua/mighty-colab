@@ -54,6 +54,8 @@ RANGED_GET_FAILED = "ranged_get_failed"
 ARTIFACT_SIZE_UNKNOWN = "artifact_size_unknown"
 RANGED_GET_IGNORED_RANGE = "ranged_get_ignored_range"
 DATA_SIZE_UNKNOWN = "data_size_unknown"
+SOURCE_FILE_TOO_LARGE = "source_file_too_large"
+SOURCE_PAYLOAD_LARGE = "source_payload_large"
 
 DIAGNOSTIC_CODES = frozenset(
     {
@@ -74,6 +76,8 @@ DIAGNOSTIC_CODES = frozenset(
         ARTIFACT_SIZE_UNKNOWN,
         RANGED_GET_IGNORED_RANGE,
         DATA_SIZE_UNKNOWN,
+        SOURCE_FILE_TOO_LARGE,
+        SOURCE_PAYLOAD_LARGE,
     }
 )
 
@@ -449,7 +453,53 @@ def revalidate_expiry(plan: Plan) -> list[str]:
     return expired
 
 
-def build_plan(spec: JobSpec, job_id: str, probe: bool = True) -> Plan:
+def _source_size_diagnostics(
+    spec: JobSpec, source_spec_path: str | None = None
+) -> list[Diagnostic]:
+    from colab_cli.job.payload_bundle import CONTENTS_UPLOAD_CEILING, collect_source_files
+
+    diagnostics: list[Diagnostic] = []
+    try:
+        files = (
+            collect_source_files(spec, source_spec_path)
+            if source_spec_path is not None
+            else collect_source_files(spec)
+        )
+    except Exception:  # noqa: BLE001 - entry/path errors have their own codes
+        return diagnostics
+    total = sum(item.size_bytes for item in files)
+    for item in files:
+        if item.size_bytes > CONTENTS_UPLOAD_CEILING:
+            diagnostics.append(
+                _diagnostic(
+                    "error",
+                    SOURCE_FILE_TOO_LARGE,
+                    f"source file {item.path} is {item.size_bytes} bytes; "
+                    "Contents uploads are limited to 250 MB per file",
+                    RetryClass.FIX_CODE,
+                    "Move large inputs to a data URL instead of the source bundle.",
+                )
+            )
+    if total > CONTENTS_UPLOAD_CEILING and not diagnostics:
+        diagnostics.append(
+            _diagnostic(
+                "warn",
+                SOURCE_PAYLOAD_LARGE,
+                f"aggregate source payload is {total} bytes across {len(files)} files",
+                RetryClass.FIX_CODE,
+                "Prefer data URLs for datasets; Contents is for code, not bulk data.",
+            )
+        )
+    return diagnostics
+
+
+
+def build_plan(
+    spec: JobSpec,
+    job_id: str,
+    probe: bool = True,
+    source_spec_path: str | None = None,
+) -> Plan:
     """Validate ``spec`` and return a durable plan, without assigning a VM."""
 
     diagnostics: list[Diagnostic] = []
@@ -556,6 +606,8 @@ def build_plan(spec: JobSpec, job_id: str, probe: bool = True) -> Plan:
         )
 
     diagnostics.extend(_probe_diagnostics(spec, probe))
+    diagnostics.extend(_source_size_diagnostics(spec, source_spec_path))
+
 
     return Plan(
         job_id=job_id,

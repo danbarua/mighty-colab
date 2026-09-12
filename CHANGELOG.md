@@ -75,6 +75,10 @@ below corresponds to a tag of the same name.
   watchdog now signal processes tagged with `MIGHTY_JOB_ID` using
   pid+starttime+boot_id identity checks. `succeeded` is refused while a
   tagged descendant survives or when `/proc` detection is unavailable.
+- **Data GET and artifact PUT buffered whole objects.** Transfers now stream
+  while computing SHA-256. Plan rejects source files over 250 MB before
+  assignment and warns on large aggregate payloads. Verify reports source,
+  input, output, and free-space totals.
 
 - **`job` sessions did not retain the kernel that launched their detached
   runner.** The session record now persists the runtime's kernel and Jupyter

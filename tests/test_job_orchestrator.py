@@ -687,6 +687,8 @@ def test_verify_passes_on_cpu_when_no_gpu_was_requested(tmp_path):
     orch.env.actual_accelerator = "NONE"
 
     orch.verify()  # must not raise
+
+
 def test_verify_counts_declared_artifact_space_before_launch(tmp_path):
     spec = _spec(
         accelerator=Accelerator(prefer=[], accept_cpu=True),
@@ -699,12 +701,14 @@ def test_verify_counts_declared_artifact_space_before_launch(tmp_path):
             )
         ],
     )
+
     orch = _orch(tmp_path, spec=spec)
 
     with pytest.raises(PhaseError) as exc:
-        orch._check_disk(1000)
+        orch._check_disk(1000, source_bytes=0, input_bytes=0, output_bytes=10_000)
 
-    assert "inputs and artifacts" in exc.value.reason
+    assert "output=10000" in exc.value.reason
+
 
 
 # --------------------------------------------------------------------------

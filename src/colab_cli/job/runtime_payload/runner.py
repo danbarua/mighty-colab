@@ -237,21 +237,73 @@ def _resolve_transfer_url(item, urls):
     return url
 
 
-def _http_get(url):
+def _http_get_to_file(url, path, expected_size=None, expected_hash=None):
     req = request.Request(url, method="GET")
-    with urlopen_public(req, timeout=HTTP_TIMEOUT_SECONDS) as response:
-        return response.read()
+    hasher = hashlib.sha256()
+    size = 0
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    tmp = f"{path}.tmp.{os.getpid()}"
+    try:
+        with urlopen_public(req, timeout=HTTP_TIMEOUT_SECONDS) as response:
+            with open(tmp, "wb") as out:
+                while True:
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    if expected_size is not None and size > expected_size:
+                        raise ValueError("staged size exceeds manifest")
+                    hasher.update(chunk)
+                    out.write(chunk)
+                out.flush()
+                os.fsync(out.fileno())
+        if expected_size is not None and size != expected_size:
+            raise ValueError("staged size does not match manifest")
+        digest = hasher.hexdigest()
+        if expected_hash is not None and digest.lower() != str(expected_hash).lower():
+            raise ValueError("staged sha256 does not match manifest")
+        os.replace(tmp, path)
+        return size, digest
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
-def _http_put(url, data):
-    req = request.Request(
-        url,
-        data=data,
-        method="PUT",
-        headers={"Content-Type": "application/octet-stream"},
-    )
-    with urlopen_public(req, timeout=HTTP_TIMEOUT_SECONDS) as response:
-        response.read(1)
+class _HashingReader:
+    def __init__(self, fh):
+        self.fh = fh
+        self.hasher = hashlib.sha256()
+        self.size = 0
+
+    def read(self, n=-1):
+        chunk = self.fh.read(65536 if n is None or n < 0 else n)
+        if chunk:
+            self.hasher.update(chunk)
+            self.size += len(chunk)
+        return chunk
+
+
+def _http_put_file(url, path):
+    file_size = os.path.getsize(path)
+    with open(path, "rb") as raw:
+        body = _HashingReader(raw)
+        req = request.Request(
+            url,
+            data=body,
+            method="PUT",
+            headers={
+                "Content-Type": "application/octet-stream",
+                "Content-Length": str(file_size),
+            },
+        )
+        with urlopen_public(req, timeout=HTTP_TIMEOUT_SECONDS) as response:
+            response.read(1)
+    return body.size, body.hasher.hexdigest()
 
 
 def _resolve_job_path(job_dir, path):
@@ -267,25 +319,13 @@ def _stage_one(job_dir, item, urls):
     dest = item.get("dest")
     if not isinstance(dest, str):
         raise ValueError("stage item requires dest")
-    data = _http_get(url)
-    expected_size = item.get("size_bytes")
-    if expected_size is not None and len(data) != expected_size:
-        raise ValueError("staged size does not match manifest")
-    digest = hashlib.sha256(data).hexdigest()
-    expected_hash = item.get("sha256")
-    if expected_hash is not None and digest.lower() != str(expected_hash).lower():
-        raise ValueError("staged sha256 does not match manifest")
-
     target = _resolve_job_path(job_dir, dest)
-    parent = os.path.dirname(target)
-    if parent:
-        os.makedirs(parent, exist_ok=True)
-    tmp = f"{target}.tmp.{os.getpid()}"
-    with open(tmp, "wb") as f:
-        f.write(data)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, target)
+    _http_get_to_file(
+        url,
+        target,
+        expected_size=item.get("size_bytes"),
+        expected_hash=item.get("sha256"),
+    )
 
 
 def _stage(job_dir, manifest_path, urls):
@@ -308,22 +348,24 @@ def _artifact_record(job_dir, item, urls):
         "bytes": None,
     }
     local_path = _resolve_job_path(job_dir, path)
-    try:
-        with open(local_path, "rb") as f:
-            data = f.read()
-    except OSError:
+    if not os.path.exists(local_path):
         return record
-
-    digest = hashlib.sha256(data).hexdigest()
-    record["sha256"] = digest
-    record["bytes"] = len(data)
     try:
-        _http_put(url, data)
+        size, digest = _http_put_file(url, local_path)
+    except FileNotFoundError:
+        return record
     except Exception:  # noqa: BLE001 - artifact failure belongs in the verdict
         record["status"] = "failed"
-    else:
-        record["status"] = "ok"
+        try:
+            record["bytes"] = os.path.getsize(local_path)
+        except OSError:
+            pass
+        return record
+    record["sha256"] = digest
+    record["bytes"] = size
+    record["status"] = "ok"
     return record
+
 
 
 def _offload(job_dir, manifest_path, urls):
@@ -401,11 +443,10 @@ def _put_result(result_path, result_put_url):
     if not result_put_url:
         return
     try:
-        with open(result_path, "rb") as f:
-            data = f.read()
-        _http_put(result_put_url, data)
+        _http_put_file(result_put_url, result_path)
     except Exception as e:  # noqa: BLE001 - local verdict remains authoritative
         print(f"[runner] result PUT failed: {type(e).__name__}", file=sys.stderr)
+
 
 
 def _stop_watchdog(watchdog_proc):

@@ -457,26 +457,40 @@ class Orchestrator:
                 ["the VM was assigned a GPU that the driver cannot see; a fresh "
                  "assignment usually clears it"],
             )
-        self.env.hints.append(
-            f"verified device={payload.get('device')} free={payload.get('free')}"
+        source_bytes = sum(
+            item.size_bytes for item in (self.plan.source_files or [])
         )
-        self._check_disk(payload.get("free"))
+        input_bytes = sum(d.size_bytes or 0 for d in self.spec.data)
+        output_bytes = sum(a.size_bytes or 0 for a in self.spec.artifacts)
+        free = payload.get("free")
+        self.env.hints.append(
+            f"verified device={payload.get('device')} "
+            f"source={source_bytes} input={input_bytes} "
+            f"output={output_bytes} free={free}"
+        )
+        self._check_disk(free, source_bytes, input_bytes, output_bytes)
         self._persist()
 
-    def _check_disk(self, free: Optional[int]) -> None:
-        """Refuse a job whose declared inputs and artifacts cannot fit."""
+    def _check_disk(
+        self,
+        free: Optional[int],
+        source_bytes: int,
+        input_bytes: int,
+        output_bytes: int,
+    ) -> None:
+        """Refuse a job whose declared payloads cannot fit."""
         if not free:
             return
-        declared = sum(d.size_bytes or 0 for d in self.spec.data)
-        declared += sum(a.size_bytes or 0 for a in self.spec.artifacts)
+        declared = source_bytes + input_bytes + output_bytes
         if declared and declared > free * 0.8:
             raise PhaseError(
                 Phase.VERIFY,
-                f"declared inputs and artifacts are {declared} bytes but only "
-                f"{free} free on /content",
+                f"source={source_bytes} input={input_bytes} output={output_bytes} "
+                f"bytes but only {free} free on /content",
                 RetryClass.RETRY_DIFFERENT,
                 ["request a high-RAM/larger-disk shape, or reduce staged data/output"],
             )
+
 
     def prepare_secret_channel(self) -> None:
         """Create the credential directory without transmitting credentials."""
