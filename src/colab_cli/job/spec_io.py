@@ -135,29 +135,6 @@ def canonical_url(url: str) -> str:
     return f"{parsed.scheme}://{host}{parsed.path}"
 
 
-def control_object_identity(url: str) -> tuple[str, str, str] | None:
-    """Return a GCS bucket/object identity when the URL exposes one."""
-
-    try:
-        parsed = urllib.parse.urlsplit(url)
-    except ValueError:
-        return None
-    host = (parsed.hostname or "").lower()
-    path = urllib.parse.unquote(parsed.path.lstrip("/"))
-    if host == "storage.googleapis.com":
-        bucket, separator, object_name = path.partition("/")
-        if not separator:
-            return None
-    elif host.endswith(".storage.googleapis.com"):
-        bucket = host.removesuffix(".storage.googleapis.com")
-        object_name = path
-    else:
-        return None
-    if not bucket or not object_name:
-        return None
-    return "gcs", bucket, object_name
-
-
 def url_id(url: str) -> str:
     """Return a stable, non-secret URL handle for diagnostics and logs."""
 
@@ -323,22 +300,6 @@ def _content_range_size(response: Any) -> int | None:
         return None
     match = re.fullmatch(r"\s*bytes\s+0-0/(\d+)\s*", header)
     return int(match.group(1)) if match else None
-
-
-def fetch_control_result(
-    url: str, *, timeout: float = 10, max_bytes: int = 1024 * 1024
-) -> dict[str, Any]:
-    """Read one bounded JSON result object from a signed GET URL."""
-
-    request = urllib.request.Request(url, method="GET")
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        body = response.read(max_bytes + 1)
-    if len(body) > max_bytes:
-        raise ValueError("control result exceeds maximum size")
-    result = json.loads(body)
-    if not isinstance(result, dict):
-        raise ValueError("control result must be a JSON object")
-    return result
 
 
 def probe_get_url(url: str, timeout: float = 10) -> ProbeResult:

@@ -18,7 +18,7 @@ import time
 from urllib import request
 from urllib.parse import urlsplit
 
-from . import RESULT_SCHEMA_VERSION, RUNTIME_PAYLOAD_VERSION, SCHEMA_VERSION
+from . import SCHEMA_VERSION
 from . import ident
 from .netpolicy import urlopen_public
 
@@ -85,7 +85,6 @@ def _parse_args(argv):
     secrets_required = False
     stage_manifest = None
     offload_manifest = None
-    cli_version = "unknown"
     entry_option = None
     rest = []
     i = 0
@@ -95,9 +94,6 @@ def _parse_args(argv):
             i += 2
         elif argv[i] == "--deadline":
             deadline_secs = float(_option_value(argv, i, "--deadline"))
-            i += 2
-        elif argv[i] == "--cli-version":
-            cli_version = _option_value(argv, i, "--cli-version")
             i += 2
         elif argv[i] == "--secrets-fd":
             secrets_fd = int(_option_value(argv, i, "--secrets-fd"))
@@ -122,7 +118,6 @@ def _parse_args(argv):
     return (
         job_dir,
         deadline_secs,
-        cli_version,
         secrets_fd,
         secrets_required,
         stage_manifest,
@@ -334,7 +329,6 @@ def _offload(job_dir, manifest_path, urls):
 def _result_payload(
     *,
     workload,
-    cli_version,
     exit_code,
     term_signal,
     intent,
@@ -351,9 +345,7 @@ def _result_payload(
 ):
     all_survivors = sorted(set(survivors) | set(tagged))
     return {
-        "schema_version": RESULT_SCHEMA_VERSION,
-        "cli_version": cli_version,
-        "runtime_payload_version": RUNTIME_PAYLOAD_VERSION,
+        "schema_version": SCHEMA_VERSION,
         "workload": workload,
         "exit_code": exit_code,
         "signal": term_signal,
@@ -399,7 +391,6 @@ def _stage_failure(
     result_path,
     job_dir,
     result_put_url,
-    cli_version,
     started,
     attempt,
     error,
@@ -408,7 +399,6 @@ def _stage_failure(
     # string, which must never become part of a durable job record.
     result = _result_payload(
         workload="failed",
-        cli_version=cli_version,
         exit_code=1,
         term_signal=None,
         intent=None,
@@ -438,21 +428,20 @@ def main(argv):
         (
             job_dir,
             deadline_secs,
-            cli_version,
             secrets_fd,
             secrets_required,
             stage_manifest,
             offload_manifest,
             rest,
         ) = _parse_args(runner_argv)
+        urls, result_put_url = _load_transfer_secrets(secrets_fd)
     except (TypeError, ValueError):
         print("runner: invalid private transfer configuration", file=sys.stderr)
         return 2
     if not job_dir or not rest:
         print(
-            "usage: runner --job-dir DIR [--deadline S] [--cli-version VERSION] "
-            "[--secrets-fd FD] [--stage-manifest PATH] "
-            "[--offload-manifest PATH] entry.py",
+            "usage: runner --job-dir DIR [--deadline S] [--secrets-fd FD] "
+            "[--stage-manifest PATH] [--offload-manifest PATH] entry.py",
             file=sys.stderr,
         )
         return 2
@@ -465,8 +454,6 @@ def main(argv):
     started = time.time()
     deadline = started + deadline_secs if deadline_secs else None
     attempt = int(os.environ.get("MIGHTY_ATTEMPT", "1"))
-    urls = {}
-    result_put_url = None
 
     # O_EXCL: if a launch record already exists for a live runner, this
     # invocation is a duplicate (lost RPC reply, retried call) and must NOT
@@ -505,7 +492,6 @@ def main(argv):
         os.fsync(f.fileno())
 
     try:
-        urls, result_put_url = _load_transfer_secrets(secrets_fd)
         if secrets_required and secrets_fd is None:
             raise ValueError("required transfer credential channel is missing")
         _stage(job_dir, stage_manifest, urls)
@@ -515,7 +501,6 @@ def main(argv):
             job_dir=job_dir,
             result_put_url=result_put_url,
             started=started,
-            cli_version=cli_version,
             attempt=attempt,
             error=e,
         )
@@ -662,7 +647,6 @@ def main(argv):
         offload_status = "not_required"
     result = _result_payload(
         workload=workload,
-        cli_version=cli_version,
         exit_code=exit_code,
         term_signal=term_signal,
         intent=intent,

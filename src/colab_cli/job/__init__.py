@@ -26,4 +26,3 @@ ever calling `execute_code` again.
 """
 
 SCHEMA_VERSION = "1"
-RESULT_SCHEMA_VERSION = "2"
