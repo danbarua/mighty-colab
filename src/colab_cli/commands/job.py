@@ -42,6 +42,7 @@ from colab_cli.envelopes import (
     JobListEnvelope,
     JobPlanEnvelope,
 )
+from colab_cli.job import RESULT_SCHEMA_VERSION
 from colab_cli.job.models import (
     Cleanup,
     JobEnvelope,
@@ -649,6 +650,14 @@ def _absorb_remote_result(env, store, job_id, result) -> None:
     if saved_plan is not None:
         Orchestrator.absorb_result(env, saved_plan.spec, result)
     else:
+        has_provenance = False
+        for field in ("cli_version", "runtime_payload_version"):
+            value = result.get(field)
+            if isinstance(value, str) and value:
+                setattr(env, field, value)
+                has_provenance = True
+        if has_provenance:
+            env.schema_version = RESULT_SCHEMA_VERSION
         env.workload = Workload(result.get("workload", "unknown"))
         env.exit_code = result.get("exit_code")
         env.signal = result.get("signal")
