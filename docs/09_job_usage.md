@@ -14,6 +14,7 @@ log:
 2026-09-11: Fixed [#25](https://github.com/danbarua/mighty-colab/issues/25): job URLs are resolved; non-public and mixed DNS answers are rejected; requests pin a validated address; redirects are re-checked.
 2026-09-12: Fixed [#27](https://github.com/danbarua/mighty-colab/issues/27): GCS control-result URL pairs must identify one object; `status` and `destroy` automatically use the GET URL as a bounded terminal-result fallback when the VM result is unavailable. Unsupported retry, resume, control-log, and run-failure policy values remain plan errors.
 2026-09-12: Fixed [#26](https://github.com/danbarua/mighty-colab/issues/26): terminal local and off-VM results identify the CLI build and exact shipped runtime payload under explicit result schema version 2; current readers continue to accept version-1 records.
+2026-09-12: Hardened #26 result recovery after review: terminal absorption validates on a copy and commits only a complete record; malformed VM and off-VM results leave existing envelope state unchanged.
 
 
 
@@ -237,6 +238,8 @@ result schema 2; plans and other runner records remain schema 1. Current readers
 accept old result-schema-1 envelopes and preserve local provenance when an old
 remote result omits the provenance fields. A schema-2 result must contain both
 producer fields; unknown result schemas are rejected rather than relabeled.
+Absorption validates a copy first, so an invalid terminal field leaves the
+persisted envelope unchanged.
 
 **Artifacts are attempted even when your run fails.** `on_run_fail: offload_anyway` is the only implemented value; planning rejects `skip` rather than silently ignoring it. A missing optional artifact does not fail offload, but a failed PUT currently fails scalar offload even when that artifact is optional.
 
