@@ -57,7 +57,7 @@ from colab_cli.job.spec_io import fetch_control_result
 from colab_cli.job.store import ApplyInProgress, JobStore, load_plan_file, write_plan_file
 
 job_app = typer.Typer(
-    help="Run an unattended job on a Colab VM: plan, apply, status, destroy.",
+    help="Run an unattended job on a Colab VM: plan, apply, status, destroy, list.",
     no_args_is_help=True,
 )
 
@@ -83,22 +83,22 @@ def _new_job_id(name: str) -> str:
     return f"{name}-{stamp}-{uuid.uuid4().hex[:6]}"
 
 
-def _emit(env: JobEnvelope, command: str) -> None:
-    """One envelope shape for every `job` subcommand.
+def _emit(env: JobEnvelope, command: str, exit_code: int = 0) -> None:
+    """Emit a job verdict without confusing it with the CLI transaction.
 
-    `status` is the CLI-transaction field ("did this invocation work"),
-    which is *not* the same question as whether the job succeeded -- a
-    perfectly successful `job status` call reporting a failed run exits 0.
-    Collapsing the two is how a caller ends up retrying the CLI instead of
-    fixing their code.
+    The outer status is the CLI-transaction field (did this invocation work),
+    which is not the same question as whether the job succeeded. A successful
+    job status call reporting a failed run exits zero, while job apply exits
+    non-zero when the run it performed failed.
     """
     from colab_cli.common import state
+
     if state.json_output:
         emit_json(
             build_envelope(
-                status="ok",
+                status="error" if exit_code else "ok",
                 command=f"job {command}",
-                exit_code=0,
+                exit_code=exit_code,
                 job=json.loads(env.model_dump_json()),
                 done=env.done,
                 ok=env.ok,
@@ -107,6 +107,30 @@ def _emit(env: JobEnvelope, command: str) -> None:
         )
     else:
         typer.echo(_human(env))
+
+
+def _emit_command_message(
+    command: str,
+    message: str,
+    *,
+    exit_code: int = 1,
+    reason: str | None = None,
+) -> None:
+    """Emit one validated envelope, or the equivalent human message."""
+    from colab_cli.common import state
+
+    if state.json_output:
+        emit_json(
+            build_envelope(
+                status="error" if exit_code else "ok",
+                command=f"job {command}",
+                exit_code=exit_code,
+                reason=reason,
+                message=message,
+            )
+        )
+    else:
+        typer.echo(message, err=bool(exit_code))
 
 
 def _human(env: JobEnvelope) -> str:
@@ -231,9 +255,10 @@ def plan(
         _emit_spec_errors(e)
         raise typer.Exit(1) from None
     except (OSError, ValueError) as e:
-        typer.echo(
+        _emit_command_message(
+            "plan",
             f"[colab] Could not read spec {spec_file!r} ({type(e).__name__}).",
-            err=True,
+            reason="spec_unreadable",
         )
         raise typer.Exit(1) from None
     job_id = _new_job_id(spec.name)
@@ -322,13 +347,25 @@ def apply(
         elif job_id_opt:
             p = store.read_plan_for_apply(job_id_opt)
             if p is None:
-                typer.echo(f"[colab] No plan found for job {job_id_opt!r}.", err=True)
+                _emit_command_message(
+                    "apply",
+                    f"[colab] No plan found for job {job_id_opt!r}.",
+                    reason="plan_not_found",
+                )
                 raise typer.Exit(1)
         else:
-            typer.echo("[colab] Pass a plan file or --job-id.", err=True)
+            _emit_command_message(
+                "apply",
+                "[colab] Pass a plan file or --job-id.",
+                reason="usage_error",
+            )
             raise typer.Exit(1)
     except ValueError as e:
-        typer.echo(f"[colab] Could not load protected plan ({type(e).__name__}).", err=True)
+        _emit_command_message(
+            "apply",
+            f"[colab] Could not load protected plan ({type(e).__name__}).",
+            reason="plan_unreadable",
+        )
         raise typer.Exit(1) from None
 
     # Integrity of `plan.json` itself -- NOT drift from the user's YAML.
@@ -345,21 +382,23 @@ def apply(
     # out, so re-signing the same object does not trip this, while
     # pointing at a different object does.
     if p.spec.code.kind == "bundle" and p.source_spec_path is None:
-        typer.echo(
+        _emit_command_message(
+            "apply",
             "[colab] This bundle plan lacks its protected source exclusion. "
             "Re-run job plan to produce a fresh one.",
-            err=True,
+            reason="plan_refused",
         )
         raise typer.Exit(1)
 
     actual = plan_hash(p.spec, p.source_spec_path, p.source_files)
     if actual != p.spec_hash:
-        typer.echo(
+        _emit_command_message(
+            "apply",
             "[colab] This plan file is inconsistent: its spec does not match "
             f"its own recorded hash (recorded {p.spec_hash[:12]}, spec hashes "
             f"to {actual[:12]}). The plan was modified or truncated after it "
-            "was written. Re-run `job plan` to produce a fresh one.",
-            err=True,
+            "was written. Re-run job plan to produce a fresh one.",
+            reason="plan_refused",
         )
         raise typer.Exit(1)
 
@@ -368,7 +407,9 @@ def apply(
     try:
         verify_source_files(p.spec, p.source_files, p.source_spec_path)
     except ValueError as error:
-        typer.echo(f"[colab] {error}", err=True)
+        _emit_command_message(
+            "apply", f"[colab] {error}", reason="plan_refused"
+        )
         raise typer.Exit(1) from None
     oversized = [
         item.path
@@ -386,38 +427,41 @@ def apply(
 
 
     if p.has_errors:
-        typer.echo(
+        message = (
             "[colab] This plan has errors and will not be applied. "
-            "Fix the spec and re-plan.",
-            err=True,
+            "Fix the spec and re-plan."
         )
-        for d in p.diagnostics:
-            if d.severity == "error":
-                typer.echo(f"  ERROR {d.code}: {d.message}", err=True)
+        if not state.json_output:
+            for d in p.diagnostics:
+                if d.severity == "error":
+                    typer.echo(f"  ERROR {d.code}: {d.message}", err=True)
+        _emit_command_message("apply", message, reason="plan_refused")
         raise typer.Exit(1)
     if p.has_warnings and not p.spec.ignore_warnings:
-        typer.echo(
-            "[colab] This plan has warnings. Set `ignore_warnings: true` in the "
-            "spec to accept them explicitly.",
-            err=True,
+        message = (
+            "[colab] This plan has warnings. Set ignore_warnings: true in the "
+            "spec to accept them explicitly."
         )
-        for d in p.diagnostics:
-            if d.severity == "warn":
-                typer.echo(f"  WARN {d.code}: {d.message}", err=True)
+        if not state.json_output:
+            for d in p.diagnostics:
+                if d.severity == "warn":
+                    typer.echo(f"  WARN {d.code}: {d.message}", err=True)
+        _emit_command_message("apply", message, reason="plan_refused")
         raise typer.Exit(1)
 
     # Expiry is revalidated here, not trusted from plan time: a plan is
     # durable and may be applied long after its signatures were minted.
-    # Checked BEFORE `assign`, because failing after costs a VM.
+    # Checked BEFORE assign, because failing after costs a VM.
     expired = revalidate_expiry(p)
     if expired:
-        typer.echo(
+        message = (
             "[colab] Signed URLs in this plan have expired or will expire before "
-            "the job's budget elapses. Re-sign and re-plan.",
-            err=True,
+            "the job's budget elapses. Re-sign and re-plan."
         )
-        for e in expired:
-            typer.echo(f"  {e}", err=True)
+        if not state.json_output:
+            for error in expired:
+                typer.echo(f"  {error}", err=True)
+        _emit_command_message("apply", message, reason="plan_refused")
         raise typer.Exit(1)
 
     from colab_cli.runtime import ColabRuntime
@@ -541,7 +585,7 @@ def apply(
         store.clear_supervisor_identity(p.job_id)
         claim.release()
 
-    _emit(orch.env, "apply")
+    _emit(orch.env, "apply", exit_code=0 if orch.env.ok else 1)
     if not orch.env.ok:
         raise typer.Exit(1)
 
@@ -620,7 +664,7 @@ def _force_release_unconfirmed_secret(env, state, store, action: str) -> None:
         env.hints.append("forced VM teardown because credential deletion was not confirmed")
     env.supervisor = Supervisor.FINISHED
     store.write_envelope(env)
-    _emit(env, action)
+    _emit(env, action, exit_code=1)
     raise typer.Exit(1)
 
 
@@ -747,7 +791,11 @@ def status(
     store = _store()
     env = store.read_envelope(job_id)
     if env is None:
-        typer.echo(f"[colab] No local record of job {job_id!r}.", err=True)
+        _emit_command_message(
+            "status",
+            f"[colab] No local record of job {job_id!r}.",
+            reason="job_not_found",
+        )
         raise typer.Exit(1)
 
     # A PID alone is not identity: after reuse, status could mistake an unrelated
@@ -860,7 +908,12 @@ def destroy(
     store = _store()
     env = store.read_envelope(job_id)
     if env is None:
-        typer.echo(f"[colab] No local record of job {job_id!r}; nothing to destroy.")
+        _emit_command_message(
+            "destroy",
+            f"[colab] No local record of job {job_id!r}; nothing to destroy.",
+            exit_code=0,
+            reason="job_not_found",
+        )
         raise typer.Exit(0)
 
     saved_plan = store.read_plan(job_id)
@@ -914,7 +967,7 @@ def destroy(
             )
         env.supervisor = Supervisor.FINISHED
         store.write_envelope(env)
-        _emit(env, "destroy")
+        _emit(env, "destroy", exit_code=1)
         raise typer.Exit(1)
     if not env.workload.terminal and transport is not None:
         try:
@@ -940,10 +993,11 @@ def destroy(
         else:
             env.reason = "cancel intent could not be confirmed; VM left running"
         store.write_envelope(env)
-        _emit(env, "destroy")
-        if not env.workload.terminal and (
+        failed = not env.workload.terminal and (
             intent_status is None or intent_status.name != "OK"
-        ):
+        )
+        _emit(env, "destroy", exit_code=1 if failed else 0)
+        if failed:
             raise typer.Exit(1)
         return
 
@@ -984,7 +1038,7 @@ def destroy(
         env.retry_class = RetryClass.DO_NOT_RETRY
     env.supervisor = Supervisor.FINISHED
     store.write_envelope(env)
-    _emit(env, "destroy")
+    _emit(env, "destroy", exit_code=1 if env.cleanup is Cleanup.FAILED else 0)
     if env.cleanup is Cleanup.FAILED:
         raise typer.Exit(1)
 
