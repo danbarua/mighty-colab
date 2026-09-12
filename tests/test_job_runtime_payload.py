@@ -124,6 +124,9 @@ def test_required_secret_channel_missing_fails_before_consumer(tmp_path):
     _proc, result, job_dir = _run(tmp_path, source, "--secrets-required")
 
     assert result["workload"] == "failed"
+    assert result["schema_version"] == "2"
+    assert result["cli_version"] == "unknown"
+    assert result["runtime_payload_version"].startswith("sha256:")
     assert not marker.exists()
     assert result["exception"]["message"] == "stage failed"
     assert result["runner_error"] == "stage failed"

@@ -717,6 +717,7 @@ def test_remote_result_updates_terminal_provenance(tmp_path):
 
     orch._absorb_result(
         {
+            "schema_version": "2",
             "workload": "succeeded",
             "exit_code": 0,
             "cli_version": "1.2.3",
@@ -727,6 +728,22 @@ def test_remote_result_updates_terminal_provenance(tmp_path):
     assert orch.env.cli_version == "1.2.3"
     assert orch.env.runtime_payload_version == "sha256:remote-payload"
     assert orch.env.schema_version == "2"
+
+@pytest.mark.parametrize(
+    "result, message",
+    [
+        ({"schema_version": "3"}, "unsupported result schema"),
+        (
+            {"schema_version": "2", "cli_version": "1.2.3"},
+            "invalid runtime_payload_version",
+        ),
+    ],
+)
+def test_remote_result_rejects_unidentifiable_producer(tmp_path, result, message):
+    orch = _orch(tmp_path)
+
+    with pytest.raises(ValueError, match=message):
+        orch._absorb_result(result)
 
 def test_schema_one_envelope_without_runtime_version_remains_readable(tmp_path):
     store = JobStore(tmp_path / "jobs")

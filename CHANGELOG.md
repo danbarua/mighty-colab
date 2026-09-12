@@ -68,7 +68,8 @@ below corresponds to a tag of the same name.
   receives the CLI version fixed before launch and records it with a SHA-256
   identity of the exact shipped runtime payload. Local envelopes and terminal
   on-VM/off-VM results carry both values under explicit result schema version 2;
-  current readers continue to accept version-1 records.
+  current readers continue to accept version-1 records, require complete
+  provenance from version-2 producers, and reject unknown result schemas.
 
 - **`job` sessions did not retain the kernel that launched their detached
   runner.** The session record now persists the runtime's kernel and Jupyter

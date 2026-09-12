@@ -234,8 +234,9 @@ the runner. The runtime value is a `sha256:` digest over the exact Python
 payload copied to the VM, so a payload that differs from its caller remains
 identifiable. Local envelopes carry and absorb both values. These records use
 result schema 2; plans and other runner records remain schema 1. Current readers
-also accept old result-schema-1 envelopes and preserve local provenance when an
-old remote result omits the provenance fields.
+accept old result-schema-1 envelopes and preserve local provenance when an old
+remote result omits the provenance fields. A schema-2 result must contain both
+producer fields; unknown result schemas are rejected rather than relabeled.
 
 **Artifacts are attempted even when your run fails.** `on_run_fail: offload_anyway` is the only implemented value; planning rejects `skip` rather than silently ignoring it. A missing optional artifact does not fail offload, but a failed PUT currently fails scalar offload even when that artifact is optional.
 

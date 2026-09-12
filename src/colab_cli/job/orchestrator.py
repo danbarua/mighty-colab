@@ -37,7 +37,7 @@ from typing import Callable, List, Optional, Tuple
 
 
 from colab_cli.auto_update import get_app_version
-from colab_cli.job import RESULT_SCHEMA_VERSION
+from colab_cli.job import RESULT_SCHEMA_VERSION, SCHEMA_VERSION
 from colab_cli.job.models import (
     ArtifactResult,
     Cleanup,
@@ -692,6 +692,21 @@ class Orchestrator:
         self._persist()
 
     @staticmethod
+    def absorb_provenance(env: JobEnvelope, result: dict) -> None:
+        result_schema = result.get("schema_version", SCHEMA_VERSION)
+        if result_schema not in {SCHEMA_VERSION, RESULT_SCHEMA_VERSION}:
+            raise ValueError(f"unsupported result schema: {result_schema!r}")
+        if result_schema == SCHEMA_VERSION:
+            return
+
+        for field in ("cli_version", "runtime_payload_version"):
+            value = result.get(field)
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"schema 2 result has invalid {field}")
+            setattr(env, field, value)
+        env.schema_version = result_schema
+
+    @staticmethod
     def absorb_result(env: JobEnvelope, spec: JobSpec, result: dict) -> None:
         remote_phase = result.get("phase")
         if remote_phase:
@@ -700,17 +715,7 @@ class Orchestrator:
             except ValueError:
                 pass
 
-        has_provenance = False
-        cli_version = result.get("cli_version")
-        if isinstance(cli_version, str) and cli_version:
-            env.cli_version = cli_version
-            has_provenance = True
-        runtime_payload_version = result.get("runtime_payload_version")
-        if isinstance(runtime_payload_version, str) and runtime_payload_version:
-            env.runtime_payload_version = runtime_payload_version
-            has_provenance = True
-        if has_provenance:
-            env.schema_version = RESULT_SCHEMA_VERSION
+        Orchestrator.absorb_provenance(env, result)
 
         env.workload = Workload(result.get("workload", "unknown"))
         env.exit_code = result.get("exit_code")
