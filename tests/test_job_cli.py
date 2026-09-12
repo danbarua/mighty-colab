@@ -20,6 +20,7 @@ not -- each of the first three cost a provisioned VM to find.
 """
 
 import json
+import os
 import re
 from unittest.mock import MagicMock
 
@@ -425,6 +426,80 @@ def test_apply_accepts_a_plan_whose_spec_is_untouched(tmp_path, mock_common_stat
 
     assert "its own recorded hash" not in _clean(result.output)
     assert "source files changed" not in _clean(result.output)
+
+
+def test_second_apply_claim_fails_while_the_first_is_held(tmp_path):
+    from colab_cli.job.store import ApplyInProgress, JobStore
+
+    store = JobStore(tmp_path)
+    first = store.claim_apply("held", pid=os.getpid(), starttime="s1", boot_id="b1")
+    try:
+        with pytest.raises(ApplyInProgress, match="already being applied"):
+            store.claim_apply("held", pid=os.getpid() + 1, starttime="s2", boot_id="b1")
+    finally:
+        first.release()
+    second = store.claim_apply("held", pid=os.getpid(), starttime="s3", boot_id="b1")
+    second.release()
+
+
+def test_stale_apply_lock_is_taken_over(tmp_path):
+    from colab_cli.job.store import JobStore
+
+    store = JobStore(tmp_path)
+    first = store.claim_apply("stale", pid=1, starttime="dead", boot_id="b")
+    os.close(first.fd)
+    first.fd = -1
+    second = store.claim_apply("stale", pid=2, starttime="live", boot_id="b")
+    try:
+        identity = store.supervisor_identity("stale")
+        assert identity["pid"] == 2
+    finally:
+        second.release()
+
+
+def test_apply_refuses_a_live_second_owner_before_assignment(
+    tmp_path, mock_common_state
+):
+    from colab_cli.commands.job import _store
+    from colab_cli.job.runtime_payload import ident
+
+    plan_file = _locked_plan(tmp_path, "live-owner")
+    store = _store()
+    claim = store.claim_apply(
+        "live-owner",
+        pid=os.getpid(),
+        starttime=ident.starttime(os.getpid()),
+        boot_id=ident.boot_id(),
+    )
+    try:
+        result = runner.invoke(app, ["job", "apply", str(plan_file)])
+    finally:
+        claim.release()
+
+    assert result.exit_code == 1
+    assert "already being applied" in _clean(result.output)
+    mock_common_state.client.assign.assert_not_called()
+
+
+
+def test_apply_refuses_a_job_that_already_has_an_endpoint(
+    tmp_path, mock_common_state
+):
+    from colab_cli.commands.job import _store
+    from colab_cli.job.models import JobEnvelope
+
+    plan_file = _locked_plan(tmp_path, "has-endpoint")
+    store = _store()
+    store.write_envelope(
+        JobEnvelope(job_id="has-endpoint", phase=Phase.RUN, endpoint="m-already")
+    )
+
+    result = runner.invoke(app, ["job", "apply", str(plan_file)])
+
+    assert result.exit_code == 1
+    assert "already has endpoint" in _clean(result.output)
+    mock_common_state.client.assign.assert_not_called()
+
 
 
 def _locked_plan(tmp_path, job_id, *, kind="file", files=None):
