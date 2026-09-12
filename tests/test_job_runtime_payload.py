@@ -105,7 +105,7 @@ def test_http_get_streams_in_bounded_chunks(tmp_path, monkeypatch):
             return chunk
 
     response = Response()
-    monkeypatch.setattr(runner.request, "urlopen", lambda *_args, **_kwargs: response)
+    monkeypatch.setattr(runner, "urlopen_public", lambda *_args, **_kwargs: response)
     target = tmp_path / "download.bin"
 
     size, digest = runner._http_get_to_file(
