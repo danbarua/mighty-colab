@@ -17,6 +17,7 @@ log:
 2026-09-11: Fixed [#19](https://github.com/danbarua/mighty-colab/issues/19): apply claims a job ID with an exclusive lock before assignment; a live second owner fails before `assign`; a dead owner's lock is taken over; a job that already has an endpoint is refused.
 2026-09-11: Fixed [#22](https://github.com/danbarua/mighty-colab/issues/22): apply stages, polls, cancels, and recovers through one JobTransport; Contents requests and assignment re-resolution use connect/read deadlines; kernel restart has an explicit timeout; timed-out writes confirm before retry; exhausted transport stalls stay degraded unless the assignment is proven gone.
 2026-09-11: Fixed [#25](https://github.com/danbarua/mighty-colab/issues/25): untrusted job URLs are resolved; any non-public IPv4/IPv6 answer is rejected, including mixed DNS; each request connects to an address from that lookup; redirects are re-checked; HTTPS remains required.
+2026-09-12: Fixed [#27](https://github.com/danbarua/mighty-colab/issues/27): GCS control-result PUT/GET URLs must identify one object; status and destroy use the GET URL as a bounded terminal-result fallback when the VM result is unavailable. Unsupported retry, resume, control-log, and run-failure policy values remain plan errors.
 
 
 
@@ -107,7 +108,7 @@ on_run_fail: offload_anyway
 
 Optional `data[]` entries contain `url`, `dest`, `sha256`, and `size_bytes`. Optional `artifacts[]` entries contain `path`, `url`, `required`, and `size_bytes`. `control.result` and `control.log` each accept paired `put_url` and `get_url` values. `code.kind` is only `file` or `bundle`; there is no `git`, `checkpoints`, or `credentials` field.
 
-For a GCS-backed `control.result`, first sign PUT, PUT a fresh `{}` placeholder using `Content-Type: application/octet-stream`, and then sign GET for the same unique object. The runner replaces the placeholder with its terminal result. `{}` is not a verdict. The CLI does not automatically read `control.result.get_url`; it is a manual recovery channel.
+For a GCS-backed `control.result`, first sign PUT, PUT a fresh `{}` placeholder using `Content-Type: application/octet-stream`, and then sign GET for the same unique object. The runner replaces the placeholder with its terminal result. `{}` is not a verdict. When the VM result is unavailable, `status` and `destroy` read the GET URL as a bounded fallback and absorb only a terminal result.
 
 Signed query strings are credentials. Generated `spec.json`, `plan.json`, explicit `--out` plans, remote manifests, envelopes, events, and validation diagnostics expose only canonical URL identities and opaque references. Full URLs remain in the caller-owned source spec and an adjacent owner-mode `.mighty-colab-secrets.json` sidecar. Apply sends them to an owner-mode remote handoff only after all public files; the launch kernel opens and unlinks it, then passes the inherited descriptor to an isolated runner. The runner clears inherited URL variables before consumer launch. Recovery confirms deletion or forcibly releases the assignment.
 
@@ -152,7 +153,7 @@ The local apply supervisor polls `result.json` and `watchdog.json`. `job status`
 
 v0 accepts caller-supplied HTTPS GET/PUT URLs. The VM uses `urllib`; it has no GCS client or service-account-key mode.
 
-`plan` uses a one-byte ranged GET only for `data[]` URLs. It does not issue HEAD and does not mutate artifact or control destinations. It parses recognizable signature expiry fields on all URL fields. Data and artifact URLs must cover `wall_clock + 15 minutes`; control URLs must cover `retry.budget_seconds + 15 minutes`. `control.result` is optional, and the planner does not prove that its PUT and GET URLs name the same object.
+`plan` uses a one-byte ranged GET only for `data[]` URLs. It does not issue HEAD and does not mutate artifact or control destinations. It parses recognizable signature expiry fields on all URL fields. Data and artifact URLs must cover `wall_clock + 15 minutes`; control URLs must cover `retry.budget_seconds + 15 minutes`. For GCS control channels, planning also requires the paired PUT and GET URLs to identify the same bucket and object.
 
 
 The public-host check resolves DNS and rejects a destination unless every IPv4 and IPv6 answer is global unicast. Mixed public/non-public answers fail closed. Each Contents-independent GET/PUT connects to an address from that lookup with the original hostname as SNI/Host, so DNS cannot be rebound between check and connect. Redirect targets are resolved and checked the same way. HTTPS remains required.
@@ -163,7 +164,7 @@ Each staged data item can carry `size_bytes` and an exact 64-hex-character `sha2
 
 `job plan` never calls `assign`, but it is not side-effect-free: it writes redacted `spec.json` and `plan.json` records below the job store, writes a redacted `--out` plan when requested, creates adjacent owner-mode secret sidecars when query credentials exist, and performs ranged GET probes unless `--no-probe` is set. It writes generated records even when diagnostics contain warnings or errors.
 
-Errors make `plan` exit non-zero and make `apply` refuse the saved plan. Warnings make apply refuse unless the embedded spec has `ignore_warnings: true`. The current planner checks accelerator names, code-entry containment/existence, destination containment below `/content`, reserved/colliding paths, HTTPS and recognized literal private hosts, signed-URL expiry, and data ranged GETs. It does not implement several earlier design gates: aggregate bundle/data size, dependency resolution, ADC scope validation, file-mode sibling-import analysis, PUT/GET object equivalence, or artifact/control mutation probes.
+Errors make `plan` exit non-zero and make `apply` refuse the saved plan. Warnings make apply refuse unless the embedded spec has `ignore_warnings: true`. The current planner checks accelerator names, code-entry containment/existence, destination containment below `/content`, reserved/colliding paths, HTTPS and recognized literal private hosts, signed-URL expiry, paired GCS control-object identity, and data ranged GETs. It does not implement several earlier design gates: aggregate bundle/data size, dependency resolution, ADC scope validation, file-mode sibling-import analysis, non-GCS PUT/GET object equivalence, or artifact/control mutation probes.
 
 The job ID is `<name>-<UTC timestamp>-<six random hex characters>`. `spec_hash` on the stored plan is `plan_hash`: canonical modeled spec (URL identities and credential-presence markers), source-spec path, and the source-file lock. Re-signing the same object does not change the spec identity. Apply hydrates from the owner-only sidecar, revalidates URL expiry, the plan hash, and the on-disk source bytes before assignment.
 
@@ -441,7 +442,7 @@ These are current implementation limits, not hypothetical polish:
 
 - **Memory and size:** data GET and artifact PUT buffer whole objects in RAM. The 250 MB source limit is per file, enforced after allocation; there is no aggregate bundle ceiling.
 - **Signed secrets:** generated specs, plans, manifests, envelopes, events, diagnostics, and kernel launch history contain query-free URL identities and opaque credential references only. Caller-owned source specs and generated owner-mode `.mighty-colab-secrets.json` sidecars still contain full URLs and require credential handling.
-- **Declared but inactive controls:** planning rejects non-default retry/recreate/resume settings, `control.log`, and `on_run_fail: skip`. `control.result.get_url` remains manual, and PUT/GET object equivalence is not validated.
+- **Declared but inactive controls:** planning rejects non-default retry/recreate/resume settings, `control.log`, and `on_run_fail: skip`.
 - **Process containment:** tagged escapees are reported, not killed. The dedicated shipped-path setsid case remains unverified.
 - **CLI/JSON consistency:** the job-group help summary omits `list`. Some early file/plan read failures still emit stderr rather than a JSON envelope. A failed apply can exit the process with status 1 while its outer JSON wrapper says `exit_code: 0`.
 - **Remote provenance:** the runner's off-VM control result does not carry `cli_version`; only the local job envelope does.

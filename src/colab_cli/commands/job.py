@@ -53,6 +53,7 @@ from colab_cli.job.models import (
 )
 from colab_cli.job.orchestrator import Orchestrator, PhaseError, stop_session_keep_alive
 from colab_cli.job.runtime_payload import ident
+from colab_cli.job.spec_io import fetch_control_result
 from colab_cli.job.store import ApplyInProgress, JobStore, load_plan_file, write_plan_file
 
 job_app = typer.Typer(
@@ -562,6 +563,20 @@ def _scrub_transfer_secret(transport, job_id: str) -> bool:
     except Exception:  # noqa: BLE001 - callers enforce teardown on uncertainty
         return False
 
+
+def _read_off_vm_result(store: JobStore, job_id: str):
+    try:
+        plan = store.read_plan_for_apply(job_id)
+        channel = plan.spec.control.result if plan is not None else None
+        if channel is None:
+            return None
+        result = fetch_control_result(channel.get_url)
+        workload = Workload(result.get("workload", ""))
+        return result if workload.terminal else None
+    except Exception:  # noqa: BLE001 - optional recovery must not block teardown
+        return None
+
+
 def _force_release_unconfirmed_secret(env, state, store, action: str) -> None:
     if env.endpoint:
         try:
@@ -577,10 +592,13 @@ def _force_release_unconfirmed_secret(env, state, store, action: str) -> None:
             state.store.remove(env.session)
         except Exception:  # noqa: BLE001
             pass
-    env.workload = Workload.UNKNOWN
+    if not env.workload.terminal:
+        env.workload = Workload.UNKNOWN
+        env.reason = "forced teardown because transfer credential deletion could not be confirmed"
+        env.retry_class = RetryClass.DO_NOT_RETRY
+    else:
+        env.hints.append("forced VM teardown because credential deletion was not confirmed")
     env.supervisor = Supervisor.FINISHED
-    env.reason = "forced teardown because transfer credential deletion could not be confirmed"
-    env.retry_class = RetryClass.DO_NOT_RETRY
     store.write_envelope(env)
     _emit(env, action)
     raise typer.Exit(1)
@@ -635,6 +653,20 @@ def _absorb_remote_result(env, store, job_id, result) -> None:
         env.exit_code = result.get("exit_code")
         env.signal = result.get("signal")
         env.exception = result.get("exception")
+
+
+def _recover_off_vm_result(
+    env: JobEnvelope, store: JobStore, job_id: str
+) -> JobEnvelope | None:
+    try:
+        result = _read_off_vm_result(store, job_id)
+        if result is None:
+            return None
+        recovered = env.model_copy(deep=True)
+        _absorb_remote_result(recovered, store, job_id, result)
+    except Exception:  # noqa: BLE001 - optional recovery must not block teardown
+        return None
+    return recovered
 
 
 def _release_orphaned_job(env, session, state, store) -> None:
@@ -714,10 +746,12 @@ def status(
     if env.session and cleanup_pending:
         session = state.store.get(env.session)
         if session is None and must_scrub:
+            env = _recover_off_vm_result(env, store, job_id) or env
             _force_release_unconfirmed_secret(env, state, store, "status")
         if session is not None:
             transport = JobTransport(session, state.client, state.store)
             if must_scrub and not _scrub_transfer_secret(transport, job_id):
+                env = _recover_off_vm_result(env, store, job_id) or env
                 _force_release_unconfirmed_secret(env, state, store, "status")
             kind = None
             if orphaned and env.workload.terminal:
@@ -732,6 +766,14 @@ def status(
                         if orphaned:
                             env.supervisor = Supervisor.FINISHED
                         break
+                    if kind in {"session_lost", "runner_dead"} or (
+                        kind == "never_started" and orphaned
+                    ):
+                        recovered = _recover_off_vm_result(env, store, job_id)
+                        if recovered is not None:
+                            env = recovered
+                            env.supervisor = Supervisor.FINISHED
+                            break
                     if kind == "session_lost":
                         env.workload = Workload.UNKNOWN
                         env.reason = "the assignment is gone from the server"
@@ -819,6 +861,12 @@ def destroy(
                 err=True,
             )
 
+    if not env.workload.terminal:
+        recovered = _recover_off_vm_result(env, store, job_id)
+        if recovered is not None:
+            env = recovered
+            env.supervisor = Supervisor.FINISHED
+
     secret_removed = transport is not None and _scrub_transfer_secret(
         transport, job_id
     )
@@ -832,13 +880,18 @@ def destroy(
         except Exception as error:  # noqa: BLE001
             env.cleanup = Cleanup.FAILED
             env.hints.append(f"forced unassign failed: {type(error).__name__}")
-        env.workload = Workload.UNKNOWN
+        if not env.workload.terminal:
+            env.workload = Workload.UNKNOWN
+            env.reason = (
+                "cancel-only retention overridden because transfer credential "
+                "deletion could not be confirmed"
+            )
+            env.retry_class = RetryClass.DO_NOT_RETRY
+        else:
+            env.hints.append(
+                "forced VM teardown because credential deletion was not confirmed"
+            )
         env.supervisor = Supervisor.FINISHED
-        env.reason = (
-            "cancel-only retention overridden because transfer credential "
-            "deletion could not be confirmed"
-        )
-        env.retry_class = RetryClass.DO_NOT_RETRY
         store.write_envelope(env)
         _emit(env, "destroy")
         raise typer.Exit(1)

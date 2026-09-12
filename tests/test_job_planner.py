@@ -37,6 +37,7 @@ from colab_cli.job.planner import (
     ACCELERATOR_UNKNOWN,
     ARTIFACT_SIZE_UNKNOWN,
     CODE_ENTRY_MISSING,
+    CONTROL_URL_OBJECT_MISMATCH,
     DATA_DEST_COLLIDES_WITH_ARTIFACT,
     DATA_SIZE_UNKNOWN,
     DESTINATION_OUTSIDE_JOB_DIR,
@@ -56,6 +57,7 @@ from colab_cli.job.planner import (
 from colab_cli.job.spec_io import (
     ProbeResult,
     canonical_url,
+    fetch_control_result,
     load_spec,
     parse_signed_url_expiry,
     probe_get_url,
@@ -257,6 +259,28 @@ def test_probe_get_url_forbidden_or_missing_is_error(monkeypatch, status):
     assert result.error
 
 
+def test_fetch_control_result_rejects_oversized_body(monkeypatch):
+    reads = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self, size):
+            reads.append(size)
+            return b"12345"
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda *_args, **_kwargs: Response())
+
+    with pytest.raises(ValueError, match="maximum size"):
+        fetch_control_result(PUBLIC_URL, max_bytes=4)
+
+    assert reads == [5]
+
+
 def test_build_plan_clean_spec_has_no_error(tmp_path, monkeypatch):
     monkeypatch.setattr("colab_cli.job.planner.probe_get_url", lambda url: ProbeResult(206, 3, None, True))
 
@@ -299,6 +323,45 @@ def test_control_log_is_rejected_until_log_streaming_is_implemented(tmp_path):
         make_spec(tmp_path, control=Control(log=channel)), JOB_ID, probe=False
     )
     assert plan.has_errors
+
+
+def test_control_result_urls_must_name_the_same_gcs_object(tmp_path):
+    channel = ControlChannel(
+        put_url="https://storage.googleapis.com/results/job.json?X-Goog-Signature=put",
+        get_url="https://storage.googleapis.com/results/other.json?X-Goog-Signature=get",
+    )
+
+    plan = build_plan(
+        make_spec(tmp_path, control=Control(result=channel)), JOB_ID, probe=False
+    )
+
+    assert CONTROL_URL_OBJECT_MISMATCH in diagnostic_codes(plan)
+
+
+def test_control_result_accepts_gcs_url_forms_for_the_same_object(tmp_path):
+    channel = ControlChannel(
+        put_url="https://storage.googleapis.com/results/dir%2Fjob.json?X-Goog-Signature=put",
+        get_url="https://results.storage.googleapis.com/dir/job.json?X-Goog-Signature=get",
+    )
+
+    plan = build_plan(
+        make_spec(tmp_path, control=Control(result=channel)), JOB_ID, probe=False
+    )
+
+    assert CONTROL_URL_OBJECT_MISMATCH not in diagnostic_codes(plan)
+
+
+def test_control_result_does_not_infer_identity_for_other_providers(tmp_path):
+    channel = ControlChannel(
+        put_url="https://objects.example.test/jobs/put-result.json?signature=put",
+        get_url="https://objects.example.test/jobs/get-result.json?signature=get",
+    )
+
+    plan = build_plan(
+        make_spec(tmp_path, control=Control(result=channel)), JOB_ID, probe=False
+    )
+
+    assert CONTROL_URL_OBJECT_MISMATCH not in diagnostic_codes(plan)
 
 
 def test_non_https_url_diagnostic(tmp_path):
