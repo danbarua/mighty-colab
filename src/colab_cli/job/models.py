@@ -34,7 +34,7 @@ from typing import Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from colab_cli.job import RESULT_SCHEMA_VERSION, SCHEMA_VERSION
+from colab_cli.job import SCHEMA_VERSION
 
 
 _HTTP_URL = re.compile(r"https?://[^\s]+", re.IGNORECASE)
@@ -411,9 +411,8 @@ class ArtifactResult(BaseModel):
 class JobEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: str = RESULT_SCHEMA_VERSION
+    schema_version: str = SCHEMA_VERSION
     cli_version: str = ""
-    runtime_payload_version: str = ""
     job_id: str
     phase: Phase = Phase.PLAN
 

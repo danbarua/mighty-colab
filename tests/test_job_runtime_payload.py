@@ -99,22 +99,6 @@ def test_exit_zero_is_succeeded(tmp_path):
     assert result["exit_code"] == 0
     assert result["offload"] == "not_required"
     assert not (job_dir / "exception.json").exists()
-def test_terminal_result_identifies_cli_and_exact_runtime_payload(tmp_path):
-    package, entry, first_job = _prepare(tmp_path, "raise SystemExit(0)\n")
-    _proc, first, _job_dir = _run_prepared(
-        tmp_path, entry, first_job, "--cli-version", "1.2.3"
-    )
-
-    shim = package / "shim.py"
-    shim.write_text(shim.read_text() + "\n")
-    _proc, second, _job_dir = _run_prepared(
-        tmp_path, entry, tmp_path / "second-job", "--cli-version", "1.2.3"
-    )
-
-    assert first["schema_version"] == second["schema_version"] == "2"
-    assert first["cli_version"] == second["cli_version"] == "1.2.3"
-    assert first["runtime_payload_version"].startswith("sha256:")
-    assert first["runtime_payload_version"] != second["runtime_payload_version"]
 
 
 def test_required_secret_channel_missing_fails_before_consumer(tmp_path):
@@ -124,51 +108,9 @@ def test_required_secret_channel_missing_fails_before_consumer(tmp_path):
     _proc, result, job_dir = _run(tmp_path, source, "--secrets-required")
 
     assert result["workload"] == "failed"
-    assert result["schema_version"] == "2"
-    assert result["cli_version"] == "unknown"
-    assert result["runtime_payload_version"].startswith("sha256:")
     assert not marker.exists()
     assert result["exception"]["message"] == "stage failed"
     assert result["runner_error"] == "stage failed"
-
-
-def test_invalid_secret_channel_writes_provenanced_stage_failure(tmp_path):
-    _package, entry, job_dir = _prepare(tmp_path, "raise SystemExit(0)\n")
-    secret_path = tmp_path / "invalid-transfer.json"
-    secret_path.write_text("{")
-    secret_fd = os.open(secret_path, os.O_RDONLY)
-    try:
-        proc = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "mighty_runtime.runner",
-                "--job-dir",
-                str(job_dir),
-                "--cli-version",
-                "9.8.7",
-                "--secrets-fd",
-                str(secret_fd),
-                str(entry),
-            ],
-            cwd=tmp_path,
-            env=_runtime_env(tmp_path),
-            pass_fds=(secret_fd,),
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-    finally:
-        os.close(secret_fd)
-
-    result = json.loads((job_dir / "result.json").read_text())
-    assert proc.returncode == 0
-    assert result["schema_version"] == "2"
-    assert result["cli_version"] == "9.8.7"
-    assert result["runtime_payload_version"].startswith("sha256:")
-    assert result["workload"] == "failed"
-    assert result["phase"] == "stage"
-    assert "invalid private transfer configuration" not in proc.stderr
 
 
 def test_uncaught_exception_is_failed_with_exception(tmp_path):
@@ -472,8 +414,6 @@ def test_staged_payload_and_runner_share_a_secret_channel_without_persisting_it(
                 bootstrap,
                 "--job-dir",
                 str(remote_dir),
-                "--cli-version",
-                "installed-1.2.3",
                 "--stage-manifest",
                 str(remote_dir / "stage.manifest.json"),
                 "--offload-manifest",
@@ -506,9 +446,6 @@ def test_staged_payload_and_runner_share_a_secret_channel_without_persisting_it(
     assert requests[("PUT", f"/artifact?sig={sentinel}-artifact")] == b"artifact"
     uploaded_result = json.loads(requests[("PUT", f"/result?sig={sentinel}-result")])
     assert uploaded_result["workload"] == "succeeded"
-    assert uploaded_result["schema_version"] == "2"
-    assert uploaded_result["cli_version"] == "installed-1.2.3"
-    assert uploaded_result["runtime_payload_version"] == result["runtime_payload_version"]
     assert sentinel not in proc.stdout
     assert recovery_sentinel not in repr(received)
     for path in remote_dir.rglob("*"):

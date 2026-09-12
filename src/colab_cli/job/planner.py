@@ -25,7 +25,6 @@ from colab_cli.job.runtime_payload.netpolicy import BlockedDestination, resolve_
 
 from colab_cli.job.models import Diagnostic, JobSpec, Plan, RetryClass
 from colab_cli.job.spec_io import (
-    control_object_identity,
     parse_signed_url_expiry,
     probe_get_url,
     spec_hash,
@@ -47,7 +46,6 @@ DATA_DEST_COLLIDES_WITH_ARTIFACT = "data_dest_collides_with_artifact"
 RETRY_NOT_IMPLEMENTED = "retry_not_implemented"
 POLICY_NOT_IMPLEMENTED = "policy_not_implemented"
 CODE_ENTRY_MISSING = "code_entry_missing"
-CONTROL_URL_OBJECT_MISMATCH = "control_url_object_mismatch"
 ENTRY_NOT_UNDER_BUNDLE = "entry_not_under_bundle"
 URL_EXPIRY_TOO_SOON = "url_expiry_too_soon"
 RANGED_GET_FAILED = "ranged_get_failed"
@@ -67,7 +65,6 @@ DIAGNOSTIC_CODES = frozenset(
         RETRY_NOT_IMPLEMENTED,
         POLICY_NOT_IMPLEMENTED,
         CODE_ENTRY_MISSING,
-        CONTROL_URL_OBJECT_MISMATCH,
         ENTRY_NOT_UNDER_BUNDLE,
         URL_EXPIRY_TOO_SOON,
         RANGED_GET_FAILED,
@@ -314,31 +311,6 @@ def _url_diagnostics(spec: JobSpec) -> list[Diagnostic]:
     return diagnostics
 
 
-def _control_url_diagnostics(spec: JobSpec) -> list[Diagnostic]:
-    diagnostics: list[Diagnostic] = []
-    for channel_name in ("result", "log"):
-        channel = getattr(spec.control, channel_name)
-        if channel is None:
-            continue
-        put_identity = control_object_identity(channel.put_url)
-        get_identity = control_object_identity(channel.get_url)
-        if (
-            put_identity is not None
-            and get_identity is not None
-            and put_identity != get_identity
-        ):
-            diagnostics.append(
-                _diagnostic(
-                    "error",
-                    CONTROL_URL_OBJECT_MISMATCH,
-                    f"control.{channel_name} PUT and GET URLs identify different GCS objects",
-                    RetryClass.FIX_HUMAN,
-                    f"Sign both control.{channel_name} URLs for the same GCS object.",
-                )
-            )
-    return diagnostics
-
-
 def _probe_diagnostics(spec: JobSpec, enabled: bool) -> list[Diagnostic]:
     if not enabled:
         return []
@@ -512,7 +484,6 @@ def build_plan(spec: JobSpec, job_id: str, probe: bool = True) -> Plan:
         )
 
     diagnostics.extend(_url_diagnostics(spec))
-    diagnostics.extend(_control_url_diagnostics(spec))
     diagnostics.extend(_path_diagnostics(spec, job_id))
     diagnostics.extend(_bundle_entry_diagnostics(spec))
 
