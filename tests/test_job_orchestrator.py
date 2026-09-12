@@ -757,7 +757,7 @@ def test_malformed_remote_result_does_not_mutate_envelope(tmp_path):
                 "runtime_payload_version": "sha256:remote-payload",
                 "phase": "stage",
                 "workload": "succeeded",
-                "artifacts": [{"unexpected": 1}],
+                "exit_code": "bad",
             }
         )
 

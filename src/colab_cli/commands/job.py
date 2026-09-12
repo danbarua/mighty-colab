@@ -655,6 +655,9 @@ def _absorb_remote_result(env, store, job_id, result) -> None:
         candidate.exit_code = result.get("exit_code")
         candidate.signal = result.get("signal")
         candidate.exception = result.get("exception")
+    candidate = JobEnvelope.model_validate(
+        {field: getattr(candidate, field) for field in JobEnvelope.model_fields}
+    )
     for field in JobEnvelope.model_fields:
         setattr(env, field, getattr(candidate, field))
 
