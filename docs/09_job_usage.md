@@ -10,6 +10,7 @@ log:
 2026-09-11: Fixed and live-verified [#16](https://github.com/danbarua/mighty-colab/issues/16): `status --poll` recovers an orphaned supervisor by absorbing a complete remote result or classifying a dead runner, then finishing cleanup.
 2026-09-11: Fixed [#20](https://github.com/danbarua/mighty-colab/issues/20): plans lock source path/size/SHA-256; apply refuses drift before assignment and stages only locked bytes.
 2026-09-11: Fixed [#19](https://github.com/danbarua/mighty-colab/issues/19): apply claims the job ID before assignment; a live second owner fails closed; a stale lock is taken over; a job that already has an endpoint is refused.
+2026-09-11: Fixed [#22](https://github.com/danbarua/mighty-colab/issues/22): stage, poll, cancel, and recovery share one JobTransport with deadlines and one refresh; kernel restart is bounded; timed-out writes confirm before retry.
 
 
 
@@ -288,7 +289,7 @@ mighty-colab sessions            # server-side assignment inventory
 Be aware of these before trusting a long run:
 
 - No GPU run has yet outlived the approximately 60-minute proxy refresh boundary.
-- Stage uploads lack the result poller's refresh/deadline wrapper; restart has no explicit timeout.
+
 - Data GET and artifact PUT buffer whole objects; source size is limited per file only after allocation, with no aggregate bundle ceiling.
 - Caller-owned source specs and generated `.mighty-colab-secrets.json` sidecars still contain full signed URLs and require credential handling.
 - Retry/recreate/resume and `control.log` are not implemented; planning rejects non-default policy values.

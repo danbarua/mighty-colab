@@ -50,6 +50,11 @@ below corresponds to a tag of the same name.
   now claims the job ID with an exclusive lock before assignment. A live
   second owner fails before `assign`; a dead owner's lock is taken over;
   a job that already has an endpoint is refused.
+- **Apply stage, restart, and assignment refresh could hang unbounded.**
+  Stage, poll, cancel, and recovery now share one `JobTransport`. Contents
+  requests and assignment re-resolution use connect/read deadlines, kernel
+  restart has an explicit timeout, timed-out writes confirm before retry,
+  and exhausted stalls stay degraded unless the assignment is proven gone.
 
 - **`job` sessions did not retain the kernel that launched their detached
   runner.** The session record now persists the runtime's kernel and Jupyter

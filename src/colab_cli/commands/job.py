@@ -447,7 +447,7 @@ def apply(
         orch.seal_secret_channel()
         orch.launch(f"{orch.remote_dir}/src")
         secret_handoff = True
-        transport = orch.transport_factory(orch.session_state)
+        transport = orch.job_transport()
         orch.poll(transport, deadline=deadline)
     except PhaseError as e:
         orch.env.workload = Workload.FAILED
@@ -529,19 +529,29 @@ def _stage_payload(orch: Orchestrator, p) -> None:
     """Upload public payload files, then the private transfer channel."""
 
     from colab_cli.job.payload_bundle import stage_payload
+    from colab_cli.job.transport import ReadStatus, TransportError
 
     orch._set_phase(Phase.STAGE)
     result_channel = p.spec.control.result
     if p.spec.data or p.spec.artifacts or (result_channel and result_channel.put_url):
         orch.prepare_secret_channel()
-    stage_payload(
-        spec=p.spec,
-        job_id=p.job_id,
-        session=orch.session_state,
-        remote_dir=orch.remote_dir,
-        source_spec_path=p.source_spec_path,
-        source_files=p.source_files,
-    )
+    try:
+        stage_payload(
+            spec=p.spec,
+            job_id=p.job_id,
+            transport=orch.job_transport(),
+            remote_dir=orch.remote_dir,
+            source_spec_path=p.source_spec_path,
+            source_files=p.source_files,
+        )
+    except TransportError as error:
+        retry = (
+            RetryClass.RETRY_DIFFERENT
+            if error.status is ReadStatus.SESSION_LOST
+            else RetryClass.RETRY_SAME
+        )
+        raise PhaseError(Phase.STAGE, str(error), retry) from error
+
 
 
 

@@ -108,15 +108,16 @@ def _orch(
     tmp_path, spec=None, client=None, runtime=None, session_store=None, **kw
 ):
     spec = spec or _spec()
+    kw.setdefault("transport_factory", lambda _s: MagicMock())
     return Orchestrator(
         plan=_plan(spec),
         store=JobStore(tmp_path / "jobs"),
         client=client or MagicMock(),
         runtime_factory=lambda url, token: runtime or MagicMock(),
-        transport_factory=lambda s: MagicMock(),
         session_store=session_store or MagicMock(),
         **kw,
     )
+
 
 
 @pytest.fixture(autouse=True)
@@ -265,21 +266,47 @@ def test_control_only_missing_transfer_map_fails_before_consumer(tmp_path):
 def test_unconsumed_secret_cleanup_fails_when_neither_path_proves_absence(
     tmp_path, monkeypatch
 ):
-    import colab_cli.job.orchestrator as orchestrator_module
+    from colab_cli.job.transport import ReadStatus
 
     runtime = MagicMock()
     runtime.execute_code.side_effect = RuntimeError("kernel unreachable")
-    contents = MagicMock()
-    contents.rm.side_effect = RuntimeError("delete failed")
-    contents.list_dir.side_effect = RuntimeError("check failed")
-    monkeypatch.setattr(orchestrator_module, "ContentsClient", lambda _session: contents)
-    orch = _orch(tmp_path, runtime=runtime)
+    transport = MagicMock()
+    transport.remove.return_value = ReadStatus.DEGRADED
+    orch = _orch(tmp_path, runtime=runtime, transport_factory=lambda _s: transport)
     orch.session_state = SimpleNamespace(url="https://vm", token="token")
     orch._secret_channel_prepared = True
 
     assert orch.cleanup_secret_channel() is False
-    contents.rm.assert_called_once()
-    contents.list_dir.assert_called_once()
+    transport.remove.assert_called_once()
+
+
+def test_restart_passes_an_explicit_timeout(tmp_path):
+    from colab_cli.job.orchestrator import RESTART_TIMEOUT
+
+    runtime = MagicMock()
+    orch = _orch(tmp_path, spec=_spec(deps=["numpy"]), runtime=runtime)
+    orch.session_state = SimpleNamespace(url="https://vm", token="token")
+
+    orch.restart()
+
+    runtime.restart.assert_called_once_with(timeout=RESTART_TIMEOUT)
+
+
+def test_restart_timeout_is_retry_same_not_session_lost(tmp_path):
+    runtime = MagicMock()
+    runtime.restart.side_effect = TimeoutError("stalled")
+    orch = _orch(tmp_path, spec=_spec(deps=["numpy"]), runtime=runtime)
+    orch.session_state = SimpleNamespace(url="https://vm", token="token")
+
+    with pytest.raises(PhaseError) as error:
+        orch.restart()
+
+    assert error.value.phase is Phase.RESTART
+    assert error.value.retry_class is RetryClass.RETRY_SAME
+    assert "kernel restart did not complete" in error.value.reason
+
+
+
 
 
 def test_launch_persists_the_kernel_target_for_session_commands(tmp_path):
