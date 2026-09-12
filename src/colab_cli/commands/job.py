@@ -645,15 +645,18 @@ def _observe_remote(transport, job_id: str):
 
 
 def _absorb_remote_result(env, store, job_id, result) -> None:
+    candidate = env.model_copy(deep=True)
     saved_plan = store.read_plan(job_id)
     if saved_plan is not None:
-        Orchestrator.absorb_result(env, saved_plan.spec, result)
+        Orchestrator.absorb_result(candidate, saved_plan.spec, result)
     else:
-        Orchestrator.absorb_provenance(env, result)
-        env.workload = Workload(result.get("workload", "unknown"))
-        env.exit_code = result.get("exit_code")
-        env.signal = result.get("signal")
-        env.exception = result.get("exception")
+        Orchestrator.absorb_provenance(candidate, result)
+        candidate.workload = Workload(result.get("workload", "unknown"))
+        candidate.exit_code = result.get("exit_code")
+        candidate.signal = result.get("signal")
+        candidate.exception = result.get("exception")
+    for field in JobEnvelope.model_fields:
+        setattr(env, field, getattr(candidate, field))
 
 
 def _recover_off_vm_result(

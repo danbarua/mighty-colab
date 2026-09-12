@@ -745,6 +745,25 @@ def test_remote_result_rejects_unidentifiable_producer(tmp_path, result, message
     with pytest.raises(ValueError, match=message):
         orch._absorb_result(result)
 
+def test_malformed_remote_result_does_not_mutate_envelope(tmp_path):
+    orch = _orch(tmp_path)
+    original = orch.env.model_copy(deep=True)
+
+    with pytest.raises(ValueError):
+        orch._absorb_result(
+            {
+                "schema_version": "2",
+                "cli_version": "1.2.3",
+                "runtime_payload_version": "sha256:remote-payload",
+                "phase": "stage",
+                "workload": "succeeded",
+                "artifacts": [{"unexpected": 1}],
+            }
+        )
+
+    assert orch.env == original
+
+
 def test_schema_one_envelope_without_runtime_version_remains_readable(tmp_path):
     store = JobStore(tmp_path / "jobs")
     envelope_dir = store.job_dir("legacy-job")

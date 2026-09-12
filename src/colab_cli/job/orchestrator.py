@@ -708,6 +708,15 @@ class Orchestrator:
 
     @staticmethod
     def absorb_result(env: JobEnvelope, spec: JobSpec, result: dict) -> None:
+        candidate = env.model_copy(deep=True)
+        Orchestrator._absorb_result_in_place(candidate, spec, result)
+        for field in JobEnvelope.model_fields:
+            setattr(env, field, getattr(candidate, field))
+
+    @staticmethod
+    def _absorb_result_in_place(
+        env: JobEnvelope, spec: JobSpec, result: dict
+    ) -> None:
         remote_phase = result.get("phase")
         if remote_phase:
             try:
