@@ -1,0 +1,65 @@
+name: Update pull request branch
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update:
+    name: Merge main into pull request
+    if: >-
+      github.event.issue.pull_request &&
+      github.event.comment.body == '/update-branch' &&
+      contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Update branch when merge is clean
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const pull_number = context.issue.number;
+            const { data: pull } = await github.rest.pulls.get({
+              owner,
+              repo,
+              pull_number,
+            });
+
+            if (pull.state !== "open") {
+              core.setFailed(`Pull request #${pull_number} is not open.`);
+              return;
+            }
+            if (pull.head.repo.full_name !== `${owner}/${repo}`) {
+              core.setFailed("Fork pull-request branches cannot be updated with this repository token.");
+              return;
+            }
+
+            const { data: comparison } = await github.rest.repos.compareCommitsWithBasehead({
+              owner,
+              repo,
+              basehead: `${pull.base.ref}...${pull.head.sha}`,
+            });
+            if (comparison.behind_by === 0) {
+              core.notice(`Pull request #${pull_number} already contains current ${pull.base.ref}.`);
+              return;
+            }
+
+            try {
+              const { data: update } = await github.rest.pulls.updateBranch({
+                owner,
+                repo,
+                pull_number,
+                expected_head_sha: pull.head.sha,
+              });
+              core.notice(update.message);
+            } catch (error) {
+              if (error.status === 422) {
+                core.setFailed(`Branch update was not clean: ${error.message}`);
+                return;
+              }
+              throw error;
+            }
