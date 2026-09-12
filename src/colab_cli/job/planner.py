@@ -16,11 +16,12 @@
 
 from __future__ import annotations
 
-import ipaddress
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterator
 from urllib.parse import urlsplit
+
+from colab_cli.job.runtime_payload.netpolicy import BlockedDestination, resolve_public_addresses
 
 from colab_cli.job.models import Diagnostic, JobSpec, Plan, RetryClass
 from colab_cli.job.spec_io import (
@@ -123,23 +124,17 @@ def _url_items(spec: JobSpec) -> Iterator[tuple[str, str, str]]:
 def _url_is_private(url: str) -> bool:
     try:
         host = urlsplit(url).hostname
+        port = urlsplit(url).port or 443
     except ValueError:
         return False
     if not host:
         return False
     try:
-        address = ipaddress.ip_address(host)
-    except ValueError:
-        return False
-    return any(
-        address in network
-        for network in (
-            ipaddress.ip_network("169.254.0.0/16"),
-            ipaddress.ip_network("10.0.0.0/8"),
-            ipaddress.ip_network("172.16.0.0/12"),
-            ipaddress.ip_network("192.168.0.0/16"),
-        )
-    )
+        resolve_public_addresses(host, port)
+    except (BlockedDestination, OSError):
+        return True
+    return False
+
 
 
 # The writable scratch on every Colab VM. Containment is enforced against

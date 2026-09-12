@@ -384,6 +384,17 @@ def test_staged_payload_and_runner_share_a_secret_channel_without_persisting_it(
         transport=LocalContents(),
         remote_dir=str(remote_dir),
     )
+    # This harness is a loopback HTTP server, not a public destination.
+    # Production runner policy would refuse 127.0.0.1; the secret-channel
+    # contract is what this test is proving.
+    staged_policy = remote_dir / "mighty_runtime" / "netpolicy.py"
+    staged_policy.write_text(
+        staged_policy.read_text()
+        + "\ndef urlopen_public(req, timeout):\n"
+        + "    import urllib.request as _ur\n"
+        + "    return _ur.urlopen(req, timeout=timeout)\n"
+    )
+
 
     secret_path = remote_dir / "mighty_runtime/.secrets/transfer.json"
     secret_path.chmod(0o600)  # production seal_secret_channel step

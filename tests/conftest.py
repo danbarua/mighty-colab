@@ -12,8 +12,45 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import ipaddress
+import socket
+
 import pytest
 from unittest.mock import MagicMock
+
+
+@pytest.fixture(autouse=True)
+def public_job_dns(monkeypatch):
+    """Job URL checks resolve hostnames. Tests use fake hosts; keep them public."""
+
+    def fake_getaddrinfo(host, port, *args, **kwargs):
+        del args, kwargs
+        host = str(host)
+        if host.startswith("[") and host.endswith("]"):
+            host = host[1:-1]
+        try:
+            ipaddress.ip_address(host)
+            family = socket.AF_INET6 if ":" in host else socket.AF_INET
+            return [(family, socket.SOCK_STREAM, 0, "", (host, port or 0))]
+        except ValueError:
+            pass
+        if host in {"localhost", "private.test"}:
+            ip = "127.0.0.1" if host == "localhost" else "10.0.0.1"
+            return [(socket.AF_INET, socket.SOCK_STREAM, 0, "", (ip, port or 443))]
+        if host == "mixed.test":
+            return [
+                (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("8.8.8.8", port or 443)),
+                (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("10.0.0.1", port or 443)),
+            ]
+        return [
+            (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("8.8.8.8", port or 443))
+        ]
+
+    monkeypatch.setattr("socket.getaddrinfo", fake_getaddrinfo)
+    monkeypatch.setattr(
+        "colab_cli.job.runtime_payload.netpolicy.socket.getaddrinfo",
+        fake_getaddrinfo,
+    )
 
 
 @pytest.fixture(autouse=True)

@@ -29,6 +29,7 @@ from typing import Any
 import yaml
 
 from colab_cli.job.models import JobSpec
+from colab_cli.job.runtime_payload.netpolicy import BlockedDestination, urlopen_public
 
 
 SECRET_FRAGMENT_PREFIX = "mighty-colab-secret-sha256="
@@ -312,7 +313,7 @@ def probe_get_url(url: str, timeout: float = 10) -> ProbeResult:
     request = urllib.request.Request(url, headers={"Range": "bytes=0-0"}, method="GET")
     response: Any | None = None
     try:
-        response = urllib.request.urlopen(request, timeout=timeout)
+        response = urlopen_public(request, timeout=timeout)
         status = _response_status(response)
         if status == 206:
             size = _content_range_size(response)
@@ -335,6 +336,8 @@ def probe_get_url(url: str, timeout: float = 10) -> ProbeResult:
         if status in {403, 404}:
             return ProbeResult(status=status, error=f"HTTP {status}")
         return ProbeResult(status=status, error=f"HTTP {status}")
+    except BlockedDestination as error:
+        return ProbeResult(status=None, error=str(error))
     except (OSError, TimeoutError, ValueError) as error:
         return ProbeResult(status=None, error=type(error).__name__)
     finally:

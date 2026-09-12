@@ -11,6 +11,7 @@ log:
 2026-09-11: Fixed [#20](https://github.com/danbarua/mighty-colab/issues/20): plans lock source path/size/SHA-256; apply refuses drift before assignment and stages only locked bytes.
 2026-09-11: Fixed [#19](https://github.com/danbarua/mighty-colab/issues/19): apply claims the job ID before assignment; a live second owner fails closed; a stale lock is taken over; a job that already has an endpoint is refused.
 2026-09-11: Fixed [#22](https://github.com/danbarua/mighty-colab/issues/22): stage, poll, cancel, and recovery share one JobTransport with deadlines and one refresh; kernel restart is bounded; timed-out writes confirm before retry.
+2026-09-11: Fixed [#25](https://github.com/danbarua/mighty-colab/issues/25): job URLs are resolved; non-public and mixed DNS answers are rejected; requests pin a validated address; redirects are re-checked.
 
 
 

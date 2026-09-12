@@ -206,7 +206,7 @@ def test_probe_get_url_206_reads_at_most_one_byte(monkeypatch):
     response = StubResponse(206, {"Content-Range": "bytes 0-0/123"})
     requests = []
     monkeypatch.setattr(
-        "urllib.request.urlopen",
+        "colab_cli.job.spec_io.urlopen_public",
         lambda request, timeout: (requests.append((request, timeout)) or response),
     )
 
@@ -222,7 +222,7 @@ def test_probe_get_url_206_reads_at_most_one_byte(monkeypatch):
 
 def test_probe_get_url_200_closes_without_reading_body(monkeypatch):
     response = StubResponse(200, body=b"a" * 1024 * 1024)
-    monkeypatch.setattr("urllib.request.urlopen", lambda request, timeout: response)
+    monkeypatch.setattr("colab_cli.job.spec_io.urlopen_public", lambda request, timeout: response)
 
     result = probe_get_url(PUBLIC_URL)
 
@@ -234,7 +234,7 @@ def test_probe_get_url_200_closes_without_reading_body(monkeypatch):
 
 
 def test_probe_get_url_416_is_empty_not_error(monkeypatch):
-    monkeypatch.setattr("urllib.request.urlopen", lambda request, timeout: StubResponse(416))
+    monkeypatch.setattr("colab_cli.job.spec_io.urlopen_public", lambda request, timeout: StubResponse(416))
 
     result = probe_get_url(PUBLIC_URL)
 
@@ -249,7 +249,7 @@ def test_probe_get_url_forbidden_or_missing_is_error(monkeypatch, status):
     def raise_http_error(request, timeout):
         raise urllib.error.HTTPError(PUBLIC_URL, status, "failure", {}, None)
 
-    monkeypatch.setattr("urllib.request.urlopen", raise_http_error)
+    monkeypatch.setattr("colab_cli.job.spec_io.urlopen_public", raise_http_error)
 
     result = probe_get_url(PUBLIC_URL)
 
@@ -310,7 +310,16 @@ def test_non_https_url_diagnostic(tmp_path):
 def test_private_or_link_local_host_diagnostic(tmp_path):
     spec = make_spec(tmp_path, data=[DataItem(url="https://169.254.1.1/x", dest="/content/jobs/planner-test/x", size_bytes=1)])
     assert URL_HOST_NOT_PUBLIC in diagnostic_codes(build_plan(spec, JOB_ID, probe=False))
+    ipv6 = make_spec(tmp_path, data=[DataItem(url="https://[fe80::1]/x", dest="/content/jobs/planner-test/x", size_bytes=1)])
+    assert URL_HOST_NOT_PUBLIC in diagnostic_codes(build_plan(ipv6, JOB_ID, probe=False))
+    loopback = make_spec(tmp_path, data=[DataItem(url="https://127.0.0.1/x", dest="/content/jobs/planner-test/x", size_bytes=1)])
+    assert URL_HOST_NOT_PUBLIC in diagnostic_codes(build_plan(loopback, JOB_ID, probe=False))
+    named = make_spec(tmp_path, data=[DataItem(url="https://private.test/x", dest="/content/jobs/planner-test/x", size_bytes=1)])
+    assert URL_HOST_NOT_PUBLIC in diagnostic_codes(build_plan(named, JOB_ID, probe=False))
+    mixed = make_spec(tmp_path, data=[DataItem(url="https://mixed.test/x", dest="/content/jobs/planner-test/x", size_bytes=1)])
+    assert URL_HOST_NOT_PUBLIC in diagnostic_codes(build_plan(mixed, JOB_ID, probe=False))
     assert URL_HOST_NOT_PUBLIC not in diagnostic_codes(build_plan(make_spec(tmp_path), JOB_ID, probe=False))
+
 
 
 def test_destination_outside_content_is_an_error(tmp_path):

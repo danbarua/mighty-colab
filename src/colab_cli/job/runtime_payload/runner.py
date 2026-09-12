@@ -20,8 +20,8 @@ from urllib.parse import urlsplit
 
 from . import SCHEMA_VERSION
 from . import ident
+from .netpolicy import urlopen_public
 
-# Seconds between SIGTERM and SIGKILL when a budget kill fires.
 GRACE_SECONDS = 5
 HTTP_TIMEOUT_SECONDS = 30
 _URL_ENV_NAMES = (
@@ -210,7 +210,7 @@ def _resolve_transfer_url(item, urls):
 
 def _http_get(url):
     req = request.Request(url, method="GET")
-    with request.urlopen(req, timeout=HTTP_TIMEOUT_SECONDS) as response:
+    with urlopen_public(req, timeout=HTTP_TIMEOUT_SECONDS) as response:
         return response.read()
 
 
@@ -221,7 +221,7 @@ def _http_put(url, data):
         method="PUT",
         headers={"Content-Type": "application/octet-stream"},
     )
-    with request.urlopen(req, timeout=HTTP_TIMEOUT_SECONDS) as response:
+    with urlopen_public(req, timeout=HTTP_TIMEOUT_SECONDS) as response:
         response.read(1)
 
 
