@@ -710,6 +710,9 @@ class Orchestrator:
     def absorb_result(env: JobEnvelope, spec: JobSpec, result: dict) -> None:
         candidate = env.model_copy(deep=True)
         Orchestrator._absorb_result_in_place(candidate, spec, result)
+        candidate = JobEnvelope.model_validate(
+            {field: getattr(candidate, field) for field in JobEnvelope.model_fields}
+        )
         for field in JobEnvelope.model_fields:
             setattr(env, field, getattr(candidate, field))
 
