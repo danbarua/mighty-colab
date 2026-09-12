@@ -34,6 +34,8 @@ from colab_cli.job.models import (
     ArtifactItem,
     Budgets,
     CodeSpec,
+    Control,
+    ControlChannel,
     JobSpec,
     Offload,
     Phase,
@@ -930,7 +932,7 @@ def test_payload_rejects_symlink_aliases_to_local_secrets(tmp_path, kind):
     with pytest.raises(ValueError, match="symbolic links"):
         list(payload_bundle._iter_user_files(spec))
 
-def _persist_running_job(mock_common_state, job_id="destroy-me"):
+def _persist_running_job(mock_common_state, job_id="destroy-me", control=None):
     from colab_cli.commands.job import _store
     from colab_cli.job.models import JobEnvelope, Plan, Supervisor
     from colab_cli.job.spec_io import spec_hash
@@ -940,6 +942,7 @@ def _persist_running_job(mock_common_state, job_id="destroy-me"):
         code=CodeSpec(kind="file", entry="train.py"),
         accelerator=Accelerator(prefer=[], accept_cpu=True),
         budgets=Budgets(wall_clock=60),
+        control=control or Control(),
     )
     plan = Plan(
         job_id=job_id,
@@ -951,6 +954,7 @@ def _persist_running_job(mock_common_state, job_id="destroy-me"):
     store.write_plan(plan)
     store.write_envelope(
         JobEnvelope(
+            schema_version="1",
             job_id=job_id,
             phase=Phase.RUN,
             workload=Workload.RUNNING,
@@ -971,10 +975,21 @@ def test_destroy_reconciles_remote_success_before_unassign(
     from colab_cli.job.transport import ReadStatus
 
     store = _persist_running_job(mock_common_state)
+    (store.job_dir("destroy-me") / "plan.json").unlink()
     transport = MagicMock()
     events = []
     transport.read_json.side_effect = lambda _path: (
-        events.append("read") or ({"workload": "succeeded", "exit_code": 0}, ReadStatus.OK)
+        events.append("read")
+        or (
+            {
+                "schema_version": "2",
+                "cli_version": "producer-cli",
+                "runtime_payload_version": "sha256:producer-payload",
+                "workload": "succeeded",
+                "exit_code": 0,
+            },
+            ReadStatus.OK,
+        )
     )
     transport.write_json.return_value = ReadStatus.OK
     transport.remove.return_value = ReadStatus.OK
@@ -992,7 +1007,139 @@ def test_destroy_reconciles_remote_success_before_unassign(
     assert events[:2] == ["read", "unassign"]
     assert env.workload is Workload.SUCCEEDED
     assert env.exit_code == 0
+    assert env.schema_version == "2"
+    assert env.cli_version == "producer-cli"
+    assert env.runtime_payload_version == "sha256:producer-payload"
     transport.write_json.assert_not_called()
+
+
+def test_destroy_recovers_terminal_result_from_control_get_url(
+    monkeypatch, mock_common_state
+):
+    from colab_cli.job.transport import ReadStatus
+
+    get_url = "https://storage.googleapis.com/results/destroy.json?signature=get"
+    control = Control(
+        result=ControlChannel(
+            put_url="https://storage.googleapis.com/results/destroy.json?signature=put",
+            get_url=get_url,
+        )
+    )
+    store = _persist_running_job(mock_common_state, control=control)
+    transport = MagicMock()
+    transport.read_json.return_value = (None, ReadStatus.NOT_FOUND)
+    transport.remove.return_value = ReadStatus.OK
+    monkeypatch.setattr(
+        "colab_cli.job.transport.JobTransport", lambda *_args: transport
+    )
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self, _size):
+            return json.dumps(
+                {
+                    "schema_version": "2",
+                    "cli_version": "producer-cli",
+                    "runtime_payload_version": "sha256:producer-payload",
+                    "workload": "succeeded",
+                    "exit_code": 0,
+                }
+            ).encode()
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda *_args, **_kwargs: Response())
+    _json_mode(mock_common_state)
+
+    result = runner.invoke(app, ["job", "destroy", "destroy-me"])
+    assert result.exit_code == 0
+    env = store.read_envelope("destroy-me")
+    assert env.workload is Workload.SUCCEEDED
+    assert env.exit_code == 0
+    assert env.cli_version == "producer-cli"
+    assert env.runtime_payload_version == "sha256:producer-payload"
+    emitted = json.loads(result.stdout)["job"]
+    assert emitted["schema_version"] == "2"
+    assert emitted["cli_version"] == "producer-cli"
+    assert emitted["runtime_payload_version"] == "sha256:producer-payload"
+    mock_common_state.client.unassign.assert_called_once_with("m-s-endpoint")
+
+
+def test_destroy_still_unassigns_when_control_result_is_malformed(
+    monkeypatch, mock_common_state
+):
+    from colab_cli.job.transport import ReadStatus
+
+    control = Control(
+        result=ControlChannel(
+            put_url="https://storage.googleapis.com/results/bad.json?signature=put",
+            get_url="https://storage.googleapis.com/results/bad.json?signature=get",
+        )
+    )
+    store = _persist_running_job(mock_common_state, control=control)
+    transport = MagicMock()
+    transport.read_json.return_value = (None, ReadStatus.NOT_FOUND)
+    transport.write_json.return_value = ReadStatus.OK
+    transport.remove.return_value = ReadStatus.OK
+    monkeypatch.setattr(
+        "colab_cli.job.transport.JobTransport", lambda *_args: transport
+    )
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self, _size):
+            return b'{"workload":"succeeded","artifacts":[{"unexpected":1}]}'
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda *_args, **_kwargs: Response())
+
+    result = runner.invoke(app, ["job", "destroy", "destroy-me"])
+
+    assert result.exit_code == 0
+    assert store.read_envelope("destroy-me").workload is Workload.UNKNOWN
+    mock_common_state.client.unassign.assert_called_once_with("m-s-endpoint")
+
+
+def test_cancel_only_preserves_terminal_control_result_during_forced_release(
+    monkeypatch, mock_common_state
+):
+    control = Control(
+        result=ControlChannel(
+            put_url="https://storage.googleapis.com/results/cancel.json?signature=put",
+            get_url="https://storage.googleapis.com/results/cancel.json?signature=get",
+        )
+    )
+    store = _persist_running_job(mock_common_state, control=control)
+    mock_common_state.store.get.return_value = None
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self, _size):
+            return b'{"workload":"succeeded","exit_code":0}'
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda *_args, **_kwargs: Response())
+
+    result = runner.invoke(
+        app, ["job", "destroy", "destroy-me", "--cancel-only"]
+    )
+
+    assert result.exit_code == 1
+    env = store.read_envelope("destroy-me")
+    assert env.workload is Workload.SUCCEEDED
+    assert env.exit_code == 0
+    mock_common_state.client.unassign.assert_called_once_with("m-s-endpoint")
 
 
 def test_destroy_without_remote_verdict_records_unknown(
@@ -1267,6 +1414,84 @@ def test_status_forces_teardown_when_interrupted_session_state_is_missing(
     env = store.read_envelope("lost-session")
     assert env.cleanup is Cleanup.RELEASED
     assert "credential deletion" in env.reason
+
+
+def test_status_recovers_terminal_result_from_control_get_url(
+    monkeypatch, mock_common_state
+):
+    get_url = "https://storage.googleapis.com/results/lost.json?signature=get-secret"
+    control = Control(
+        result=ControlChannel(
+            put_url="https://storage.googleapis.com/results/lost.json?signature=put-secret",
+            get_url=get_url,
+        )
+    )
+    store = _persist_running_job(
+        mock_common_state, job_id="lost-result", control=control
+    )
+    original = store.read_envelope("lost-result")
+    assert original is not None
+    mock_common_state.store.get.return_value = None
+    requests = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self, _size):
+            return json.dumps({"workload": "succeeded", "exit_code": 0}).encode()
+
+    def urlopen(request, timeout):
+        requests.append((request.full_url, request.get_method(), timeout))
+        return Response()
+
+    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+
+    result = runner.invoke(app, ["job", "status", "lost-result"])
+
+    assert result.exit_code == 1
+    assert requests == [(get_url, "GET", 10)]
+    env = store.read_envelope("lost-result")
+    assert env.workload is Workload.SUCCEEDED
+    assert env.exit_code == 0
+    assert env.cli_version == original.cli_version
+    assert env.runtime_payload_version == original.runtime_payload_version
+
+
+def test_status_ignores_control_result_placeholder(monkeypatch, mock_common_state):
+    control = Control(
+        result=ControlChannel(
+            put_url="https://storage.googleapis.com/results/pending.json?signature=put",
+            get_url="https://storage.googleapis.com/results/pending.json?signature=get",
+        )
+    )
+    store = _persist_running_job(
+        mock_common_state, job_id="pending-result", control=control
+    )
+    mock_common_state.store.get.return_value = None
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self, _size):
+            return b"{}"
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda *_args, **_kwargs: Response())
+
+    result = runner.invoke(app, ["job", "status", "pending-result"])
+
+    assert result.exit_code == 1
+    env = store.read_envelope("pending-result")
+    assert env.workload is Workload.UNKNOWN
+    assert "credential deletion" in env.reason
+    mock_common_state.client.unassign.assert_called_once_with("m-s-endpoint")
 
 
 def test_destroy_scrubs_secret_before_a_failed_unassign(

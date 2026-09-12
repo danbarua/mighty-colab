@@ -12,6 +12,9 @@ log:
 2026-09-11: Fixed [#19](https://github.com/danbarua/mighty-colab/issues/19): apply claims the job ID before assignment; a live second owner fails closed; a stale lock is taken over; a job that already has an endpoint is refused.
 2026-09-11: Fixed [#22](https://github.com/danbarua/mighty-colab/issues/22): stage, poll, cancel, and recovery share one JobTransport with deadlines and one refresh; kernel restart is bounded; timed-out writes confirm before retry.
 2026-09-11: Fixed [#25](https://github.com/danbarua/mighty-colab/issues/25): job URLs are resolved; non-public and mixed DNS answers are rejected; requests pin a validated address; redirects are re-checked.
+2026-09-12: Fixed [#27](https://github.com/danbarua/mighty-colab/issues/27): GCS control-result URL pairs must identify one object; `status` and `destroy` automatically use the GET URL as a bounded terminal-result fallback when the VM result is unavailable. Unsupported retry, resume, control-log, and run-failure policy values remain plan errors.
+2026-09-12: Fixed [#26](https://github.com/danbarua/mighty-colab/issues/26): terminal local and off-VM results identify the CLI build and exact shipped runtime payload under explicit result schema version 2; current readers continue to accept version-1 records.
+2026-09-12: Hardened #26 result recovery after review: terminal absorption validates on a copy and commits only a complete record; malformed VM and off-VM results leave existing envelope state unchanged.
 
 
 
@@ -221,10 +224,22 @@ Put those values under `control.result.put_url` and `.get_url`. Do not add
 `Content-Type: application/octet-stream`; signing a different header turns the
 later PUT into a bare 403. The object name MUST be unique per job, and `{}` is
 only a placeholder, never a completed verdict. Control URLs must remain valid
-for `retry.budget_seconds` plus 15 minutes. The CLI does not read the GET URL
-automatically; recover it yourself with `curl --fail "$GET_URL"` when the VM
-result cannot be reached. Treat both URLs and the files containing them as
-credentials.
+for `retry.budget_seconds` plus 15 minutes. When the VM result cannot be reached,
+`status` and `destroy` automatically read the GET URL and absorb a terminal JSON
+result; `{}` and non-terminal records are ignored. Treat both URLs and the files
+containing them as credentials.
+
+New terminal results include `schema_version`, `cli_version`, and
+`runtime_payload_version`. The CLI value is fixed before launch and passed to
+the runner. The runtime value is a `sha256:` digest over the exact Python
+payload copied to the VM, so a payload that differs from its caller remains
+identifiable. Local envelopes carry and absorb both values. These records use
+result schema 2; plans and other runner records remain schema 1. Current readers
+accept old result-schema-1 envelopes and preserve local provenance when an old
+remote result omits the provenance fields. A schema-2 result must contain both
+producer fields; unknown result schemas are rejected rather than relabeled.
+Absorption validates a copy first, so an invalid terminal field leaves the
+persisted envelope unchanged.
 
 **Artifacts are attempted even when your run fails.** `on_run_fail: offload_anyway` is the only implemented value; planning rejects `skip` rather than silently ignoring it. A missing optional artifact does not fail offload, but a failed PUT currently fails scalar offload even when that artifact is optional.
 
@@ -270,7 +285,7 @@ mighty-colab job status <id> --poll
 
 This command observes the remote `result.json`. It stops when that file appears and absorbs phase, workload, exit/signal/exception, artifact, and offload state. It does **not** perform cleanup, so the returned envelope can remain `done: false`. A dead local supervisor PID is marked `interrupted`, but the command does not guarantee `cleanup: left_up` or classify a dead runner from `launch.json` identity.
 
-After an interrupted apply, inspect both the job and the account, retrieve any manual `control.result` object if needed, and destroy the allocation explicitly.
+After an interrupted apply, run `status --poll`; it uses the control-result GET fallback when the VM result is unavailable. Then inspect the account and destroy the allocation explicitly.
 
 ## Cost discipline
 
