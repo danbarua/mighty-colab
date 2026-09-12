@@ -59,6 +59,11 @@ below corresponds to a tag of the same name.
   and control URLs are now resolved. Any non-public IPv4/IPv6 answer is
   rejected, including mixed DNS. Each request connects to an address from
   that lookup; redirects are re-checked; HTTPS remains required.
+- **Control-result recovery was manual and GCS URL pairs could drift.** GCS
+  control-result PUT/GET pairs must now identify one object, and status/destroy
+  use the GET URL as a bounded terminal-result fallback when the VM is
+  unavailable. Unsupported retry, resume, control-log, and run-failure policy
+  values remain plan errors.
 
 - **`job` sessions did not retain the kernel that launched their detached
   runner.** The session record now persists the runtime's kernel and Jupyter
