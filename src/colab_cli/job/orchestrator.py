@@ -37,6 +37,7 @@ from typing import Callable, List, Optional, Tuple
 
 
 from colab_cli.auto_update import get_app_version
+from colab_cli.job import RESULT_SCHEMA_VERSION, SCHEMA_VERSION
 from colab_cli.job.models import (
     ArtifactResult,
     Cleanup,
@@ -50,6 +51,7 @@ from colab_cli.job.models import (
     Workload,
 )
 from colab_cli.job.store import JobStore
+from colab_cli.job.runtime_payload import RUNTIME_PAYLOAD_VERSION
 
 # Remote layout. Everything the job owns lives under one directory so
 # `destroy` has exactly one thing to remove and `plan` has exactly one
@@ -127,7 +129,10 @@ class Orchestrator:
         self.config_path = config_path
 
         self.env = JobEnvelope(
-            cli_version=get_app_version(), job_id=self.job_id, phase=Phase.PLAN
+            cli_version=get_app_version(),
+            runtime_payload_version=RUNTIME_PAYLOAD_VERSION,
+            job_id=self.job_id,
+            phase=Phase.PLAN,
         )
         self.session_state = None
         self._runtime = None
@@ -583,6 +588,7 @@ class Orchestrator:
             "        cmd = [sys.executable, '-I', '-S', '-c', bootstrap,\n"
             "               '--job-dir', d,\n"
             f"              '--deadline', str({self.spec.budgets.wall_clock}),\n"
+            f"              '--cli-version', {self.env.cli_version!r},\n"
             f"              '--entry', os.path.join(d, 'src', {self.spec.code.entry!r})]\n"
             "        secret_path = os.path.join(d, 'mighty_runtime', '.secrets', 'transfer.json')\n"
             f"        secrets_required = {self._secrets_required!r}\n"
@@ -686,13 +692,42 @@ class Orchestrator:
         self._persist()
 
     @staticmethod
+    def absorb_provenance(env: JobEnvelope, result: dict) -> None:
+        result_schema = result.get("schema_version", SCHEMA_VERSION)
+        if result_schema not in {SCHEMA_VERSION, RESULT_SCHEMA_VERSION}:
+            raise ValueError(f"unsupported result schema: {result_schema!r}")
+        if result_schema == SCHEMA_VERSION:
+            return
+
+        for field in ("cli_version", "runtime_payload_version"):
+            value = result.get(field)
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"schema 2 result has invalid {field}")
+            setattr(env, field, value)
+        env.schema_version = result_schema
+
+    @staticmethod
     def absorb_result(env: JobEnvelope, spec: JobSpec, result: dict) -> None:
+        candidate = env.model_copy(deep=True)
+        Orchestrator._absorb_result_in_place(candidate, spec, result)
+        candidate = JobEnvelope.model_validate(
+            {field: getattr(candidate, field) for field in JobEnvelope.model_fields}
+        )
+        for field in JobEnvelope.model_fields:
+            setattr(env, field, getattr(candidate, field))
+
+    @staticmethod
+    def _absorb_result_in_place(
+        env: JobEnvelope, spec: JobSpec, result: dict
+    ) -> None:
         remote_phase = result.get("phase")
         if remote_phase:
             try:
                 env.phase = Phase(remote_phase)
             except ValueError:
                 pass
+
+        Orchestrator.absorb_provenance(env, result)
 
         env.workload = Workload(result.get("workload", "unknown"))
         env.exit_code = result.get("exit_code")

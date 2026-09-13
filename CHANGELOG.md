@@ -64,6 +64,13 @@ below corresponds to a tag of the same name.
   use the GET URL as a bounded terminal-result fallback when the VM is
   unavailable. Unsupported retry, resume, control-log, and run-failure policy
   values remain plan errors.
+- **Off-VM terminal results lacked build provenance.** The detached runner now
+  receives the CLI version fixed before launch and records it with a SHA-256
+  identity of the exact shipped runtime payload. Local envelopes and terminal
+  on-VM/off-VM results carry both values under explicit result schema version 2;
+  current readers continue to accept version-1 records, require complete
+  provenance from version-2 producers, reject unknown result schemas, and
+  leave persisted envelope state unchanged when any terminal field is invalid.
 
 - **`job` sessions did not retain the kernel that launched their detached
   runner.** The session record now persists the runtime's kernel and Jupyter
