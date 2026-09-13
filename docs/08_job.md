@@ -21,6 +21,7 @@ log:
 2026-09-12: Fixed [#26](https://github.com/danbarua/mighty-colab/issues/26): the immutable CLI version is passed to the detached runner; local envelopes and terminal on-VM/off-VM results carry both that version and a SHA-256 identity of the exact shipped runtime payload. Result schema version 2 makes the added provenance explicit; current readers continue to accept version-1 records.
 2026-09-12: **Live provenance verification for #26.** At commit `4805408`, a non-editable install reported CLI `0.8.1.dev35+g4805408d7`; the local terminal envelope and the terminal object downloaded directly after deleting local job state both reported result schema `2`, that CLI version, and runtime payload `sha256:955731f19845f75aa3716b7fe8334e14bfba542a992ca2673245ecaad4f1feab`. The workload succeeded, the exact GCS object was deleted, and the final session check reported no active sessions.
 2026-09-12: Hardened #26 result recovery after review: VM and off-VM result absorption is transactional, so malformed terminal records cannot partially replace phase, provenance, workload, or artifact state before validation fails.
+2026-09-11: Fixed [#23](https://github.com/danbarua/mighty-colab/issues/23): runner and watchdog terminate tagged `setsid` descendants with identity-checked SIGTERM/SIGKILL; `succeeded` is refused while a tagged process survives or when `/proc` detection is unavailable.
 
 
 
@@ -144,7 +145,7 @@ Before launch, the local stage phase uploads `mighty_runtime`, user code, and qu
 
 The runner creates `launch.json` with `O_EXCL`, starts the shim in its own session/process group, and remains its parent so it can `waitpid()`. The shim sets the entry's real `sys.argv`, `__file__`, and `sys.path[0]`, then uses `runpy.run_path(..., run_name="__main__")`. A duplicate runner sees the existing live launch identity and exits without starting a second consumer; the launch RPC does not promise to return the original runner PID.
 
-The runner maps normal exits, exceptions, signals, cancellation intent, wall-clock expiry, and descendant-survival checks into `result.json`. Both runner and watchdog consume an externally written `cancel.json`, send SIGTERM, and escalate after the grace period; `destroy --cancel-only` writes that intent without unassigning. The runner then attempts declared artifact PUTs and, when configured, `control.result.put_url`. An optional artifact that is absent does not fail offload, but any artifact PUT recorded as `failed` currently makes scalar `offload: failed`, irrespective of `required`.
+The runner maps normal exits, exceptions, signals, cancellation intent, wall-clock expiry, and descendant-survival checks into `result.json`. Both runner and watchdog consume an externally written `cancel.json`, send SIGTERM to the shim process group **and** to processes tagged with `MIGHTY_JOB_ID`, and escalate to SIGKILL after the grace period. Tagged kills are skipped unless pid+starttime+boot_id still match, so a reused PID is not signalled. `succeeded` requires Linux `/proc` escapee detection and an empty tagged set after that reap; otherwise the workload is `unknown` or `failed`. `destroy --cancel-only` writes cancel intent without unassigning. The runner then attempts declared artifact PUTs and, when configured, `control.result.put_url`. An optional artifact that is absent does not fail offload, but any artifact PUT recorded as `failed` currently makes scalar `offload: failed`, irrespective of `required`.
 
 The watchdog is a sibling process. It enforces wall clock and reports telemetry. Job provision starts the TFE keep-alive daemon after persisting the session, the same daemon `colab new` uses; cleanup stops it on release or confirmed absence and leaves it running when the VM is deliberately left up.
 
@@ -256,7 +257,7 @@ The local JSON writes use atomic replacement, but the store has no cross-process
 
 The permanent suite covers model validation, plan diagnostics without reflected inputs, redacted plan/spec persistence with owner-only hydration, canonical URL identity and credential-marker hashing, source-bundle credential rejection against immutable upload snapshots, expiry revalidation, isolated descriptor handoff and unlinking, interrupted-recovery deletion/forced teardown, healthy-supervisor race exclusion, runner exit/cancel behavior, duplicate remote launch, transport refresh, phase transitions, CLI parsing, and envelope truth tables. Live integrations cover CPU and T4 jobs, signed GCS data/artifact/control-result paths, dependency restart/verify, workload failure, token refresh recovery, explicit launch-kernel restart, cancel-only termination with assignment retention, and job-owned TFE keep-alive through idle leave-up and destroy.
 
-The current gaps need regression coverage before their claims can be promoted: streamed transfer; aggregate bundle limits; optional-upload semantics; control log; and a shipped-path setsid escapee case.
+The current gaps need regression coverage before their claims can be promoted: streamed transfer; aggregate bundle limits; optional-upload semantics; control log.
 
 ## Spike results (2026-09-11, live CPU VM)
 
@@ -282,17 +283,16 @@ only**, never `execute_code`.
 | `wall_clock` breach → `cancelled` + intent, signal 15 | ok (SIGTERM sufficed; no escalation needed) |
 | duplicate launch refused via `O_EXCL launch.json` | ok |
 
-**Confirmed hole, and a fix for half of it:** a `setsid` grandchild outlived a
-`succeeded` verdict on the VM and was **invisible to the process-group scan** —
-reproduced locally and live. The process group is provably not a containment
-boundary.
+**Confirmed hole, now closed in the shipped runner:** a `setsid` grandchild
+outlived a `succeeded` verdict on the VM and was invisible to the process-group
+scan. The process group is not a containment boundary.
 
-The shipped Linux job-tag sweep has now executed live. It initially exposed that the watchdog inherited `MIGHTY_JOB_ID` and falsely appeared as a surviving descendant; the watchdog is now excluded. The sweep reports process-group and job-tag survivors separately. A dedicated setsid escapee case through the shipped integration path has not yet been recorded.
-
-**Killing** the escapee is still open: detection is not containment. cgroup
-`cgroup.kill` or `PR_SET_CHILD_SUBREAPER` remains required to actually reap
-one, and the runner must refuse to report a clean terminal state while a
-tagged survivor exists.
+The Linux job-tag sweep excludes the watchdog, finds process-group and job-tag
+survivors separately, and terminates tagged processes with identity-checked
+SIGTERM/SIGKILL. The runner refuses `succeeded` when `/proc` detection is
+unavailable or a tagged process survives the reap. The permanent Linux `/proc`
+case exercises the shipped payload; a dedicated live Colab escapee run has not
+been recorded.
 
 **Two bugs the spike caught before implementation**, both in the runner's own
 cleanup rather than in the workload:
@@ -446,5 +446,4 @@ These are current implementation limits, not hypothetical polish:
 - **Memory and size:** data GET and artifact PUT buffer whole objects in RAM. The 250 MB source limit is per file, enforced after allocation; there is no aggregate bundle ceiling.
 - **Signed secrets:** generated specs, plans, manifests, envelopes, events, diagnostics, and kernel launch history contain query-free URL identities and opaque credential references only. Caller-owned source specs and generated owner-mode `.mighty-colab-secrets.json` sidecars still contain full URLs and require credential handling.
 - **Declared but inactive controls:** planning rejects non-default retry/recreate/resume settings, `control.log`, and `on_run_fail: skip`.
-- **Process containment:** tagged escapees are reported, not killed. The dedicated shipped-path setsid case remains unverified.
 - **CLI/JSON consistency:** the job-group help summary omits `list`. Some early file/plan read failures still emit stderr rather than a JSON envelope. A failed apply can exit the process with status 1 while its outer JSON wrapper says `exit_code: 0`.

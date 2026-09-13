@@ -46,6 +46,30 @@ def _safe_killpg(pgid, sig):
         return False
 
 
+def _escapee_exclude(watchdog_proc) -> set:
+    own = {os.getpid()}
+    if watchdog_proc is not None and watchdog_proc.pid:
+        own.add(watchdog_proc.pid)
+    return own
+
+
+def _signal_escapees(job_id, sig, exclude) -> None:
+    try:
+        ident.signal_tagged(job_id, sig, exclude)
+    except Exception:  # noqa: BLE001 - signaling must not eat the verdict
+        pass
+
+
+def _classify_workload(workload, *, tagged, detect_ok):
+    """A clean result requires containment, not just an exit code."""
+    if not detect_ok and workload == "succeeded":
+        return "unknown", "escapee detection unavailable"
+    if tagged and workload == "succeeded":
+        return "failed", "tagged descendants survived containment"
+    return workload, None
+
+
+
 def _atomic_write_json(path, payload):
     tmp = f"{path}.tmp.{os.getpid()}"
     with open(tmp, "w") as f:
@@ -551,6 +575,7 @@ def main(argv):
     # runner identity and receives only local process metadata, never URLs.
     watchdog_proc = None
     watchdog_env = dict(os.environ)
+    watchdog_env[ident.JOB_ENV_VAR] = job_id
     for name in _URL_ENV_NAMES:
         watchdog_env.pop(name, None)
     try:
@@ -603,11 +628,17 @@ def main(argv):
                         {"cancelled_by": "wall_clock", "at": now},
                     )
                 _safe_killpg(shim_pgid, signal.SIGTERM)
+                _signal_escapees(
+                    job_id, signal.SIGTERM, _escapee_exclude(watchdog_proc)
+                )
                 term_sent = True
                 escalate_at = now + GRACE_SECONDS
             elif term_sent and not kill_sent and now > escalate_at:
                 # Only escalate if SIGTERM did not do the job.
                 _safe_killpg(shim_pgid, signal.SIGKILL)
+                _signal_escapees(
+                    job_id, signal.SIGKILL, _escapee_exclude(watchdog_proc)
+                )
                 kill_sent = True
             time.sleep(0.2)
     except BaseException as e:  # noqa: BLE001 - verdict must still land
@@ -617,16 +648,25 @@ def main(argv):
     # verdict, which is the same hole that already cost one cycle.
     survivors, tagged, intent, exception = [], [], None, None
     detect_ok = False
+    exclude = _escapee_exclude(watchdog_proc)
     try:
         survivors = ident.descendants(shim_pgid)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        identities = ident.tagged_identities(job_id, exclude)
+        if identities:
+            ident.signal_identities(identities, signal.SIGTERM)
+            time.sleep(GRACE_SECONDS)
+            ident.signal_identities(identities, signal.SIGKILL)
+            time.sleep(0.2)
     except Exception:  # noqa: BLE001
         pass
     try:
         # The watchdog carries MIGHTY_JOB_ID too, by design, and is still
         # alive at verdict time -- exclude it or every job reports a
         # phantom escapee. Confirmed on a live VM before this was fixed.
-        own = {watchdog_proc.pid} if watchdog_proc is not None else set()
-        tagged = ident.tagged_processes(job_id, exclude=own)
+        tagged = ident.tagged_processes(job_id, exclude=exclude)
         detect_ok = ident.can_detect_escapees()
     except Exception:  # noqa: BLE001
         pass
@@ -651,6 +691,12 @@ def main(argv):
         workload = "succeeded"
     else:
         workload = "failed"
+    workload, contain_err = _classify_workload(
+        workload, tagged=tagged, detect_ok=detect_ok
+    )
+    if contain_err and runner_error is None:
+        runner_error = contain_err
+
 
     if offload_manifest:
         artifacts, offload_failed = _offload(job_dir, offload_manifest, urls)
