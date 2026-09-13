@@ -47,6 +47,15 @@ def test_sessions_json_list_shape(mock_common_state, mocker):
         [mock_assignment],
     )
     mocker.patch("colab_cli.common.pid_alive", return_value=True)
+    mocker.patch(
+        "colab_cli.commands.session._keep_alive_summary",
+        return_value={
+            "keep_alive_health": "transient_failure",
+            "keep_alive_consecutive_failures": 1,
+            "keep_alive_last_success_age_seconds": 60,
+            "keep_alive_retention_risk": "normal",
+        },
+    )
 
     result = runner.invoke(app, ["sessions"])
     assert result.exit_code == 0, result.output
@@ -72,6 +81,10 @@ def test_sessions_json_list_shape(mock_common_state, mocker):
             "machine_shape": "HIGH_RAM",
             "keep_alive_pid": 4242,
             "last_keep_alive_ping": "2026-08-12T01:00:00+00:00",
+            "keep_alive_health": "transient_failure",
+            "keep_alive_consecutive_failures": 1,
+            "keep_alive_last_success_age_seconds": 60,
+            "keep_alive_retention_risk": "normal",
         }
     ]
 
@@ -96,6 +109,10 @@ def test_sessions_json_keep_alive_none_for_orphaned_assignment(mock_common_state
     envelope = json.loads(result.stdout)
     assert "keep_alive_pid" not in envelope["sessions"][0]
     assert "last_keep_alive_ping" not in envelope["sessions"][0]
+    assert "keep_alive_health" not in envelope["sessions"][0]
+    assert "keep_alive_consecutive_failures" not in envelope["sessions"][0]
+    assert "keep_alive_last_success_age_seconds" not in envelope["sessions"][0]
+    assert "keep_alive_retention_risk" not in envelope["sessions"][0]
 
 
 def test_sessions_json_orphaned_assignment_marked(mock_common_state):

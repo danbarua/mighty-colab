@@ -20,6 +20,8 @@ from typing_extensions import Annotated
 from colab_cli.client import ColabRequestError
 from colab_cli.commands.session import (
     _is_scope_error,
+    _record_keep_alive_failure,
+    _record_keep_alive_success,
     _scope_remediation_message,
     spawn_keep_alive,
 )
@@ -52,29 +54,26 @@ def _session_state_from_assignment(assignment, name: str) -> SessionState:
     )
 
 
-def _preflight_keep_alive(endpoint: str, session_name: str):
-    """Verify the keep-alive RPC succeeds before persisting anything, so a
-    missing OAuth scope surfaces immediately instead of a session that's
-    silently missing a working keep-alive daemon.
-
-    Unlike `colab new`, adopt never unassigns on failure -- it didn't create
-    the assignment, so it doesn't own the decision to tear it down.
-    """
+def _preflight_keep_alive(session: SessionState) -> None:
+    """Verify keep-alive before persistence and record the observed result."""
     from colab_cli.common import state
 
     try:
-        state.client.keep_alive_assignment(endpoint)
+        state.client.keep_alive_assignment(session.endpoint)
     except ColabRequestError as e:
         if get_status_code(e) == 403 and _is_scope_error(e):
             typer.echo(
-                f"[colab] Keep-alive pre-flight failed for '{session_name}': "
+                f"[colab] Keep-alive pre-flight failed for '{session.name}': "
                 "your credentials are missing an OAuth scope required by "
                 "Colab.\n",
                 err=True,
             )
             typer.echo(_scope_remediation_message(state.auth_provider), err=True)
             raise typer.Exit(code=1)
-        # Other failures: don't block adoption -- the daemon retries on its own.
+        # Adopt never unassigns: it did not create the assignment.
+        _record_keep_alive_failure(session)
+    else:
+        _record_keep_alive_success(session)
 
 
 def _start_keep_alive(endpoint: str, session_name: str) -> int:
@@ -123,7 +122,7 @@ def _refresh_endpoint(existing: SessionState, keep_alive: bool):
     existing.accelerator = match.accelerator.value
 
     if keep_alive and not existing.keep_alive_pid:
-        _preflight_keep_alive(existing.endpoint, existing.name)
+        _preflight_keep_alive(existing)
         # Persist BEFORE spawning so the daemon's own state.store.get(name)
         # check doesn't race the parent.
         state.store.add(existing)
@@ -193,7 +192,7 @@ def _adopt_endpoint(endpoint: str, name: Optional[str], keep_alive: bool):
     if keep_alive:
         # Pre-flight before persisting: a missing scope should abort the
         # whole adopt, not leave a session quietly missing its daemon.
-        _preflight_keep_alive(endpoint, session_name)
+        _preflight_keep_alive(s)
         # Persist BEFORE spawning so the daemon's own state.store.get(name)
         # check doesn't race the parent.
         state.store.add(s)
@@ -247,7 +246,7 @@ def _adopt_all_orphans(keep_alive: bool):
 
         s = _session_state_from_assignment(assignment, session_name)
         if keep_alive:
-            _preflight_keep_alive(assignment.endpoint, session_name)
+            _preflight_keep_alive(s)
             state.store.add(s)
             s.keep_alive_pid = _start_keep_alive(assignment.endpoint, session_name)
 

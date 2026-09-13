@@ -633,6 +633,7 @@ def test_provision_tolerates_a_non_scope_preflight_error(
     keep_alive_spawn.assert_called_once()
     assert orch.session_state.keep_alive_pid == 4242
     assert orch.session_state.last_keep_alive_ping is None
+    assert orch.session_state.keep_alive_consecutive_failures == 1
 
 
 # --------------------------------------------------------------------------

@@ -23,6 +23,7 @@ from unittest.mock import MagicMock
 from typer.testing import CliRunner
 
 from colab_cli.cli import app
+from colab_cli.state import SessionState
 
 runner = CliRunner()
 
@@ -45,6 +46,15 @@ def test_status_json_single_session_found(mock_common_state, mocker):
     mock_common_state.store.get.return_value = mock_session_state
     mock_common_state.sync_sessions.return_value = ({"s1": mock_session_state}, [])
     mocker.patch("colab_cli.common.pid_alive", return_value=True)
+    mocker.patch(
+        "colab_cli.commands.session._keep_alive_summary",
+        return_value={
+            "keep_alive_health": "transient_failure",
+            "keep_alive_consecutive_failures": 1,
+            "keep_alive_last_success_age_seconds": 60,
+            "keep_alive_retention_risk": "normal",
+        },
+    )
 
     result = runner.invoke(app, ["status", "-s", "s1"])
     assert result.exit_code == 0, result.output
@@ -67,7 +77,46 @@ def test_status_json_single_session_found(mock_common_state, mocker):
         "exec_log_path": "/tmp/s1.exec.log",
         "keep_alive_pid": 4242,
         "last_keep_alive_ping": "2026-08-12T01:00:00+00:00",
+        "keep_alive_health": "transient_failure",
+        "keep_alive_consecutive_failures": 1,
+        "keep_alive_last_success_age_seconds": 60,
+        "keep_alive_retention_risk": "normal",
     }
+
+
+def test_status_human_surfaces_keep_alive_health(mock_common_state, mocker):
+    mock_common_state.json_output = False
+    session = SessionState(
+        name="s1",
+        token="token",
+        url="https://runtime",
+        endpoint="e1",
+        accelerator="NONE",
+        variant="DEFAULT",
+        machine_shape="STANDARD",
+        keep_alive_pid=4242,
+        last_keep_alive_ping="2026-08-12T01:00:00+00:00",
+    )
+    mock_common_state.store.get.return_value = session
+    mock_common_state.sync_sessions.return_value = ({"s1": session}, [])
+    mocker.patch("colab_cli.common.pid_alive", return_value=True)
+    mocker.patch(
+        "colab_cli.commands.session._keep_alive_summary",
+        return_value={
+            "keep_alive_health": "transient_failure",
+            "keep_alive_consecutive_failures": 1,
+            "keep_alive_last_success_age_seconds": 60,
+            "keep_alive_retention_risk": "normal",
+        },
+    )
+
+    result = runner.invoke(app, ["status", "-s", "s1"])
+
+    assert result.exit_code == 0, result.output
+    assert (
+        "Keep-alive: TRANSIENT_FAILURE | Consecutive failures: 1 | "
+        "Last success: 60s ago | Retention risk: NORMAL"
+    ) in result.output
 
 
 def test_status_json_keep_alive_pid_hidden_when_daemon_confirmed_dead(
@@ -87,6 +136,7 @@ def test_status_json_keep_alive_pid_hidden_when_daemon_confirmed_dead(
     mock_session_state.exec_log_path = None
     mock_session_state.keep_alive_pid = 4242
     mock_session_state.last_keep_alive_ping = "2026-08-12T01:00:00+00:00"
+    mock_session_state.keep_alive_consecutive_failures = 2
     mock_common_state.store.get.return_value = mock_session_state
     mock_common_state.sync_sessions.return_value = ({"s1": mock_session_state}, [])
     mock_common_state.json_output = True
@@ -100,6 +150,9 @@ def test_status_json_keep_alive_pid_hidden_when_daemon_confirmed_dead(
     # The last-ping record itself is still an observed fact, independent
     # of whether the daemon happens to be alive right now.
     assert envelope["session"]["last_keep_alive_ping"] == "2026-08-12T01:00:00+00:00"
+    assert envelope["session"]["keep_alive_health"] == "stopped"
+    assert envelope["session"]["keep_alive_consecutive_failures"] == 2
+    assert envelope["session"]["keep_alive_retention_risk"] == "elevated"
 
 
 def test_status_json_single_session_not_found_is_error_and_exits_nonzero(
@@ -136,6 +189,7 @@ def test_status_json_no_session_flag_lists_all(mock_common_state):
     mock_session_state.exec_log_path = None
     mock_session_state.keep_alive_pid = None
     mock_session_state.last_keep_alive_ping = None
+    mock_session_state.keep_alive_consecutive_failures = 0
     mock_common_state.sync_sessions.return_value = ({"s1": mock_session_state}, [])
 
     result = runner.invoke(app, ["status"])
@@ -151,6 +205,9 @@ def test_status_json_no_session_flag_lists_all(mock_common_state):
             "variant": "DEFAULT",
             "machine_shape": "STANDARD",
             "status": "LAST-KNOWN-LOCAL IDLE",
+            "keep_alive_health": "disabled",
+            "keep_alive_consecutive_failures": 0,
+            "keep_alive_retention_risk": "elevated",
         }
     ]
 
