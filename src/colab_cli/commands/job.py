@@ -417,11 +417,12 @@ def apply(
         if item.size_bytes > CONTENTS_UPLOAD_CEILING
     ]
     if oversized:
-        typer.echo(
+        _emit_command_message(
+            "apply",
             "[colab] Source files exceed the 250 MB Contents ceiling: "
             + ", ".join(oversized)
             + ". Move them to a data URL and re-plan.",
-            err=True,
+            reason="plan_refused",
         )
         raise typer.Exit(1)
 
@@ -474,16 +475,19 @@ def apply(
             boot_id=ident.boot_id(),
         )
     except ApplyInProgress as error:
-        typer.echo(f"[colab] {error}", err=True)
+        _emit_command_message(
+            "apply", f"[colab] {error}", reason="apply_in_progress"
+        )
         raise typer.Exit(1) from None
 
     existing = store.read_envelope(p.job_id)
     if existing is not None and existing.endpoint:
         claim.release()
-        typer.echo(
+        _emit_command_message(
+            "apply",
             f"[colab] Job {p.job_id} already has endpoint {existing.endpoint}. "
             "Use `mighty-colab job status --poll` instead of a second apply.",
-            err=True,
+            reason="job_already_active",
         )
         raise typer.Exit(1)
 
