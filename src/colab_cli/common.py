@@ -255,15 +255,33 @@ class State:
             self._client = Client(Prod(), creds)
         return self._client
 
-    def prune_session(self, name: str):
-        """Removes a session from local state and kills its keep-alive process."""
+    def prune_session(self, name: str, *, confirmed_absent: bool = False) -> bool:
+        """Prune only when the backend confirms the assignment is absent."""
         s = self.store.get(name)
+        if s is not None and not confirmed_absent:
+            try:
+                assignments = self.client.list_assignments()
+            except Exception:
+                return False
+            for assignment in assignments:
+                if assignment.endpoint != s.endpoint:
+                    continue
+                proxy = assignment.runtime_proxy_info
+                if proxy.token != s.token or proxy.url != s.url:
+                    s.token = proxy.token
+                    s.url = proxy.url
+                    self.store.add(s)
+                    if self._sessions is not None:
+                        self._sessions[name] = s
+                return False
+
         if s and s.keep_alive_pid:
             kill_process(s.keep_alive_pid)
         self.store.remove(name)
-        if self._sessions and name in self._sessions:
-            del self._sessions[name]
+        if self._sessions is not None:
+            self._sessions.pop(name, None)
         self.history.log_event(name, "session_terminated", {"reason": "pruned"})
+        return True
 
     def sync_sessions(self):
         if self._sessions is not None:
@@ -295,7 +313,7 @@ class State:
         pruned = 0
         for name, s in list(self._sessions.items()):
             if s.endpoint not in active_endpoints:
-                self.prune_session(name)
+                self.prune_session(name, confirmed_absent=True)
                 pruned += 1
 
         if pruned > 0:

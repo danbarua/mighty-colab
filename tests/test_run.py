@@ -532,7 +532,11 @@ def test_run_unassign_called_on_exception_during_execute(
     mock_client.unassign.assert_called_once_with("ep-123")
 
 
-def test_run_preflight_lost_session_prunes(
+@pytest.mark.parametrize(
+    ("pruned", "expected_message"),
+    [(True, "appears to be lost"), (False, "local binding retained")],
+)
+def test_run_preflight_terminal_error_reports_binding_state(
     mock_client,
     mock_store,
     mock_runtime_class,
@@ -540,24 +544,43 @@ def test_run_preflight_lost_session_prunes(
     assign_response,
     script_path,
     mock_common_state,
+    pruned,
+    expected_message,
 ):
-    """A 404/401 during the `/content` preflight call means the session is
-    gone server-side -- `run` must prune local state and exit 1 with a
-    clean message, not a raw traceback. Parity with
-    `test_cli_exec_lost_session_prunes` in test_exec.py (untested for `run`
-    until now)."""
+    """A proxy 404/401 reports whether server confirmation removed the binding."""
     mock_client.assign.return_value = assign_response
     mock_runtime = mock_runtime_class.return_value
     mock_runtime.execute_code.side_effect = Exception("404 Not Found")
 
     persisted = {}
-    mock_store.add.side_effect = lambda s: persisted.setdefault("s", s)
+    mock_store.add.side_effect = lambda s: persisted.__setitem__("s", s)
     mock_store.get.side_effect = lambda name: persisted.get("s")
+    refreshed = []
 
-    result = runner.invoke(app, ["run", str(script_path)])
+    def reconcile(name):
+        current = persisted["s"]
+        if pruned:
+            persisted.pop("s")
+        else:
+            fresh = current.model_copy(
+                update={"token": "fresh-token", "url": "https://fresh"}
+            )
+            persisted["s"] = fresh
+            refreshed.append(fresh)
+        return pruned
+
+    mock_common_state.prune_session.side_effect = reconcile
+
+    result = runner.invoke(app, ["run", "--keep", str(script_path)])
     assert result.exit_code == 1
-    assert "appears to be lost" in result.stderr
+    assert expected_message in result.stderr
     mock_common_state.prune_session.assert_called_once()
+    if pruned:
+        assert "s" not in persisted
+    else:
+        assert persisted["s"] is refreshed[0]
+        assert persisted["s"].token == "fresh-token"
+        assert persisted["s"].running is None
 
 
 # ---------------------------------------------------------------------------

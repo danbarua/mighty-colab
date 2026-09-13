@@ -18,9 +18,12 @@ import sys
 import termios
 from unittest.mock import MagicMock, patch
 
+import pytest
+import typer
+
+from colab_cli.commands.execution import console as console_command
 from colab_cli.console import connect_console, on_message, on_open
 from colab_cli.state import SessionState
-import pytest
 
 
 @pytest.fixture
@@ -220,3 +223,40 @@ def test_read_stdin_eof_tty_does_not_close_ws(
     sent_payloads = [json.loads(c.args[0]) for c in mock_ws.send.call_args_list]
     assert {"data": "exit\n"} not in sent_payloads
     mock_ws.close.assert_not_called()
+
+
+@pytest.mark.parametrize("pruned", [True, False])
+def test_console_terminal_error_preserves_reconciled_store_state(
+    mock_common_state, mocker, pruned
+):
+    stale = SessionState(
+        name="live", token="expired", url="https://old", endpoint="endpoint-1"
+    )
+    fresh = stale.model_copy(update={"token": "fresh", "url": "https://fresh"})
+    persisted = {"live": stale}
+    mock_common_state.resolve_session.return_value = "live"
+    mock_common_state.store.get.side_effect = lambda name: persisted.get(name)
+    mock_common_state.store.add.side_effect = lambda s: persisted.__setitem__(s.name, s)
+
+    def reconcile(name):
+        if pruned:
+            persisted.pop(name)
+        else:
+            persisted[name] = fresh
+        return pruned
+
+    mock_common_state.prune_session.side_effect = reconcile
+    mocker.patch(
+        "colab_cli.commands.execution.connect_console",
+        side_effect=Exception("401 Unauthorized"),
+    )
+
+    with pytest.raises(typer.Exit):
+        console_command("live")
+
+    if pruned:
+        assert "live" not in persisted
+    else:
+        assert persisted["live"] is fresh
+        assert persisted["live"].token == "fresh"
+        assert persisted["live"].running is None
