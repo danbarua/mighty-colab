@@ -31,6 +31,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, mock_open, patch
 
 import pytest
+import requests
 
 from colab_cli.auto_update import get_app_version
 from colab_cli.job.models import (
@@ -492,6 +493,19 @@ def test_provision_walks_the_preference_list_in_order(tmp_path):
     assert orch.env.actual_accelerator == "T4"
     assert orch.env.requested_accelerator == "T4"
     assert client.assign.call_count == 2
+
+
+def test_provision_timeout_is_retryable_without_claiming_session_loss(tmp_path):
+    client = MagicMock()
+    client.assign.side_effect = requests.exceptions.ReadTimeout("stalled assign")
+    spec = _spec(accelerator=Accelerator(prefer=["T4"], accept_cpu=False))
+    orch = _orch(tmp_path, spec=spec, client=client)
+
+    with pytest.raises(PhaseError) as exc:
+        orch.provision()
+
+    assert exc.value.retry_class is RetryClass.RETRY_DIFFERENT
+    assert orch.env.endpoint is None
 
 
 def test_provision_starts_keep_alive_after_persisting_the_session(
