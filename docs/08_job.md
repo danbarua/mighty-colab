@@ -25,6 +25,7 @@ log:
 2026-09-11: Fixed [#21](https://github.com/danbarua/mighty-colab/issues/21): data GET and artifact PUT stream while hashing; plan rejects per-file source over 250 MB before assignment and reports aggregate source size; verify reports source/input/output/free totals.
 
 
+2026-09-12: Fixed [#24](https://github.com/danbarua/mighty-colab/issues/24): job help names all five commands; expected file/plan/not-found errors emit validated JSON; outer status and exit_code match the command process status while nested job state retains the workload verdict.
 
 
 ---
@@ -218,6 +219,8 @@ ok = workload == succeeded
 ```
 
 Therefore `ok` can be true while `done` is still false; consumers must poll `done` before interpreting `ok`. `left_up` counts as `ok` but still bills. `cleanup: failed` means release was not confirmed and the endpoint may still bill.
+
+The outer JSON `status` and `exit_code` describe the CLI invocation. Job state remains nested: a successful `job status` query that reports a failed workload exits zero with outer `status: ok` and nested `ok: false`, while `job apply` exits one when the workload or cleanup it performed fails. Expected preflight and not-found errors emit one validated base envelope with an actionable message.
 
 `not_required` means the spec declared no artifacts. `skipped` is a terminal schema value but the current runner normally attempts declared artifacts even after failure. Per-artifact results are preserved; any recorded upload failure currently makes scalar offload fail, including a failed optional upload.
 
@@ -445,4 +448,3 @@ These are current implementation limits, not hypothetical polish:
 - **Crash recovery:** there is still a short window between `assign` returning and the first envelope persist. Apply's own poll loop does not classify a dead remote runner from `launch.json`; `status --poll` does.
 - **Signed secrets:** generated specs, plans, manifests, envelopes, events, diagnostics, and kernel launch history contain query-free URL identities and opaque credential references only. Caller-owned source specs and generated owner-mode `.mighty-colab-secrets.json` sidecars still contain full URLs and require credential handling.
 - **Declared but inactive controls:** planning rejects non-default retry/recreate/resume settings, `control.log`, and `on_run_fail: skip`.
-- **CLI/JSON consistency:** the job-group help summary omits `list`. Some early file/plan read failures still emit stderr rather than a JSON envelope. A failed apply can exit the process with status 1 while its outer JSON wrapper says `exit_code: 0`.

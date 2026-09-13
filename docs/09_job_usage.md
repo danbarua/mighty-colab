@@ -19,6 +19,7 @@ log:
 2026-09-11: Fixed [#21](https://github.com/danbarua/mighty-colab/issues/21): transfers stream while hashing; oversized source fails at plan/apply before assignment; verify reports source/input/output/free totals.
 
 
+2026-09-12: Fixed [#24](https://github.com/danbarua/mighty-colab/issues/24): help, expected-error JSON, process exit codes, and outer envelope fields now agree; nested workload state remains distinct from CLI query success.
 
 2026-09-11: Fixed and live-verified [#17](https://github.com/danbarua/mighty-colab/issues/17): `job apply` starts and owns the TFE keep-alive daemon; destroy/cleanup stop it except on deliberate leave-up.
 
@@ -67,7 +68,7 @@ mighty-colab job list
 
 `apply` accepts either a plan-file positional argument or `--job-id`. `--timeout` bounds the local supervisor, not the watchdog wall clock. `--leave-up` keeps the VM after completion. `destroy --cancel-only` writes cancellation intent that runner and watchdog consume, but deliberately does not unassign the VM; failure to write the intent is an error. `list` reads local job records.
 
-Under `--json`, normal command results use validated envelopes. Job state is nested under `.job` and the convenience `.done`/`.ok` fields are also copied to the outer wrapper. Some early unreadable-file paths still emit stderr only. A failed `apply` currently exits the process with status 1 while its outer JSON field remains `exit_code: 0`; use the process status and nested job state, not that outer field, for the workload verdict.
+Under `--json`, every job command emits a validated envelope for normal results and expected errors. Job state is nested under `.job` and the convenience `.done`/`.ok` fields are copied to the outer wrapper. Outer `status` and `exit_code` describe the CLI invocation; nested job fields describe the workload. Thus a failed apply exits one with outer `exit_code: 1`, while a successful status query reporting that failed workload exits zero with outer `status: ok` and nested `ok: false`.
 
 ### Chaining them from a script
 
@@ -285,7 +286,7 @@ Closing the laptop after the launch RPC normally leaves the detached consumer ru
 mighty-colab job status <id> --poll
 ```
 
-This command observes the remote `result.json`. It stops when that file appears and absorbs phase, workload, exit/signal/exception, artifact, and offload state. It does **not** perform cleanup, so the returned envelope can remain `done: false`. A dead local supervisor PID is marked `interrupted`, but the command does not guarantee `cleanup: left_up` or classify a dead runner from `launch.json` identity.
+This command observes remote result, launch, and watchdog records. With `--poll` it continues until a remote verdict, a dead runner, a lost assignment, or a never-started orphan can be classified. For an orphaned supervisor it then finishes pending cleanup; a live runner or a healthy concurrent supervisor remains untouched. The returned envelope can therefore still have `done: false` when the job is legitimately running.
 
 After an interrupted apply, run `status --poll`; it uses the control-result GET fallback when the VM result is unavailable. Then inspect the account and destroy the allocation explicitly.
 
@@ -309,6 +310,5 @@ Be aware of these before trusting a long run:
 - No GPU run has yet outlived the approximately 60-minute proxy refresh boundary.
 - Caller-owned source specs and generated `.mighty-colab-secrets.json` sidecars still contain full signed URLs and require credential handling.
 - Retry/recreate/resume and `control.log` are not implemented; planning rejects non-default policy values.
-- Job-group help omits `list`, and some early `--json` errors and failed-apply outer exit fields are inconsistent with actual behavior.
 
 Verified live on 2026-09-11: CPU and T4 GPU runs end to end; install/restart/verify with a real dependency pin; the workload failure path with cleanup; proxy access recovery after the approximately 60-minute failure; explicit public launch-kernel restart while a detached consumer continued; cancel-only termination while the assignment remained live, followed by full teardown; signed GCS data GET, artifact PUT, and control-result PUT; job-owned TFE keep-alive through idle leave-up and destroy; and supervisor crash recovery via `status --poll` after killing apply during run. These runs do not verify platform-initiated kernel replacement or the gaps above.

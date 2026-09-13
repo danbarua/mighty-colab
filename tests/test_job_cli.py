@@ -1710,3 +1710,146 @@ def test_status_poll_finishes_cleanup_after_the_result_arrives(
     assert env.exit_code == 1
     assert env.cleanup is Cleanup.RELEASED
     mock_common_state.client.unassign.assert_called_once_with("m-s-endpoint")
+
+
+def _job_json(result):
+    return json.loads(_clean(result.output).strip().splitlines()[-1])
+
+
+def test_job_help_summary_names_every_subcommand():
+    result = runner.invoke(app, ["job", "--help"], env={"COLUMNS": "200"})
+
+    assert result.exit_code == 0
+    assert "plan, apply, status, destroy, list" in _clean(result.output)
+
+
+@pytest.mark.parametrize(
+    ("args", "command"),
+    [
+        (["job", "plan", "missing.yaml"], "job plan"),
+        (["job", "apply", "missing-plan.json"], "job apply"),
+        (["job", "status", "missing-job"], "job status"),
+    ],
+)
+def test_expected_job_errors_emit_valid_json(args, command, mock_common_state):
+    _json_mode(mock_common_state)
+
+    result = runner.invoke(app, args)
+
+    payload = _job_json(result)
+    assert result.exit_code == 1
+    assert payload["command"] == command
+    assert payload["status"] == "error"
+    assert payload["exit_code"] == 1
+    assert payload["message"]
+
+
+def test_destroy_missing_job_json_is_a_successful_noop(mock_common_state):
+    _json_mode(mock_common_state)
+
+    result = runner.invoke(app, ["job", "destroy", "missing-job"])
+
+    payload = _job_json(result)
+    assert result.exit_code == 0
+    assert payload["command"] == "job destroy"
+    assert payload["status"] == "ok"
+    assert payload["exit_code"] == 0
+
+
+def test_failed_apply_json_matches_process_status(
+    tmp_path, monkeypatch, mock_common_state
+):
+    from colab_cli.job.orchestrator import Orchestrator, PhaseError
+
+    plan_file = _locked_plan(tmp_path, "json-failed")
+    _json_mode(mock_common_state)
+
+    def fail_provision(_self):
+        raise PhaseError(Phase.PROVISION, "assignment rejected", RetryClass.RETRY_SAME)
+
+    monkeypatch.setattr(Orchestrator, "provision", fail_provision)
+
+    result = runner.invoke(app, ["job", "apply", str(plan_file)])
+
+    payload = _job_json(result)
+    assert result.exit_code == 1
+    assert payload["status"] == "error"
+    assert payload["exit_code"] == 1
+    assert payload["job"]["workload"] == "failed"
+    assert payload["ok"] is False
+
+
+def test_status_json_keeps_query_success_distinct_from_failed_workload(
+    mock_common_state,
+):
+    from colab_cli.commands.job import _store
+    from colab_cli.job.models import Cleanup, JobEnvelope, Supervisor
+
+    _store().write_envelope(
+        JobEnvelope(
+            job_id="failed-job",
+            workload=Workload.FAILED,
+            offload=Offload.NOT_REQUIRED,
+            cleanup=Cleanup.RELEASED,
+            supervisor=Supervisor.FINISHED,
+            exit_code=1,
+        )
+    )
+    _json_mode(mock_common_state)
+
+    result = runner.invoke(app, ["job", "status", "failed-job"])
+
+    payload = _job_json(result)
+    assert result.exit_code == 0
+    assert payload["status"] == "ok"
+    assert payload["exit_code"] == 0
+    assert payload["job"]["exit_code"] == 1
+    assert payload["ok"] is False
+
+
+def test_destroy_cleanup_failure_json_matches_process_status(mock_common_state):
+    from colab_cli.commands.job import _store
+    from colab_cli.job.models import Cleanup, JobEnvelope, Supervisor
+
+    _store().write_envelope(
+        JobEnvelope(
+            job_id="cleanup-failed",
+            endpoint="m-endpoint",
+            workload=Workload.SUCCEEDED,
+            offload=Offload.NOT_REQUIRED,
+            cleanup=Cleanup.PENDING,
+            supervisor=Supervisor.FINISHED,
+            exit_code=0,
+        )
+    )
+    mock_common_state.client.unassign.side_effect = RuntimeError("backend unavailable")
+    _json_mode(mock_common_state)
+
+    result = runner.invoke(app, ["job", "destroy", "cleanup-failed"])
+
+    payload = _job_json(result)
+    assert result.exit_code == 1
+    assert payload["status"] == "error"
+    assert payload["exit_code"] == 1
+    assert payload["job"]["cleanup"] == "failed"
+
+
+def test_list_and_nonterminal_status_json_are_query_successes(mock_common_state):
+    from colab_cli.commands.job import _store
+    from colab_cli.job.models import JobEnvelope
+
+    _store().write_envelope(JobEnvelope(job_id="still-running"))
+    _json_mode(mock_common_state)
+
+    listed = runner.invoke(app, ["job", "list"])
+    status_result = runner.invoke(app, ["job", "status", "still-running"])
+
+    list_payload = _job_json(listed)
+    status_payload = _job_json(status_result)
+    assert listed.exit_code == 0
+    assert list_payload["command"] == "job list"
+    assert list_payload["jobs"][0]["job_id"] == "still-running"
+    assert status_result.exit_code == 0
+    assert status_payload["command"] == "job status"
+    assert status_payload["status"] == "ok"
+    assert status_payload["done"] is False

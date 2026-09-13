@@ -80,6 +80,10 @@ below corresponds to a tag of the same name.
   assignment and warns on large aggregate payloads. Verify reports source,
   input, output, and free-space totals.
 
+- **Job CLI JSON could contradict the process result.** Job help now names all
+  five subcommands. Expected file, plan, and not-found errors emit validated
+  envelopes. Apply and destroy outer exit fields match their process status,
+  while status query success remains distinct from the nested workload verdict.
 - **`job` sessions did not retain the kernel that launched their detached
   runner.** The session record now persists the runtime's kernel and Jupyter
   session identifiers, so public `restart-kernel -s job-<id>` targets the
