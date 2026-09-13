@@ -400,6 +400,7 @@ def test_run_json_preflight_session_lost_emits_error_envelope(
     assert envelope["reason"] == "session_lost"
     assert envelope["exit_code"] == 1
 
+
 def test_run_json_preflight_access_failure_retains_binding(
     mock_client,
     mock_store,
@@ -408,6 +409,7 @@ def test_run_json_preflight_access_failure_retains_binding(
     mock_common_state,
     assign_response,
     script_path,
+    _persisted_store,
 ):
     mock_common_state.json_output = True
     mock_common_state.prune_session.return_value = False
@@ -416,7 +418,7 @@ def test_run_json_preflight_access_failure_retains_binding(
         "401 Unauthorized"
     )
 
-    result = runner.invoke(app, ["run", str(script_path)])
+    result = runner.invoke(app, ["run", "--keep", str(script_path)])
 
     assert result.exit_code != 0
     envelope = json.loads(result.stdout)
@@ -424,6 +426,9 @@ def test_run_json_preflight_access_failure_retains_binding(
     assert envelope["reason"] == "session_access_failed"
     assert envelope["exit_code"] == 1
     assert "local binding retained" in result.stderr
+    assert "s" in _persisted_store
+
+
 def test_run_json_preflight_session_lost_includes_http_status(
     mock_client,
     mock_store,
