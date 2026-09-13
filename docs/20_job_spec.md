@@ -93,7 +93,7 @@ Accepted accelerator names: `T4`, `L4`, `G4`, `H100`, `A100`, `v5e1`, `v6e1`.
 
 Relative `data[].dest` and `artifacts[].path` values resolve under `/content/jobs/<id>`. Absolute paths must stay under `/content`. Do not target `mighty_runtime` or supervisor files such as `result.json`.
 
-`data[].sha256` and artifact hashes, when present, must be exactly 64 hexadecimal characters.
+`data[].sha256`, when present, must be exactly 64 hexadecimal characters.
 
 ## Everyday specs
 
@@ -273,7 +273,7 @@ Work through this list when plan exits non-zero.
 9. Data objects exist and accept a GET-signed ranged read, unless `--no-probe`.
 10. Signed expiry covers the budgets plus 15 minutes.
 11. GCS control PUT and GET name one object.
-12. No source file exceeds 250 MB. Move large files to `data[]`.
+12. A source file over 250 MB is a plan error. A source tree whose total size exceeds 250 MB is a plan warning. Move large files to `data[]`.
 13. `data[].dest` and `artifacts[].path` stay under `/content` and do not collide.
 14. Missing `size_bytes` on data or artifacts is a warning. Set `ignore_warnings: true` only if you accept that gap.
 
@@ -294,7 +294,7 @@ mighty-colab sessions
 
 Limits that still apply:
 
-- No GPU run has completed through the approximately 60-minute proxy refresh.
+- No GPU run completed through the approximately 60-minute proxy refresh.
 - Retry, resume, and `control.log` are not implemented.
 - Caller-owned specs and secret sidecars still contain full signed URLs.
 - After launch, a dropped laptop session does not kill the consumer. `job status --poll` recovers an orphaned supervisor. It does not implement full supervisor takeover.
