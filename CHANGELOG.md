@@ -102,6 +102,7 @@ below corresponds to a tag of the same name.
   paths without changing the remote workload verdict.
 
 ### Added
+- **`sync`:** new gzip-first file and directory transfer command. Default mode snapshots the selected tree privately with `O_NOFOLLOW` before tar and omits `.git`; `--git-aware` sends a shallow, blob-filtered sparse repository plus selected tracked and non-ignored worktree changes, preserving offline `HEAD` and scoped status without shipping unrelated blobs.
 
 - **Live cancel-only coverage** in `integration/repro_job_cancel_only/`: a
   running CPU workload reaches `cancelled` while its assignment remains live,

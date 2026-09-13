@@ -1,5 +1,6 @@
 ---
 log:
+2026-09-13: Added [`docs/20_job_spec.md`](20_job_spec.md): field list, everyday examples, plan refusals, and signed-URL prerequisites for a cold start.
 2026-09-13: Fixed keep-alive health persistence for job provision as part of [#10](https://github.com/danbarua/mighty-colab/issues/10): a tolerated pre-flight failure initializes the consecutive-failure count, while success records the ping and resets it. The shared session `status`/`sessions` views derive health and retention risk from that state without claiming a server reclamation deadline.
 
 2026-09-13: Fixed [#33](https://github.com/danbarua/mighty-colab/issues/33): job provision and teardown can no longer wait forever in assignment control-plane HTTP. Both phases of `assign` and `unassign` use `(10, 30)` second connect/read deadlines. An exhausted provision timeout remains a retryable provision failure without claiming `session_lost`; an exhausted teardown retains the endpoint and records `cleanup=failed` so the possible billable assignment stays actionable. Client timeout propagation and orchestrator classification have known-answer tests; live ADC CPU assignment and teardown both completed successfully.
@@ -36,7 +37,7 @@ log:
 
 # Design: `job` — Agent job supervisor
 
-**Implemented and live-verified in the paths identified below** (2026-09-11). `mighty-colab job plan|apply|status|destroy|list` ships in `src/colab_cli/job/`; usage lives in `docs/09_job_usage.md`. This document describes the current implementation and names its gaps. Long-run evidence proves that the VM, assignment, and files survived the first Contents failure at about one hour; `JobTransport` refreshing assignment metadata restored access. The probe did not distinguish bearer-token expiry from proxy endpoint rebinding. A multi-hour GPU job through that refresh remains untested. Job provision now owns the TFE keep-alive daemon used by `colab new`.
+**Implemented and live-verified in the paths identified below** (2026-09-11). `mighty-colab job plan|apply|status|destroy|list` ships in `src/colab_cli/job/`. Spec files are documented in `docs/20_job_spec.md`. Usage lives in `docs/09_job_usage.md`. This document describes the current implementation and names its gaps. Long-run evidence proves that the VM, assignment, and files survived the first Contents failure at about one hour; `JobTransport` refreshing assignment metadata restored access. The probe did not distinguish bearer-token expiry from proxy endpoint rebinding. A multi-hour GPU job through that refresh remains untested. Job provision now owns the TFE keep-alive daemon used by `colab new`.
 
 `run` stays the shebang (`new` + text-into-kernel + `stop`). `job` is the unit of work an unattended agent actually has: code, deps, data, artifacts, accelerator policy, two clocks, teardown.
 

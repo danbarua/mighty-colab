@@ -1,5 +1,6 @@
 ---
 log:
+2026-09-13: Pointed spec authors to `docs/20_job_spec.md` for the field list, signed-URL prerequisites, and everyday examples.
 2026-09-11: First version. Usage guide for `mighty-colab job`, written for an agent (or a human) running real science unattended. Design rationale lives in `docs/08_job.md`; this file is how to drive it.
 2026-09-11: Added the GCS `control.result` signing sequence after live testing exposed two requirements: pre-create the object before signing GET, and pass the signed PUT through to the remote runner. The repaired path overwrote the placeholder with a terminal result; nested job envelopes now identify their creating CLI version. Signed GCS data input and artifact output were also verified live.
 2026-09-11: Live-verified the detached boundary with `integration/repro_job_kernel_restart/`. Job sessions now retain their launch kernel identity, public `restart-kernel` targets it, the consumer survives with unchanged process identity and continued progress, and apply closes its local kernel client before returning.
@@ -101,6 +102,8 @@ mighty-colab --json job status "$JID" | jq -e .ok >/dev/null && evaluate.py
 ```
 
 ## A minimal spec
+
+The full field list, plan refusals, and signed-URL steps are in `docs/20_job_spec.md`.
 
 ```yaml
 name: my-experiment
