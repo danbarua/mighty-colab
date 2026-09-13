@@ -507,6 +507,7 @@ def test_provision_timeout_is_retryable_without_claiming_session_loss(tmp_path):
     assert exc.value.retry_class is RetryClass.RETRY_DIFFERENT
     assert orch.env.endpoint is None
 
+
 def test_provision_starts_keep_alive_after_persisting_the_session(
     tmp_path, keep_alive_spawn
 ):

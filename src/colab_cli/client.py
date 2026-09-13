@@ -48,7 +48,6 @@ KEEP_ALIVE_TIMEOUT = 10
 ASSIGNMENT_REQUEST_TIMEOUT = (10.0, 30.0)
 
 
-
 @dataclass
 class ColabEnvironment(abc.ABC):
     domain: str

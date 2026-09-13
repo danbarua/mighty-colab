@@ -111,6 +111,7 @@ def test_client_unassign(client, mock_session):
     )
     assert "unassign/my_endpoint" in last_call_args.args[1]
 
+
 def test_client_assign_existing(client, mock_session):
     # Mock _get_assignment (GET) returning existing Assignment
     get_resp = MagicMock()
@@ -281,7 +282,6 @@ def test_client_keep_alive_assignment_treats_read_timeout_as_success(
     VM that may not respond — so the request commonly read-times-out even
     though the keep-alive succeeded. A ReadTimeout must NOT propagate as an
     error (otherwise the daemon would log spurious keep_alive_error events)."""
-
 
     mock_session.request.side_effect = requests.exceptions.ReadTimeout("timed out")
 
