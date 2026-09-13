@@ -395,7 +395,27 @@ def _verify_opened_entry(
         raise RuntimeError(f"Local path changed while sync was snapshotting: {name}")
 
 
-def _copy_snapshot_directory(source_fd: int, target: Path, *, exclude_git: bool) -> None:
+def _lexical_relative_to_root(
+    link_parent: Path, link_target: str, root: Path
+) -> Path:
+    if os.path.isabs(link_target):
+        raise ValueError(f"Symlink '{link_parent}' escapes the payload")
+    lexical = Path(os.path.normpath(os.path.join(os.fspath(link_parent), link_target)))
+    try:
+        return lexical.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(f"Symlink '{link_parent}' escapes the payload") from exc
+
+
+def _copy_snapshot_directory(
+    source_fd: int,
+    target: Path,
+    *,
+    source_dir: Path,
+    source_root: Path,
+    payload_root: Path,
+    exclude_git: bool,
+) -> None:
     for name in os.listdir(source_fd):
         if exclude_git and name == ".git":
             continue
@@ -405,7 +425,12 @@ def _copy_snapshot_directory(source_fd: int, target: Path, *, exclude_git: bool)
             link_target = os.readlink(name, dir_fd=source_fd)
             verified = os.stat(name, dir_fd=source_fd, follow_symlinks=False)
             _verify_opened_entry(name, listed, verified)
-            destination.symlink_to(link_target)
+            relative = _lexical_relative_to_root(
+                source_dir, link_target, source_root
+            )
+            destination.symlink_to(
+                os.path.relpath(payload_root / relative, destination.parent)
+            )
         elif stat.S_ISDIR(listed.st_mode):
             child_fd = os.open(
                 name,
@@ -416,7 +441,12 @@ def _copy_snapshot_directory(source_fd: int, target: Path, *, exclude_git: bool)
                 _verify_opened_entry(name, listed, os.fstat(child_fd))
                 destination.mkdir(mode=0o700)
                 _copy_snapshot_directory(
-                    child_fd, destination, exclude_git=exclude_git
+                    child_fd,
+                    destination,
+                    source_dir=source_dir / name,
+                    source_root=source_root,
+                    payload_root=payload_root,
+                    exclude_git=exclude_git,
                 )
             finally:
                 os.close(child_fd)
@@ -433,6 +463,7 @@ def _copy_snapshot_directory(source_fd: int, target: Path, *, exclude_git: bool)
         else:
             raise ValueError(f"Unsupported local file type in sync payload: {name}")
 
+
 def _copy_payload_snapshot(source: Path, target: Path, *, exclude_git: bool) -> None:
     listed = os.stat(source, follow_symlinks=False)
     if stat.S_ISDIR(listed.st_mode):
@@ -442,7 +473,14 @@ def _copy_payload_snapshot(source: Path, target: Path, *, exclude_git: bool) -> 
         try:
             _verify_opened_entry(str(source), listed, os.fstat(source_fd))
             target.mkdir(mode=0o700)
-            _copy_snapshot_directory(source_fd, target, exclude_git=exclude_git)
+            _copy_snapshot_directory(
+                source_fd,
+                target,
+                source_dir=source,
+                source_root=source,
+                payload_root=target,
+                exclude_git=exclude_git,
+            )
         finally:
             os.close(source_fd)
         _copy_snapshot_metadata(target, listed)
@@ -475,31 +513,22 @@ def _create_sync_archive(
         payload = Path(temp_dir, "payload")
         if git_aware:
             git_commit = _create_git_payload(source, payload)
-            resolve_root = payload
         else:
-            _validate_payload_symlinks(source, exclude_git=True)
             _copy_payload_snapshot(source, payload, exclude_git=True)
-            resolve_root = source
+            _validate_payload_symlinks(payload, exclude_git=False)
         source_bytes = _tree_size(payload, exclude_git=False)
         archive_source = payload
-        archive_root = resolve_root.resolve()
+        archive_root = payload.resolve()
 
         def archive_filter(member: tarfile.TarInfo) -> Optional[tarfile.TarInfo]:
             if member.issym():
                 member_path = Path(member.name)
                 relative = member_path.relative_to("payload")
-                resolved_target = (
-                    (resolve_root / relative).parent
-                    / os.readlink(archive_source / relative)
-                ).resolve(strict=False)
-                try:
-                    target_in_payload = Path("payload") / resolved_target.relative_to(
-                        archive_root
-                    )
-                except ValueError as exc:
-                    raise ValueError(
-                        f"Symlink '{archive_source / relative}' escapes the payload"
-                    ) from exc
+                target_in_payload = Path("payload") / _lexical_relative_to_root(
+                    archive_root / relative.parent,
+                    os.readlink(archive_source / relative),
+                    archive_root,
+                )
                 member.linkname = os.path.relpath(
                     target_in_payload, member_path.parent
                 )

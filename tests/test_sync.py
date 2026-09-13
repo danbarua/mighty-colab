@@ -831,6 +831,37 @@ def test_default_sync_snapshots_before_tar_walk(tmp_path, monkeypatch):
     assert (extracted / "payload" / "victim.txt").read_text() == "original\n"
 
 
+def test_default_sync_canonicalizes_symlinks_before_tar(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    source.mkdir()
+    target = source / "target.txt"
+    target.write_text("original\n")
+    (source / "link.txt").symlink_to("../source/target.txt")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret\n")
+    original_gettarinfo = tarfile.TarFile.gettarinfo
+
+    def swap_live_target_during_tar(archive, name=None, arcname=None, fileobj=None):
+        info = original_gettarinfo(archive, name, arcname, fileobj)
+        if target.exists() and not target.is_symlink():
+            target.unlink()
+            target.symlink_to(outside)
+        return info
+
+    monkeypatch.setattr(tarfile.TarFile, "gettarinfo", swap_live_target_during_tar)
+    archive = tmp_path / "canonical.tar.gz"
+    _create_sync_archive(source, archive, git_aware=False)
+
+    extracted = tmp_path / "canonical"
+    extracted.mkdir()
+    with tarfile.open(archive, "r:gz") as payload:
+        payload.extractall(extracted, filter="data")
+    synced = extracted / "payload"
+    assert (synced / "target.txt").read_text() == "original\n"
+    assert (synced / "link.txt").is_symlink()
+    assert (synced / "link.txt").read_text() == "original\n"
+
+
 def test_sync_extract_fails_if_pinned_parent_moves_outside_content(
     tmp_path, monkeypatch
 ):
