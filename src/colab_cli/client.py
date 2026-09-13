@@ -43,6 +43,11 @@ COLAB_TUNNEL_HEADER = {"key": "X-Colab-Tunnel", "value": "Google"}
 # responsive on its 60s cadence.
 KEEP_ALIVE_TIMEOUT = 10
 
+# Connect and read deadlines for assignment control-plane requests. Keep this
+# scoped to assign/list/unassign rather than changing unrelated endpoints.
+ASSIGNMENT_REQUEST_TIMEOUT = (10.0, 30.0)
+
+
 
 @dataclass
 class ColabEnvironment(abc.ABC):
@@ -272,7 +277,8 @@ class Client:
         return TypeAdapter(schema).validate_python(json.loads(body))
 
     def list_assignments(
-        self, timeout: tuple[float, float] | float | None = (10.0, 30.0)
+        self,
+        timeout: tuple[float, float] | float | None = ASSIGNMENT_REQUEST_TIMEOUT,
     ) -> List[ListedAssignment]:
         url = urljoin(self.colab_domain, f"{TUN_ENDPOINT}/assignments")
         kwargs = {}
@@ -283,10 +289,16 @@ class Client:
 
     def unassign(self, endpoint: str):
         url = urljoin(self.colab_domain, f"{TUN_ENDPOINT}/unassign/{endpoint}")
-        resp = self._issue_request(url, schema=GetUnassignRequest)
+        resp = self._issue_request(
+            url, schema=GetUnassignRequest, timeout=ASSIGNMENT_REQUEST_TIMEOUT
+        )
         headers = {COLAB_XSRF_TOKEN_HEADER["key"]: resp.token}
         return self._issue_request(
-            url, method="POST", headers=headers, schema=BaseModel
+            url,
+            method="POST",
+            headers=headers,
+            schema=BaseModel,
+            timeout=ASSIGNMENT_REQUEST_TIMEOUT,
         )
 
     def assign(
@@ -341,7 +353,11 @@ class Client:
         shape: Optional[Shape] = None,
     ) -> Union[GetAssignmentResponse, Assignment]:
         url = self._build_assign_url(notebook_hash, variant, accelerator, shape)
-        return self._issue_request(url, schema=Union[GetAssignmentResponse, Assignment])
+        return self._issue_request(
+            url,
+            schema=Union[GetAssignmentResponse, Assignment],
+            timeout=ASSIGNMENT_REQUEST_TIMEOUT,
+        )
 
     def _post_assignment(
         self,
@@ -354,7 +370,11 @@ class Client:
         url = self._build_assign_url(notebook_hash, variant, accelerator, shape)
         headers = {COLAB_XSRF_TOKEN_HEADER["key"]: xsrf_token}
         return self._issue_request(
-            url, method="POST", headers=headers, schema=PostAssignmentResponse
+            url,
+            method="POST",
+            headers=headers,
+            schema=PostAssignmentResponse,
+            timeout=ASSIGNMENT_REQUEST_TIMEOUT,
         )
 
     def keep_alive_assignment(self, endpoint: str):

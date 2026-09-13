@@ -12,16 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import uuid
 import json
-import pytest
 from unittest.mock import MagicMock
+import uuid
+
+import pytest
+import requests
+
 from colab_cli.client import (
-    Client,
-    Prod,
-    PostAssignmentResponse,
-    Assignment,
+    ASSIGNMENT_REQUEST_TIMEOUT,
     Accelerator,
+    Assignment,
+    Client,
+    PostAssignmentResponse,
+    Prod,
     Shape,
     Variant,
     resolve_assign_shape,
@@ -72,6 +76,10 @@ def test_client_assign_new(client, mock_session):
 
     # Check POST request headers for XSRF token
     assert mock_session.request.call_count == 2
+    assert all(
+        call.kwargs["timeout"] == ASSIGNMENT_REQUEST_TIMEOUT
+        for call in mock_session.request.call_args_list
+    )
     last_call_args = mock_session.request.call_args_list[1]
     assert last_call_args.kwargs["headers"]["X-Goog-Colab-Token"] == "xsrf_token"
 
@@ -92,12 +100,16 @@ def test_client_unassign(client, mock_session):
     client.unassign("my_endpoint")
 
     assert mock_session.request.call_count == 2
+    assert all(
+        call.kwargs["timeout"] == ASSIGNMENT_REQUEST_TIMEOUT
+        for call in mock_session.request.call_args_list
+    )
     last_call_args = mock_session.request.call_args_list[1]
     assert (
-        last_call_args.kwargs["headers"]["X-Goog-Colab-Token"] == "unassign_xsrf_token"
+        last_call_args.kwargs["headers"]["X-Goog-Colab-Token"]
+        == "unassign_xsrf_token"
     )
     assert "unassign/my_endpoint" in last_call_args.args[1]
-
 
 def test_client_assign_existing(client, mock_session):
     # Mock _get_assignment (GET) returning existing Assignment
@@ -121,6 +133,7 @@ def test_client_assign_existing(client, mock_session):
     assert isinstance(res, Assignment)
     assert res.endpoint == "existing_endpoint"
     assert mock_session.request.call_count == 1
+    assert mock_session.request.call_args.kwargs["timeout"] == ASSIGNMENT_REQUEST_TIMEOUT
 
 
 def test_client_list_assignments(client, mock_session):
@@ -153,8 +166,54 @@ def test_client_list_assignments(client, mock_session):
     assert len(res) == 1
     assert res[0].endpoint == "e1"
     assert "tun/m/assignments" in mock_session.request.call_args.args[1]
-    assert mock_session.request.call_args.kwargs["timeout"] == (10.0, 30.0)
+    assert (
+        mock_session.request.call_args.kwargs["timeout"]
+        == ASSIGNMENT_REQUEST_TIMEOUT
+    )
 
+
+def test_client_assign_post_timeout_propagates_after_bounded_request(
+    client, mock_session
+):
+    get_resp = MagicMock()
+    get_resp.ok = True
+    get_resp.text = ")]}'\n" + json.dumps(
+        {"acc": "NONE", "nbh": "some_nbh", "token": "xsrf_token", "variant": "DEFAULT"}
+    )
+    mock_session.request.side_effect = [
+        get_resp,
+        requests.exceptions.ReadTimeout("stalled assignment POST"),
+    ]
+
+    with pytest.raises(requests.exceptions.ReadTimeout, match="stalled assignment POST"):
+        client.assign(uuid.uuid4())
+
+    assert mock_session.request.call_count == 2
+    assert all(
+        call.kwargs["timeout"] == ASSIGNMENT_REQUEST_TIMEOUT
+        for call in mock_session.request.call_args_list
+    )
+
+
+def test_client_unassign_post_timeout_propagates_after_bounded_request(
+    client, mock_session
+):
+    get_resp = MagicMock()
+    get_resp.ok = True
+    get_resp.text = ")]}'\n" + json.dumps({"token": "unassign_xsrf_token"})
+    mock_session.request.side_effect = [
+        get_resp,
+        requests.exceptions.ReadTimeout("stalled unassign POST"),
+    ]
+
+    with pytest.raises(requests.exceptions.ReadTimeout, match="stalled unassign POST"):
+        client.unassign("my_endpoint")
+
+    assert mock_session.request.call_count == 2
+    assert all(
+        call.kwargs["timeout"] == ASSIGNMENT_REQUEST_TIMEOUT
+        for call in mock_session.request.call_args_list
+    )
 
 
 def test_client_keep_alive_assignment_handles_empty_response(client, mock_session):
@@ -222,7 +281,7 @@ def test_client_keep_alive_assignment_treats_read_timeout_as_success(
     VM that may not respond — so the request commonly read-times-out even
     though the keep-alive succeeded. A ReadTimeout must NOT propagate as an
     error (otherwise the daemon would log spurious keep_alive_error events)."""
-    import requests
+
 
     mock_session.request.side_effect = requests.exceptions.ReadTimeout("timed out")
 
