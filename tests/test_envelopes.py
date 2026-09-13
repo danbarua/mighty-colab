@@ -251,6 +251,10 @@ def test_session_info_valid_construction_minimal():
     assert info.exec_log_path is None
     assert info.keep_alive_pid is None
     assert info.last_keep_alive_ping is None
+    assert info.keep_alive_health is None
+    assert info.keep_alive_consecutive_failures is None
+    assert info.keep_alive_last_success_age_seconds is None
+    assert info.keep_alive_retention_risk is None
 
 
 def test_session_info_valid_construction_full():
@@ -267,11 +271,19 @@ def test_session_info_valid_construction_full():
         exec_log_path="/tmp/s1.exec.log",
         keep_alive_pid=12345,
         last_keep_alive_ping="2026-08-12T01:00:00+00:00",
+        keep_alive_health="transient_failure",
+        keep_alive_consecutive_failures=2,
+        keep_alive_last_success_age_seconds=60,
+        keep_alive_retention_risk="normal",
     )
     assert info.status == "BUSY (exec.py)"
     assert info.last_execution_file == "script.py"
     assert info.keep_alive_pid == 12345
     assert info.last_keep_alive_ping == "2026-08-12T01:00:00+00:00"
+    assert info.keep_alive_health == "transient_failure"
+    assert info.keep_alive_consecutive_failures == 2
+    assert info.keep_alive_last_success_age_seconds == 60
+    assert info.keep_alive_retention_risk == "normal"
 
 
 def test_session_info_rejects_unexpected_field():

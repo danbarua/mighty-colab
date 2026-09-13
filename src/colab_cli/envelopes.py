@@ -167,6 +167,12 @@ class SessionInfo(BaseModel):
     # this codebase has ever measured Colab's actual idle-reap threshold.
     keep_alive_pid: Optional[int] = None
     last_keep_alive_ping: Optional[str] = None
+    keep_alive_health: Optional[str] = None
+    keep_alive_consecutive_failures: Optional[int] = None
+    keep_alive_last_success_age_seconds: Optional[int] = None
+    # Local retention risk only. The backend exposes no reclaim deadline, so
+    # this deliberately does not claim that reclamation is imminent.
+    keep_alive_retention_risk: Optional[str] = None
 
 
 class SessionListEnvelope(EnvelopeBase):

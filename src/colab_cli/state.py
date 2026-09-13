@@ -42,6 +42,9 @@ class SessionState(BaseModel):
     # this codebase has ever measured Colab's actual idle-reap threshold,
     # so this field only ever reports what's actually been observed.
     last_keep_alive_ping: Optional[str] = None
+    # Reset to zero after every successful ping; incremented for every
+    # consecutive HTTP/auth/network failure, regardless of status code.
+    keep_alive_consecutive_failures: int = 0
     exec_pid: Optional[int] = None
     exec_log_path: Optional[str] = None
 

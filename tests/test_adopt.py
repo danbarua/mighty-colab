@@ -387,6 +387,7 @@ def test_adopt_keep_alive_tolerates_non_scope_preflight_error(
     spawn.assert_called_once()
     saved = mock_common_state.store.add.call_args.args[0]
     assert saved.keep_alive_pid == 9999
+    assert saved.keep_alive_consecutive_failures == 1
 
 
 def test_adopt_refresh_can_start_keep_alive_when_requested_and_missing(

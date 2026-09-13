@@ -38,6 +38,10 @@ from colab_cli.state import SessionState
 from colab_cli.runtime import ColabRuntime
 
 
+# Three consecutive local ping failures are enough to make a daemon
+# actionable without pretending to know Colab's server-side idle deadline.
+KEEP_ALIVE_DEGRADED_AFTER_FAILURES = 3
+
 def _is_scope_error(e: Exception) -> bool:
     """True if a ColabRequestError's response body indicates a missing OAuth scope.
 
@@ -118,6 +122,87 @@ def _format_session_line(
     if status is not None:
         parts.append(f"Status: {status}")
     return " | ".join(parts)
+
+
+def _record_keep_alive_success(session: SessionState) -> None:
+    session.keep_alive_consecutive_failures = 0
+    session.last_keep_alive_ping = datetime.datetime.now(
+        datetime.timezone.utc
+    ).isoformat()
+
+
+def _record_keep_alive_failure(session: SessionState) -> None:
+    session.keep_alive_consecutive_failures += 1
+
+
+def _keep_alive_summary(
+    session: SessionState,
+    *,
+    daemon_alive: Optional[bool] = None,
+    now: Optional[datetime.datetime] = None,
+) -> dict[str, object]:
+    """Return local keep-alive health without guessing a reclaim deadline."""
+    from colab_cli.common import pid_alive
+
+    recorded_failures = session.keep_alive_consecutive_failures
+    failures = (
+        max(0, recorded_failures) if isinstance(recorded_failures, int) else 0
+    )
+    if daemon_alive is None:
+        daemon_alive = bool(
+            session.keep_alive_pid and pid_alive(session.keep_alive_pid)
+        )
+
+    if session.keep_alive_pid is None:
+        health, retention_risk = "disabled", "elevated"
+    elif not daemon_alive:
+        health, retention_risk = "stopped", "elevated"
+    elif failures >= KEEP_ALIVE_DEGRADED_AFTER_FAILURES:
+        health, retention_risk = "degraded", "elevated"
+    elif failures:
+        retention_risk = (
+            "normal" if session.last_keep_alive_ping is not None else "unknown"
+        )
+        health = "transient_failure"
+    elif session.last_keep_alive_ping is None:
+        health, retention_risk = "starting", "unknown"
+    else:
+        health, retention_risk = "healthy", "normal"
+
+    summary: dict[str, object] = {
+        "keep_alive_health": health,
+        "keep_alive_consecutive_failures": failures,
+        "keep_alive_retention_risk": retention_risk,
+    }
+    if session.last_keep_alive_ping is not None:
+        try:
+            last_success = datetime.datetime.fromisoformat(
+                session.last_keep_alive_ping
+            )
+            if last_success.tzinfo is None:
+                last_success = last_success.replace(tzinfo=datetime.timezone.utc)
+            current_time = now or datetime.datetime.now(datetime.timezone.utc)
+            summary["keep_alive_last_success_age_seconds"] = max(
+                0, int((current_time - last_success).total_seconds())
+            )
+        except (TypeError, ValueError):
+            pass
+    return summary
+
+
+def _format_keep_alive_summary(summary: dict[str, object]) -> str:
+    health = str(summary["keep_alive_health"]).upper()
+    failures = summary["keep_alive_consecutive_failures"]
+    risk = str(summary["keep_alive_retention_risk"]).upper()
+    parts = [
+        f"Keep-alive: {health}",
+        f"Consecutive failures: {failures}",
+    ]
+    age = summary.get("keep_alive_last_success_age_seconds")
+    if age is not None:
+        parts.append(f"Last success: {age}s ago")
+    parts.append(f"Retention risk: {risk}")
+    return "  " + " | ".join(parts)
 
 
 def resolve_runtime_options(
@@ -326,11 +411,12 @@ def new(
             raise typer.Exit(code=1)
         # Other failures: don't block session creation — the daemon will
         # retry and log via the existing keep_alive_error event path.
+        _record_keep_alive_failure(s)
     else:
         # `else`, not just falling through past `except` -- must only run
         # when the ping genuinely succeeded, not on a tolerated non-scope
         # failure above.
-        s.last_keep_alive_ping = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        _record_keep_alive_success(s)
 
     # Persist the session BEFORE spawning the daemon so the daemon's
     # initial `state.store.get(session_name)` check doesn't race and
@@ -461,6 +547,13 @@ def sessions_command():
             info["keep_alive_pid"] = alive_pid
         if local and local.last_keep_alive_ping is not None:
             info["last_keep_alive_ping"] = local.last_keep_alive_ping
+        if local is not None:
+            summary = _keep_alive_summary(
+                local, daemon_alive=alive_pid is not None
+            )
+            info.update(summary)
+            if not state.json_output:
+                typer.echo(_format_keep_alive_summary(summary))
         session_infos.append(info)
 
     if state.json_output:
@@ -490,7 +583,7 @@ def _print_status_for(s: SessionState) -> dict:
             machine_shape=s.machine_shape,
         )
     )
-    from colab_cli.common import pid_alive
+    from colab_cli.common import pid_alive, state
 
     info = {
         "name": s.name,
@@ -508,6 +601,10 @@ def _print_status_for(s: SessionState) -> dict:
         info["keep_alive_pid"] = alive_pid
     if s.last_keep_alive_ping is not None:
         info["last_keep_alive_ping"] = s.last_keep_alive_ping
+    summary = _keep_alive_summary(s, daemon_alive=alive_pid is not None)
+    info.update(summary)
+    if not state.json_output:
+        typer.echo(_format_keep_alive_summary(summary))
     if s.last_execution:
         exec_file, exec_cell, exec_time = s.last_execution
         cell_str = f" | Cell: {exec_cell}" if exec_cell else ""
@@ -736,11 +833,11 @@ def keep_alive(
             state.client.keep_alive_assignment(endpoint)
             consecutive_4xx = 0
             last_error = None
-            s.last_keep_alive_ping = datetime.datetime.now(
-                datetime.timezone.utc
-            ).isoformat()
+            _record_keep_alive_success(s)
             state.store.add(s)
         except Exception as e:
+            _record_keep_alive_failure(s)
+            state.store.add(s)
             code = get_status_code(e)
             err_info = {
                 "status_code": code,
@@ -757,6 +854,9 @@ def keep_alive(
                     "iteration": iterations,
                     "consecutive_4xx": consecutive_4xx
                     + (1 if code is not None and 400 <= code < 500 else 0),
+                    "consecutive_failures": (
+                        s.keep_alive_consecutive_failures
+                    ),
                 },
             )
             if code is not None and 400 <= code < 500:

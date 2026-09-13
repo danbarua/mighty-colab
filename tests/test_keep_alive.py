@@ -18,7 +18,12 @@ import pytest
 import typer
 from colab_cli.client import ColabRequestError
 from colab_cli.state import SessionState
-from colab_cli.commands.session import new, stop, keep_alive
+from colab_cli.commands.session import (
+    _keep_alive_summary,
+    keep_alive,
+    new,
+    stop,
+)
 
 
 def test_session_state_with_pid():
@@ -28,12 +33,15 @@ def test_session_state_with_pid():
         url="http://",
         endpoint="end",
         keep_alive_pid=1234,
+        keep_alive_consecutive_failures=2,
     )
     data = s.model_dump()
     assert data["keep_alive_pid"] == 1234
+    assert data["keep_alive_consecutive_failures"] == 2
 
     s2 = SessionState(**data)
     assert s2.keep_alive_pid == 1234
+    assert s2.keep_alive_consecutive_failures == 2
 
 
 @patch("colab_cli.commands.session.spawn_keep_alive")
@@ -233,6 +241,7 @@ def test_new_tolerates_non_scope_preflight_error(mock_spawn, mock_common_state):
     # test) -- last_keep_alive_ping must stay None, not be set on the
     # strength of a tolerated failure.
     assert final_state.last_keep_alive_ping is None
+    assert final_state.keep_alive_consecutive_failures == 1
 
 
 @patch("colab_cli.common.kill_process")
@@ -259,6 +268,113 @@ def test_stop_kills_background_exec(mock_kill, mock_common_state):
     stop(session="test-sess")
 
     mock_kill.assert_called_once_with(8888)
+
+@pytest.mark.parametrize(
+    ("pid", "daemon_alive", "failures", "last_ping", "expected"),
+    [
+        (
+            None,
+            False,
+            0,
+            None,
+            {
+                "keep_alive_health": "disabled",
+                "keep_alive_consecutive_failures": 0,
+                "keep_alive_retention_risk": "elevated",
+            },
+        ),
+        (
+            42,
+            True,
+            0,
+            None,
+            {
+                "keep_alive_health": "starting",
+                "keep_alive_consecutive_failures": 0,
+                "keep_alive_retention_risk": "unknown",
+            },
+        ),
+        (
+            42,
+            True,
+            1,
+            None,
+            {
+                "keep_alive_health": "transient_failure",
+                "keep_alive_consecutive_failures": 1,
+                "keep_alive_retention_risk": "unknown",
+            },
+        ),
+        (
+            42,
+            True,
+            0,
+            "2026-09-13T11:59:45+00:00",
+            {
+                "keep_alive_health": "healthy",
+                "keep_alive_consecutive_failures": 0,
+                "keep_alive_last_success_age_seconds": 15,
+                "keep_alive_retention_risk": "normal",
+            },
+        ),
+        (
+            42,
+            True,
+            1,
+            "2026-09-13T11:59:00+00:00",
+            {
+                "keep_alive_health": "transient_failure",
+                "keep_alive_consecutive_failures": 1,
+                "keep_alive_last_success_age_seconds": 60,
+                "keep_alive_retention_risk": "normal",
+            },
+        ),
+        (
+            42,
+            True,
+            3,
+            "2026-09-13T11:55:00+00:00",
+            {
+                "keep_alive_health": "degraded",
+                "keep_alive_consecutive_failures": 3,
+                "keep_alive_last_success_age_seconds": 300,
+                "keep_alive_retention_risk": "elevated",
+            },
+        ),
+        (
+            42,
+            False,
+            2,
+            "2026-09-13T11:50:00+00:00",
+            {
+                "keep_alive_health": "stopped",
+                "keep_alive_consecutive_failures": 2,
+                "keep_alive_last_success_age_seconds": 600,
+                "keep_alive_retention_risk": "elevated",
+            },
+        ),
+    ],
+)
+def test_keep_alive_health_summary(
+    pid, daemon_alive, failures, last_ping, expected
+):
+    import datetime as dt
+
+    state = SessionState(
+        name="test",
+        token="t",
+        url="u",
+        endpoint="e1",
+        keep_alive_pid=pid,
+        last_keep_alive_ping=last_ping,
+        keep_alive_consecutive_failures=failures,
+    )
+
+    assert _keep_alive_summary(
+        state,
+        daemon_alive=daemon_alive,
+        now=dt.datetime(2026, 9, 13, 12, 0, tzinfo=dt.timezone.utc),
+    ) == expected
 
 
 def test_keep_alive_loop_basic(mock_common_state):
@@ -347,6 +463,8 @@ def test_keep_alive_does_not_record_last_ping_on_failure(mock_common_state):
             keep_alive("e1", "test")
 
     assert s.last_keep_alive_ping is None
+    assert s.keep_alive_consecutive_failures == 1
+    assert mock_common_state.store.add.call_args.args[0] is s
 
 
 def test_keep_alive_resets_on_success(mock_common_state):
@@ -355,9 +473,8 @@ def test_keep_alive_resets_on_success(mock_common_state):
     mock_response_404.status_code = 404
     error_404 = ColabRequestError("Not Found", MagicMock(), mock_response_404)
 
-    mock_common_state.store.get.return_value = SessionState(
-        name="test", token="t", url="u", endpoint="e1"
-    )
+    s = SessionState(name="test", token="t", url="u", endpoint="e1")
+    mock_common_state.store.get.return_value = s
 
     # ping sequence: 404, success, 404, 404
     mock_common_state.client.keep_alive_assignment.side_effect = [
@@ -379,6 +496,14 @@ def test_keep_alive_resets_on_success(mock_common_state):
         except Exception as e:
             if str(e) != "StopLoop":
                 raise
+
+    errors = [
+        call.args[2]["consecutive_failures"]
+        for call in mock_common_state.history.log_event.call_args_list
+        if call.args[1] == "keep_alive_error"
+    ]
+    assert errors == [1, 1, 2]
+    assert s.keep_alive_consecutive_failures == 2
 
 
 @patch("colab_cli.common.kill_process")

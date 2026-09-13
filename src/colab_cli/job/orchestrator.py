@@ -271,7 +271,12 @@ class Orchestrator:
         empty store and exit with `session_not_found`.
         """
         from colab_cli.client import ColabRequestError
-        from colab_cli.commands.session import _is_scope_error, spawn_keep_alive
+        from colab_cli.commands.session import (
+            _is_scope_error,
+            _record_keep_alive_failure,
+            _record_keep_alive_success,
+            spawn_keep_alive,
+        )
         from colab_cli.utils import get_status_code
 
         session = self.session_state
@@ -296,8 +301,9 @@ class Orchestrator:
                         "userinfo.email scopes"
                     ],
                 ) from exc
+            _record_keep_alive_failure(session)
         else:
-            session.last_keep_alive_ping = _now()
+            _record_keep_alive_success(session)
 
         self.session_store.add(session)
         session.keep_alive_pid = spawn_keep_alive(
