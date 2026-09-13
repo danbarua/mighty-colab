@@ -534,6 +534,16 @@ def test_apply_refuses_a_job_that_already_has_an_endpoint(
 
     assert result.exit_code == 1
     assert "already has endpoint" in _clean(result.output)
+def test_apply_refuses_oversized_source_before_assignment(
+    tmp_path, mock_common_state, monkeypatch
+):
+    monkeypatch.setattr(
+        "colab_cli.job.payload_bundle.CONTENTS_UPLOAD_CEILING", 1
+    )
+    plan_file = _locked_plan(tmp_path, "too-big")
+    result = runner.invoke(app, ["job", "apply", str(plan_file)])
+    assert result.exit_code == 1
+    assert "Contents ceiling" in _clean(result.output)
     mock_common_state.client.assign.assert_not_called()
 
 

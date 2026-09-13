@@ -48,6 +48,8 @@ from colab_cli.job.planner import (
     RANGED_GET_IGNORED_RANGE,
     RESERVED_PATH,
     RETRY_NOT_IMPLEMENTED,
+    SOURCE_FILE_TOO_LARGE,
+    SOURCE_PAYLOAD_LARGE,
     URL_EXPIRY_TOO_SOON,
     URL_HOST_NOT_PUBLIC,
     URL_SCHEME_NOT_HTTPS,
@@ -382,6 +384,39 @@ def test_private_or_link_local_host_diagnostic(tmp_path):
     mixed = make_spec(tmp_path, data=[DataItem(url="https://mixed.test/x", dest="/content/jobs/planner-test/x", size_bytes=1)])
     assert URL_HOST_NOT_PUBLIC in diagnostic_codes(build_plan(mixed, JOB_ID, probe=False))
     assert URL_HOST_NOT_PUBLIC not in diagnostic_codes(build_plan(make_spec(tmp_path), JOB_ID, probe=False))
+
+def test_oversized_source_file_is_a_plan_error(tmp_path, monkeypatch):
+    from colab_cli.job.models import SourceFileLock
+
+    monkeypatch.setattr(
+        "colab_cli.job.payload_bundle.collect_source_files",
+        lambda spec, source_spec_path=None: [
+            SourceFileLock(
+                path="weights.bin",
+                size_bytes=251 * 1024 * 1024,
+                sha256="a" * 64,
+            )
+        ],
+    )
+    plan = build_plan(make_spec(tmp_path), JOB_ID, probe=False)
+    assert SOURCE_FILE_TOO_LARGE in diagnostic_codes(plan)
+    assert plan.has_errors
+
+
+def test_aggregate_source_payload_is_reported(tmp_path, monkeypatch):
+    from colab_cli.job.models import SourceFileLock
+
+    monkeypatch.setattr(
+        "colab_cli.job.payload_bundle.collect_source_files",
+        lambda spec, source_spec_path=None: [
+            SourceFileLock(path="a.py", size_bytes=200 * 1024 * 1024, sha256="b" * 64),
+            SourceFileLock(path="b.py", size_bytes=200 * 1024 * 1024, sha256="c" * 64),
+        ],
+    )
+    plan = build_plan(make_spec(tmp_path), JOB_ID, probe=False)
+    assert SOURCE_PAYLOAD_LARGE in diagnostic_codes(plan)
+    assert not plan.has_errors
+
 
 
 

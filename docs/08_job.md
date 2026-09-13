@@ -22,6 +22,7 @@ log:
 2026-09-12: **Live provenance verification for #26.** At commit `4805408`, a non-editable install reported CLI `0.8.1.dev35+g4805408d7`; the local terminal envelope and the terminal object downloaded directly after deleting local job state both reported result schema `2`, that CLI version, and runtime payload `sha256:955731f19845f75aa3716b7fe8334e14bfba542a992ca2673245ecaad4f1feab`. The workload succeeded, the exact GCS object was deleted, and the final session check reported no active sessions.
 2026-09-12: Hardened #26 result recovery after review: VM and off-VM result absorption is transactional, so malformed terminal records cannot partially replace phase, provenance, workload, or artifact state before validation fails.
 2026-09-11: Fixed [#23](https://github.com/danbarua/mighty-colab/issues/23): runner and watchdog terminate tagged `setsid` descendants with identity-checked SIGTERM/SIGKILL; `succeeded` is refused while a tagged process survives or when `/proc` detection is unavailable.
+2026-09-11: Fixed [#21](https://github.com/danbarua/mighty-colab/issues/21): data GET and artifact PUT stream while hashing; plan rejects per-file source over 250 MB before assignment and reports aggregate source size; verify reports source/input/output/free totals.
 
 
 
@@ -162,7 +163,7 @@ v0 accepts caller-supplied HTTPS GET/PUT URLs. The VM uses `urllib`; it has no G
 
 The public-host check resolves DNS and rejects a destination unless every IPv4 and IPv6 answer is global unicast. Mixed public/non-public answers fail closed. Each Contents-independent GET/PUT connects to an address from that lookup with the original hostname as SNI/Host, so DNS cannot be rebound between check and connect. Redirect targets are resolved and checked the same way. HTTPS remains required.
 
-Each staged data item can carry `size_bytes` and an exact 64-hex-character `sha256`; the model normalizes the digest to lowercase and the runner verifies both fields when present. Declared data and artifact sizes both contribute to the free-disk refusal. Each artifact result records status, hash, and byte count when available. PUT failures are not retried automatically. A 403 caused by an expired signature may be labelled `refresh_urls` by some classified paths, but not every phase failure currently receives a `retry_class`.
+The runner streams each data GET and artifact PUT in 1 MiB / 64 KiB chunks while computing SHA-256. Source staging still uploads each file through the Contents API. Plan rejects any source file over the 250 MB Contents guard before assignment and warns when the aggregate source payload exceeds that per-file ceiling. Verify reports source, input, output, and free-space totals and refuses when their sum exceeds 80% of free disk.
 
 ## Plan
 
@@ -257,7 +258,7 @@ The local JSON writes use atomic replacement, but the store has no cross-process
 
 The permanent suite covers model validation, plan diagnostics without reflected inputs, redacted plan/spec persistence with owner-only hydration, canonical URL identity and credential-marker hashing, source-bundle credential rejection against immutable upload snapshots, expiry revalidation, isolated descriptor handoff and unlinking, interrupted-recovery deletion/forced teardown, healthy-supervisor race exclusion, runner exit/cancel behavior, duplicate remote launch, transport refresh, phase transitions, CLI parsing, and envelope truth tables. Live integrations cover CPU and T4 jobs, signed GCS data/artifact/control-result paths, dependency restart/verify, workload failure, token refresh recovery, explicit launch-kernel restart, cancel-only termination with assignment retention, and job-owned TFE keep-alive through idle leave-up and destroy.
 
-The current gaps need regression coverage before their claims can be promoted: streamed transfer; aggregate bundle limits; optional-upload semantics; control log.
+The current gaps need regression coverage before their claims can be promoted: optional-upload semantics; control log.
 
 ## Spike results (2026-09-11, live CPU VM)
 
@@ -442,8 +443,6 @@ These are current implementation limits, not hypothetical polish:
 
 - **Idle retention:** job provision owns the TFE keep-alive daemon. A multi-hour GPU run through the proxy refresh boundary has not been completed.
 - **Crash recovery:** there is still a short window between `assign` returning and the first envelope persist. Apply's own poll loop does not classify a dead remote runner from `launch.json`; `status --poll` does.
-
-- **Memory and size:** data GET and artifact PUT buffer whole objects in RAM. The 250 MB source limit is per file, enforced after allocation; there is no aggregate bundle ceiling.
 - **Signed secrets:** generated specs, plans, manifests, envelopes, events, diagnostics, and kernel launch history contain query-free URL identities and opaque credential references only. Caller-owned source specs and generated owner-mode `.mighty-colab-secrets.json` sidecars still contain full URLs and require credential handling.
 - **Declared but inactive controls:** planning rejects non-default retry/recreate/resume settings, `control.log`, and `on_run_fail: skip`.
 - **CLI/JSON consistency:** the job-group help summary omits `list`. Some early file/plan read failures still emit stderr rather than a JSON envelope. A failed apply can exit the process with status 1 while its outer JSON wrapper says `exit_code: 0`.

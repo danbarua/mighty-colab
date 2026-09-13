@@ -65,6 +65,63 @@ def test_runtime_url_identity_matches_safe_planner_identity(url):
     assert "?" not in identity
 
 
+def test_hashing_reader_bounds_default_reads(tmp_path):
+    from colab_cli.job.runtime_payload.runner import _HashingReader
+
+    path = tmp_path / "blob.bin"
+    payload = b"x" * (2 * 65536 + 17)
+    path.write_bytes(payload)
+    with path.open("rb") as fh:
+        reader = _HashingReader(fh)
+        chunks = []
+        while True:
+            chunk = reader.read()
+            if not chunk:
+                break
+            chunks.append(chunk)
+    assert [len(chunk) for chunk in chunks] == [65536, 65536, 17]
+    assert b"".join(chunks) == payload
+    assert reader.size == len(payload)
+    assert reader.hasher.hexdigest() == hashlib.sha256(payload).hexdigest()
+
+
+def test_http_get_streams_in_bounded_chunks(tmp_path, monkeypatch):
+    from colab_cli.job.runtime_payload import runner
+
+    payload = b"x" * (2 * 1024 * 1024 + 17)
+
+    class Response:
+        def __init__(self):
+            self.offset = 0
+            self.read_sizes = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, size):
+            self.read_sizes.append(size)
+            chunk = payload[self.offset : self.offset + size]
+            self.offset += len(chunk)
+            return chunk
+
+    response = Response()
+    monkeypatch.setattr(runner, "urlopen_public", lambda *_args, **_kwargs: response)
+    target = tmp_path / "download.bin"
+
+    size, digest = runner._http_get_to_file(
+        "https://example.com/object",
+        str(target),
+        expected_size=len(payload),
+        expected_hash=hashlib.sha256(payload).hexdigest(),
+    )
+
+    assert target.read_bytes() == payload
+    assert size == len(payload)
+    assert digest == hashlib.sha256(payload).hexdigest()
+    assert response.read_sizes == [1024 * 1024] * 4
 def _run(tmp_path: Path, source: str, *extra: str, timeout=30):
     _package, entry, job_dir = _prepare(tmp_path, source)
     proc, result, job_dir = _run_prepared(tmp_path, entry, job_dir, *extra, timeout=timeout)

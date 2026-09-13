@@ -16,6 +16,7 @@ log:
 2026-09-12: Fixed [#26](https://github.com/danbarua/mighty-colab/issues/26): terminal local and off-VM results identify the CLI build and exact shipped runtime payload under explicit result schema version 2; current readers continue to accept version-1 records.
 2026-09-12: Hardened #26 result recovery after review: terminal absorption validates on a copy and commits only a complete record; malformed VM and off-VM results leave existing envelope state unchanged.
 2026-09-11: Fixed [#23](https://github.com/danbarua/mighty-colab/issues/23): tagged `setsid` descendants are signalled with identity checks; `succeeded` is refused if any survive or if escapee detection is unavailable.
+2026-09-11: Fixed [#21](https://github.com/danbarua/mighty-colab/issues/21): transfers stream while hashing; oversized source fails at plan/apply before assignment; verify reports source/input/output/free totals.
 
 
 
@@ -306,8 +307,6 @@ mighty-colab sessions            # server-side assignment inventory
 Be aware of these before trusting a long run:
 
 - No GPU run has yet outlived the approximately 60-minute proxy refresh boundary.
-
-- Data GET and artifact PUT buffer whole objects; source size is limited per file only after allocation, with no aggregate bundle ceiling.
 - Caller-owned source specs and generated `.mighty-colab-secrets.json` sidecars still contain full signed URLs and require credential handling.
 - Retry/recreate/resume and `control.log` are not implemented; planning rejects non-default policy values.
 - Job-group help omits `list`, and some early `--json` errors and failed-apply outer exit fields are inconsistent with actual behavior.
