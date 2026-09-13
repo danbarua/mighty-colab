@@ -65,23 +65,26 @@ def test_runtime_url_identity_matches_safe_planner_identity(url):
     assert "?" not in identity
 
 
-def test_hashing_reader_streams_without_holding_the_file(tmp_path):
+def test_hashing_reader_bounds_default_reads(tmp_path):
     from colab_cli.job.runtime_payload.runner import _HashingReader
 
     path = tmp_path / "blob.bin"
-    payload = b"abcdefghijklmnopqrstuvwxyz" * 1024
+    payload = b"x" * (2 * 65536 + 17)
     path.write_bytes(payload)
     with path.open("rb") as fh:
         reader = _HashingReader(fh)
         chunks = []
         while True:
-            chunk = reader.read(64)
+            chunk = reader.read()
             if not chunk:
                 break
             chunks.append(chunk)
+    assert [len(chunk) for chunk in chunks] == [65536, 65536, 17]
     assert b"".join(chunks) == payload
     assert reader.size == len(payload)
     assert reader.hasher.hexdigest() == hashlib.sha256(payload).hexdigest()
+
+
 def test_http_get_streams_in_bounded_chunks(tmp_path, monkeypatch):
     from colab_cli.job.runtime_payload import runner
 
