@@ -26,7 +26,7 @@ from colab_cli import auto_update
 from colab_cli import common
 from colab_cli.auth import AuthProvider
 from colab_cli.common import build_envelope, emit_json, state, setup_logging
-from colab_cli.commands import session, execution, files, automation, run, ssh, utility
+from colab_cli.commands import session, execution, files, sync, automation, run, ssh, utility
 from colab_cli.commands import adopt, mcp, job
 
 # The only commands that emit a `--json` envelope. Kept as one literal set
@@ -355,6 +355,7 @@ adopt.register(app)
 session.register(app)
 execution.register(app)
 files.register(app)
+sync.register(app)
 automation.register(app)
 run.register(app)
 ssh.register(app)

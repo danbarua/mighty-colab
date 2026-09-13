@@ -249,6 +249,7 @@ adds:
 | `reinstall` | Install packages and restart the kernel so cached imports really update |
 | `mcp` | Expose non-interactive CLI commands as MCP tools |
 | `--debug` | Opt into verbose client and transport diagnostics |
+| `sync [--git-aware]` | Gzip a file tree before transfer; optionally retain sparse Git identity and selected worktree status |
 | Chunked uploads | Move large files without the single-request failure mode |
 
 The fork also tightens failure behavior around remote exceptions, package

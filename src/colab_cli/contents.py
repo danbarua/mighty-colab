@@ -193,5 +193,7 @@ class ContentsClient:
         with open(local_path, "wb") as f:
             f.write(content_bytes)
 
-    def rm(self, remote_path: str):
-        self._request("DELETE", remote_path)
+    def rm(
+        self, remote_path: str, timeout: tuple[float, float] | None = None
+    ):
+        self._request("DELETE", remote_path, timeout=timeout)

@@ -30,6 +30,7 @@ End-to-end tests that run against a **live Colab backend** (unlike the mocked un
 | `repro_job_signed_url_redaction/` | Live e2e: plans and runs a CPU job with a signed-URL sentinel, proves generated local records, CLI output, remote files, and kernel history omit it, confirms the owner-only sidecar retains it, then destroys the assignment and verifies no active sessions remain. |
 | `repro_job_keep_alive/` | Live e2e: `job apply --leave-up` starts the TFE keep-alive daemon, records pid/ping, keeps it through an idle kernel wait, then `job destroy` reaps it and leaves no session. |
 | `repro_job_crash_recovery/` | Live e2e: kills `job apply` during `run`; a new `status --poll` process absorbs the remote success, finishes cleanup, and leaves no session. |
+| `repro_sync/` | Live e2e: `mighty-colab sync` replaces a destination from a gzip payload, preserves selected Git `HEAD` and staged/unstaged/untracked status with `--git-aware`, omits an unrelated committed blob, and releases only its own CPU assignment. |
 
 
 ## Running
