@@ -41,9 +41,10 @@
     1.  **Draft**: Plan and start the task. Create a new git branch before working on new features or changes.
     2.  **Refine**: Implement changes and verify with tests and linting. Run tests using `uv run pytest tests/` and resolve any lint errors using `uv run ruff check . --fix`.
     3.  **Finalize**: Ensure everything is complete and correct. **Whenever features are added or behaviors change, you MUST re-review the corresponding design document in `docs/` and update it to reflect the new state. You should also add a brief log entry to the frontmatter of the updated design document with the current date summarizing the change.** Finally, commit the finished changes to the git branch for review.
+    4.  **Integrate**: For isolated work, do not accumulate stacked unmerged pull requests. After a pull request passes CI and live verification, merge it to `main`, fetch current `main`, rebase the next feature branch, and re-run its verification before publication.
 
 ## Extending Upstream CLIs
-- Do not change the behavior or flags of existing upstream commands. Add new, separately-named commands (e.g., `reinstall`) so patches stay upstream-mergeable.
+- Mighty Colab may adapt upstream command behavior and flags when its correctness or usability contracts require it. Prefer a separately named command when that preserves upstream mergeability without weakening the Mighty Colab design; upstream behavior is context, not a prohibition.
 
 ## Subcommand Workflows
 - **Session Management**: `new`, `sessions`, `status`, `stop`.
