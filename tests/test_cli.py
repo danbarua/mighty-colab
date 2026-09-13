@@ -175,7 +175,7 @@ def test_cli_status(mock_store, mock_common_state):
     result = runner.invoke(app, ["status", "-s", "s1"])
     assert result.exit_code == 0
     assert (
-        "[s1] e1 | Hardware: CPU | Shape: Standard | Variant: DEFAULT | Status: IDLE"
+        "[s1] e1 | Hardware: CPU | Shape: Standard | Variant: DEFAULT | Status: LAST-KNOWN-LOCAL IDLE"
         in result.output
     )
     assert (
@@ -195,7 +195,7 @@ def test_cli_status(mock_store, mock_common_state):
     result = runner.invoke(app, ["status"])
     assert result.exit_code == 0
     assert (
-        "[s1] e1 | Hardware: CPU | Shape: Standard | Variant: DEFAULT | Status: IDLE"
+        "[s1] e1 | Hardware: CPU | Shape: Standard | Variant: DEFAULT | Status: LAST-KNOWN-LOCAL IDLE"
         in result.output
     )
 
@@ -223,7 +223,7 @@ def test_cli_status_running_shows_busy(mock_store, mock_common_state):
     result = runner.invoke(app, ["status", "-s", "s1"])
     assert result.exit_code == 0
     assert (
-        "[s1] e1 | Hardware: T4 | Shape: Standard | Variant: GPU | Status: BUSY (exec.py)"
+        "[s1] e1 | Hardware: T4 | Shape: Standard | Variant: GPU | Status: LAST-KNOWN-LOCAL BUSY (exec.py)"
         in result.output
     )
 

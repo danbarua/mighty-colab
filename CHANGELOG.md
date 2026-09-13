@@ -12,6 +12,9 @@ below corresponds to a tag of the same name.
 
 ### Fixed
 
+- **`status` reported local bookkeeping as live VM state.** Plain-text and
+  `--json` output now label busy/idle values `LAST-KNOWN-LOCAL`, making explicit
+  that they come from the local command marker rather than a kernel query.
 - **`job destroy --cancel-only` did not stop detached workloads.** Runner and
   watchdog now consume the intent, terminate the consumer with grace-period
   escalation, and leave the VM assigned. Full destroy now reads and preserves

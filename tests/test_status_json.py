@@ -60,7 +60,7 @@ def test_status_json_single_session_found(mock_common_state, mocker):
         "accelerator": "T4",
         "variant": "GPU",
         "machine_shape": "HIGH_RAM",
-        "status": "BUSY (exec.py)",
+        "status": "LAST-KNOWN-LOCAL BUSY (exec.py)",
         "last_execution_file": "script.py",
         "last_execution_cell": None,
         "last_execution_time": "2026-08-12 01:00:00",
@@ -150,7 +150,7 @@ def test_status_json_no_session_flag_lists_all(mock_common_state):
             "accelerator": "NONE",
             "variant": "DEFAULT",
             "machine_shape": "STANDARD",
-            "status": "IDLE",
+            "status": "LAST-KNOWN-LOCAL IDLE",
         }
     ]
 

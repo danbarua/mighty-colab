@@ -477,7 +477,9 @@ def _print_status_for(s: SessionState) -> dict:
     for `--json` callers, so the human-readable and machine-readable paths
     can't drift apart from computing the busy/idle string twice.
     """
-    status_str = f"BUSY ({s.running})" if s.running else "IDLE"
+    status_str = "LAST-KNOWN-LOCAL " + (
+        f"BUSY ({s.running})" if s.running else "IDLE"
+    )
     typer.echo(
         _format_session_line(
             name=s.name,
