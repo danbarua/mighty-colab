@@ -12,6 +12,12 @@ below corresponds to a tag of the same name.
 
 ### Fixed
 
+- **Expired proxy credentials deleted live local session bindings.** A proxy
+  401/404 now triggers assignment reconciliation: surviving assignments refresh
+  their saved token and URL, inconclusive checks retain state, and only confirmed
+  absence permits pruning. Command finalizers cannot resurrect pruned state or
+  overwrite refreshed credentials; retained JSON failures report
+  `session_access_failed`.
 - **`status` reported local bookkeeping as live VM state.** Plain-text and
   `--json` output now label busy/idle values `LAST-KNOWN-LOCAL`, making explicit
   that they come from the local command marker rather than a kernel query.

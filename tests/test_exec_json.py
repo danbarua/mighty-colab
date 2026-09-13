@@ -187,6 +187,7 @@ def test_exec_json_preflight_session_lost_emits_error_envelope(
     mock_common_state.resolve_session.return_value = "s1"
     mock_runtime = mock_runtime_class.return_value
     mock_runtime.execute_code.side_effect = Exception("404 Not Found")
+    mock_common_state.prune_session.return_value = True
 
     result = runner.invoke(app, ["exec", "-s", "s1"], input="print(1)")
     assert result.exit_code == 1
@@ -196,7 +197,24 @@ def test_exec_json_preflight_session_lost_emits_error_envelope(
     assert envelope["reason"] == "session_lost"
     mock_common_state.prune_session.assert_called_once_with("s1")
 
+def test_exec_json_preflight_access_failure_retains_binding(
+    mock_session, mock_runtime_class, mock_common_state
+):
+    mock_common_state.json_output = True
+    mock_common_state.resolve_session.return_value = "s1"
+    mock_common_state.prune_session.return_value = False
+    mock_runtime_class.return_value.execute_code.side_effect = Exception(
+        "401 Unauthorized"
+    )
 
+    result = runner.invoke(app, ["exec", "-s", "s1"], input="print(1)")
+
+    assert result.exit_code == 1
+    envelope = json.loads(result.stdout)
+    assert envelope["status"] == "error"
+    assert envelope["reason"] == "session_access_failed"
+    assert "local binding retained" in result.stderr
+    mock_common_state.prune_session.assert_called_once_with("s1")
 def test_exec_json_preflight_session_lost_includes_http_status(
     mock_session, mock_runtime_class, mock_common_state
 ):

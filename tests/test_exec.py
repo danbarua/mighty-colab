@@ -459,13 +459,29 @@ def test_cli_exec_lost_session_prunes(
     mock_runtime = mock_runtime_class.return_value
     # Simulate 404 during initialization
     mock_runtime.execute_code.side_effect = Exception("404 Not Found")
+    mock_common_state.prune_session.return_value = True
 
     result = runner.invoke(app, ["exec", "-s", "lost-sess"], input="print(1)")
     assert result.exit_code == 1
     assert "appears to be lost" in result.output
     assert "appears to be lost" in result.stderr
     mock_common_state.prune_session.assert_called_once_with("lost-sess")
+def test_cli_exec_expired_credentials_retain_binding(
+    mock_runtime_class, mock_store, mock_common_state
+):
+    mock_session = MagicMock()
+    mock_session.name = "live-sess"
+    mock_store.get.return_value = mock_session
+    mock_common_state.resolve_session.return_value = "live-sess"
+    mock_common_state.prune_session.return_value = False
+    mock_runtime_class.return_value.execute_code.side_effect = Exception("401 Unauthorized")
 
+    result = runner.invoke(app, ["exec", "-s", "live-sess"], input="print(1)")
+
+    assert result.exit_code == 1
+    assert "local binding retained" in result.stderr
+    assert "appears to be lost" not in result.stderr
+    mock_common_state.prune_session.assert_called_once_with("live-sess")
 
 def test_cli_exec_preflight_nonterminal_error_still_stops_runtime(
     mock_runtime_class, mock_store, mock_common_state

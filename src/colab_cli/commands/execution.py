@@ -221,6 +221,39 @@ def _finish_json(
         typer.echo(json.dumps(envelope), file=sys.stdout)
 
 
+def _handle_terminal_session_error(name: str) -> bool:
+    from colab_cli.common import state
+
+    pruned = state.prune_session(name)
+    if pruned:
+        message = (
+            f"[colab] Session '{name}' appears to be lost (404/401). "
+            "Local binding removed after server confirmation."
+        )
+    else:
+        message = (
+            f"[colab] Session '{name}' returned 404/401, but the server did not "
+            "confirm the assignment is absent; local binding retained. Retry the command."
+        )
+    typer.echo(message, err=True)
+    return pruned
+
+
+def _clear_running_state(name: str, session, terminal_pruned: Optional[bool]):
+    """Clear `running` without restoring state invalidated by reconciliation."""
+    from colab_cli.common import state
+
+    if terminal_pruned is True:
+        return None
+    if terminal_pruned is False:
+        session = state.store.get(name)
+    if session is None:
+        return None
+    session.running = None
+    state.store.add(session)
+    return session
+
+
 def exec_command(
     session: Annotated[
         Optional[str], typer.Option("-s", "--session", help="Session name")
@@ -363,22 +396,18 @@ def exec_command(
     except Exception as e:
         runtime.stop()
         if is_terminal_error(e):
+            pruned = _handle_terminal_session_error(name)
             if want_json:
                 _finish_json(
                     build_envelope(
                         "error",
                         "exec",
                         exit_code=1,
-                        reason="session_lost",
+                        reason="session_lost" if pruned else "session_access_failed",
                         http_status=get_status_code(e),
                     ),
                     json_result_path,
                 )
-            typer.echo(
-                f"[colab] Session '{name}' appears to be lost (404/401). Cleaning up.",
-                err=True,
-            )
-            state.prune_session(name)
             raise typer.Exit(1)
         if want_json:
             _finish_json(
@@ -823,11 +852,7 @@ def repl(
     except Exception as e:
         runtime.stop()
         if is_terminal_error(e):
-            typer.echo(
-                f"[colab] Session '{name}' appears to be lost (404/401). Cleaning up.",
-                err=True,
-            )
-            state.prune_session(name)
+            _handle_terminal_session_error(name)
             raise typer.Exit(1)
         raise e
 
@@ -894,20 +919,16 @@ def console(
     state.history.log_event(s.name, "console_started", {})
     s.running = "console"
     state.store.add(s)
+    terminal_pruned: Optional[bool] = None
     try:
         connect_console(s)
     except Exception as e:
         if is_terminal_error(e):
-            typer.echo(
-                f"[colab] Session '{name}' appears to be lost (404/401). Cleaning up.",
-                err=True,
-            )
-            state.prune_session(name)
+            terminal_pruned = _handle_terminal_session_error(name)
             raise typer.Exit(1)
         raise e
     finally:
-        s.running = None
-        state.store.add(s)
+        _clear_running_state(name, s, terminal_pruned)
 
 
 def register(app: typer.Typer):

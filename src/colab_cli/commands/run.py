@@ -49,6 +49,8 @@ from colab_cli.client import (
 from colab_cli.commands.execution import (
     _build_env_prelude,
     _build_script_prelude,
+    _clear_running_state,
+    _handle_terminal_session_error,
     _parse_env_vars,
 )
 from colab_cli.common import (
@@ -523,6 +525,7 @@ def run_command(
         on_session_started=on_sess_started,
     )
 
+    terminal_pruned: Optional[bool] = None
     try:
         # Same /content prelude as `colab exec` for consistency.
         try:
@@ -532,21 +535,21 @@ def run_command(
             )
         except Exception as e:
             if is_terminal_error(e):
+                terminal_pruned = _handle_terminal_session_error(name)
                 if state.json_output:
                     emit_json(
                         build_envelope(
                             "error",
                             "run",
                             exit_code=1,
-                            reason="session_lost",
+                            reason=(
+                                "session_lost"
+                                if terminal_pruned
+                                else "session_access_failed"
+                            ),
                             http_status=get_status_code(e),
                         )
                     )
-                typer.echo(
-                    f"[colab] Session '{name}' appears to be lost (404/401).",
-                    err=True,
-                )
-                state.prune_session(name)
                 raise typer.Exit(1)
             # Genuine transport-level failure during the preflight call
             # (e.g. a just-created kernel dropping its websocket before the
@@ -625,8 +628,9 @@ def run_command(
                 },
             )
     finally:
-        s.running = None
-        state.store.add(s)
+        current_session = _clear_running_state(name, s, terminal_pruned)
+        if current_session is not None:
+            s = current_session
         # Best-effort runtime close (keeps remote kernel alive for --keep).
         try:
             runtime.stop()

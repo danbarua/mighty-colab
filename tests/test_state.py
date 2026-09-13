@@ -20,7 +20,7 @@ import threading
 from datetime import datetime
 
 import filelock
-
+from colab_cli.common import State
 from colab_cli.state import StateStore, SessionState, SettingsStore, Settings
 
 
@@ -325,3 +325,74 @@ def test_state_store_multiprocess_concurrency(temp_config):
     assert p1.exitcode == 0
     assert p2.exitcode == 0
     assert len(StateStore(temp_config).list()) == 80
+
+
+def _state_for_pruning(mocker, session):
+    state = State()
+    state._store = mocker.MagicMock()
+    state._client = mocker.MagicMock()
+    state._history = mocker.MagicMock()
+    state._store.get.return_value = session
+    state._sessions = {session.name: session}
+    return state
+
+
+def test_prune_session_refreshes_live_assignment_credentials(mocker):
+    session = SessionState(
+        name="live", token="expired", url="https://old", endpoint="endpoint-1"
+    )
+    state = _state_for_pruning(mocker, session)
+    assignment = mocker.MagicMock(endpoint="endpoint-1")
+    assignment.runtime_proxy_info.token = "fresh"
+    assignment.runtime_proxy_info.url = "https://fresh"
+    state.client.list_assignments.return_value = [assignment]
+
+    assert state.prune_session("live") is False
+
+    assert session.token == "fresh"
+    assert session.url == "https://fresh"
+    state.store.add.assert_called_once_with(session)
+    state.store.remove.assert_not_called()
+    assert state._sessions["live"] is session
+
+
+def test_prune_session_retains_binding_when_server_check_fails(mocker):
+    session = SessionState(
+        name="live", token="expired", url="https://old", endpoint="endpoint-1"
+    )
+    state = _state_for_pruning(mocker, session)
+    state.client.list_assignments.side_effect = RuntimeError("network unavailable")
+
+    assert state.prune_session("live") is False
+
+    state.store.add.assert_not_called()
+    state.store.remove.assert_not_called()
+    assert state._sessions["live"] is session
+
+
+def test_prune_session_removes_binding_only_after_confirmed_absence(mocker):
+    session = SessionState(
+        name="gone", token="stale", url="https://old", endpoint="endpoint-1"
+    )
+    state = _state_for_pruning(mocker, session)
+    state.client.list_assignments.return_value = []
+
+    assert state.prune_session("gone") is True
+
+    state.store.remove.assert_called_once_with("gone")
+    assert "gone" not in state._sessions
+    state.history.log_event.assert_called_once_with(
+        "gone", "session_terminated", {"reason": "pruned"}
+    )
+
+
+def test_prune_session_accepts_existing_absence_proof(mocker):
+    session = SessionState(
+        name="gone", token="stale", url="https://old", endpoint="endpoint-1"
+    )
+    state = _state_for_pruning(mocker, session)
+
+    assert state.prune_session("gone", confirmed_absent=True) is True
+
+    state.client.list_assignments.assert_not_called()
+    state.store.remove.assert_called_once_with("gone")
