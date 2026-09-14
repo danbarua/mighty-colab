@@ -27,6 +27,7 @@ missing.
 
 import datetime
 import json
+import logging
 import os
 import time
 import uuid
@@ -56,6 +57,7 @@ from colab_cli.job.runtime_payload import ident
 from colab_cli.job.spec_io import fetch_control_result
 from colab_cli.job.store import ApplyInProgress, JobStore, load_plan_file, write_plan_file
 
+_logger = logging.getLogger(__name__)
 job_app = typer.Typer(
     help="Run an unattended job on a Colab VM: plan, apply, status, destroy, list.",
     no_args_is_help=True,
@@ -558,7 +560,20 @@ def apply(
         orch.env.supervisor = Supervisor.FINISHED
         orch.env.reason = f"internal supervisor failure ({type(e).__name__})"
         orch.env.retry_class = RetryClass.DO_NOT_RETRY
-        orch.env.hints.append("re-run with --debug to inspect the local traceback")
+        # `--debug` only helps while the exception is in flight (it makes
+        # this except-clause re-raise instead of swallowing) -- once the
+        # job is terminal there is nothing left to re-run: `job apply` on
+        # the same --job-id refuses (endpoint already assigned) and `job
+        # status --debug` never re-enters this code path at all. Log the
+        # traceback to the persistent rotating file every invocation
+        # already writes to (see common.py:setup_logging) and point the
+        # hint there instead of promising a re-run that can't work.
+        _logger.exception(
+            "job apply supervisor failure for job %s", p.job_id
+        )
+        orch.env.hints.append(
+            "local traceback logged to ~/.config/colab-cli/colab.log"
+        )
     finally:
         secret_removed = secret_handoff or orch.cleanup_secret_channel()
         # Teardown is how you leave, not a phase you reach: an early

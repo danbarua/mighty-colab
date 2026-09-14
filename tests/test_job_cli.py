@@ -1661,6 +1661,11 @@ def test_unexpected_apply_exception_emits_a_terminal_envelope(
     assert env.done
     assert env.retry_class is RetryClass.DO_NOT_RETRY
     assert env.reason == "internal supervisor failure (RuntimeError)"
+    # Regression: the old hint ("re-run with --debug") was a dead end once
+    # the job is terminal -- `job apply` on the same --job-id refuses, and
+    # `job status --debug` never re-enters this except-clause. The hint
+    # must point at where the traceback actually landed instead.
+    assert env.hints == ["local traceback logged to ~/.config/colab-cli/colab.log"]
 
 
 def test_status_poll_help_describes_recovery_cleanup():
