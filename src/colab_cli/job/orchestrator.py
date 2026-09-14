@@ -368,11 +368,11 @@ class Orchestrator:
         code = (
             "import subprocess, sys\n"
             f"pkgs = [{pkgs}]\n"
-            "r = subprocess.run([sys.executable, '-m', 'pip', 'install', "
+            "r = subprocess.run([sys.executable, '-m', 'pip', 'install', '-v', "
             "'--upgrade-strategy', 'only-if-needed', *pkgs],"
             " capture_output=True, text=True)\n"
-            "print(r.stdout[-4000:])\n"
-            "print(r.stderr[-4000:])\n"
+            "print(r.stdout[-20000:])\n"
+            "print(r.stderr[-20000:])\n"
             "print('PIP_RC=%d' % r.returncode)\n"
         )
         outputs = self._execute_code(code, timeout=INSTALL_TIMEOUT)
