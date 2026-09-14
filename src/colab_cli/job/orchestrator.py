@@ -31,6 +31,7 @@ which is the exact wound this command exists to close.
 
 import datetime
 import json
+import logging
 import time
 import uuid
 from typing import Callable, List, Optional, Tuple
@@ -52,6 +53,8 @@ from colab_cli.job.models import (
 )
 from colab_cli.job.store import JobStore
 from colab_cli.job.runtime_payload import RUNTIME_PAYLOAD_VERSION
+
+_logger = logging.getLogger(__name__)
 
 # Remote layout. Everything the job owns lives under one directory so
 # `destroy` has exactly one thing to remove and `plan` has exactly one
@@ -377,9 +380,12 @@ class Orchestrator:
         if "PIP_RC=0" not in text:
             raise PhaseError(
                 Phase.INSTALL,
-                f"pip install failed: {_tail(text)}",
+                f"pip install failed: {_tail(text, phase='install/pip')}",
                 RetryClass.FIX_CODE,
-                ["check the version pins in `deps` against what Colab preinstalls"],
+                [
+                    "check the version pins in `deps` against what Colab preinstalls",
+                    "full pip output logged to ~/.config/colab-cli/colab.log",
+                ],
             )
 
     def restart(self) -> None:
@@ -649,7 +655,7 @@ class Orchestrator:
         if pid is None:
             raise PhaseError(
                 Phase.RUN,
-                f"launch RPC returned no pid: {_tail(text)}",
+                f"launch RPC returned no pid: {_tail(text, phase='launch')}",
                 RetryClass.RETRY_SAME,
             )
         self.env.workload = Workload.RUNNING
@@ -939,6 +945,17 @@ def _extract_tagged(text: str, tag: str, raw: bool = False):
     return None
 
 
-def _tail(text: str, n: int = 600) -> str:
+def _tail(text: str, n: int = 600, *, phase: str = "") -> str:
+    """Truncate `text` for the envelope's `reason`, but never lose it: pip's
+    (and similar tools') generic boilerplate ("did not run successfully",
+    "This error originates from a subprocess...") is often the *last* few
+    hundred characters regardless of which package or line actually failed,
+    so a naive tail keeps the one part that is the same for every failure
+    and discards the one part that names the cause. Log the untruncated
+    text to the persistent rotating log (~/.config/colab-cli/colab.log,
+    wired up in common.py:setup_logging) before slicing.
+    """
+    if len(text) > n:
+        _logger.info("full %s output:\n%s", phase or "phase", text)
     return text[-n:] if len(text) > n else text
 
