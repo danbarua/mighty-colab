@@ -361,7 +361,7 @@ class Orchestrator:
         if not self.spec.deps:
             return
         self._set_phase(Phase.INSTALL)
-        pkgs = " ".join(repr(d) for d in self.spec.deps)
+        pkgs = ", ".join(repr(d) for d in self.spec.deps)
         code = (
             "import subprocess, sys\n"
             f"pkgs = [{pkgs}]\n"
