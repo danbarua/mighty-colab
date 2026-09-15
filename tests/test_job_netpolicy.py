@@ -38,3 +38,27 @@ def test_https_is_required_and_destination_is_pinned_to_a_public_ip():
         check_url("http://storage.example.test/obj")
     with pytest.raises(BlockedDestination):
         check_url("https://[fe80::1]/obj")
+
+
+def test_pinned_connection_handles_unbracketed_ipv6_and_nondefault_port():
+    """`getaddrinfo` can return an IPv6 answer first (e.g. `2a00:1450:...`).
+
+    `http.client.HTTPConnection`'s own `_get_hostport` splits `host` on its
+    *last* `:` to sniff an embedded port when `port` isn't passed
+    explicitly -- which misreads an unbracketed IPv6 literal's trailing
+    hextet as the port (`InvalidURL: nonnumeric port` for a hex tail with
+    a letter, or worse, a silently wrong port for an all-digit tail like
+    `::12`). The fix is to always pass `port` explicitly so that internal
+    sniffing never runs, not to bracket the literal (bracketing alone
+    would dodge the misparse but silently drop any non-default port, since
+    `_get_hostport` falls back to `self.default_port` whenever no port
+    suffix is present).
+    """
+    from colab_cli.job.runtime_payload.netpolicy import _PinnedHTTPSConnection
+
+    conn = _PinnedHTTPSConnection(
+        "2a00:1450:4009:c08::cf", 8443, server_hostname="example.com"
+    )
+
+    assert conn.host == "2a00:1450:4009:c08::cf"
+    assert conn.port == 8443
