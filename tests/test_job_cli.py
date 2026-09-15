@@ -1718,6 +1718,103 @@ def test_status_poll_finishes_cleanup_after_the_result_arrives(
     mock_common_state.client.unassign.assert_called_once_with("m-s-endpoint")
 
 
+def test_status_clears_stale_hints_from_a_prior_call(mock_common_state):
+    """A hint that was true at an earlier poll (e.g. "still billing" before
+    teardown completed) must not survive into a later call's envelope once
+    the job is fully released -- contradicting its own `cleanup` field.
+    """
+    from colab_cli.commands.job import _store
+    from colab_cli.job.models import Cleanup, JobEnvelope, Offload, Supervisor, Workload
+
+    store = _store()
+    store.write_envelope(
+        JobEnvelope(
+            job_id="stale-hint",
+            workload=Workload.FAILED,
+            offload=Offload.FAILED,
+            cleanup=Cleanup.RELEASED,
+            supervisor=Supervisor.FINISHED,
+            hints=[
+                "VM left running deliberately and is still billing: "
+                "`mighty-colab job destroy stale-hint` when done"
+            ],
+        )
+    )
+
+    result = runner.invoke(app, ["job", "status", "stale-hint"])
+
+    assert result.exit_code == 0
+    env = store.read_envelope("stale-hint")
+    assert env.hints == [], (
+        "a released, terminal job must not still claim it's 'still billing'"
+    )
+
+
+def test_status_keeps_permanent_diagnostic_hints_while_dropping_billing_ones(
+    mock_common_state,
+):
+    from colab_cli.commands.job import _store
+    from colab_cli.job.models import Cleanup, JobEnvelope, Offload, Supervisor, Workload
+
+    store = _store()
+    store.write_envelope(
+        JobEnvelope(
+            job_id="mixed-hints",
+            workload=Workload.FAILED,
+            offload=Offload.SKIPPED,
+            cleanup=Cleanup.RELEASED,
+            supervisor=Supervisor.FINISHED,
+            reason="staging failed: a declared input could not be fetched",
+            hints=[
+                "check, in order: the URL has not expired; the object exists",
+                "VM left running deliberately and is still billing: "
+                "`mighty-colab job destroy mixed-hints` when done",
+            ],
+        )
+    )
+
+    result = runner.invoke(app, ["job", "status", "mixed-hints"])
+
+    assert result.exit_code == 0
+    env = store.read_envelope("mixed-hints")
+    assert env.hints == [
+        "check, in order: the URL has not expired; the object exists"
+    ]
+
+def test_destroy_does_not_carry_stale_billing_hints_into_a_second_call(mock_common_state):
+    """Not a blanket hints reset (that would also wipe permanent diagnostic
+    hints like "check the URL has not expired") -- only hints claiming the
+    VM is still up/billing get dropped, and only once cleanup confirms it
+    genuinely isn't.
+    """
+    from colab_cli.commands.job import _store
+    from colab_cli.job.models import Cleanup, JobEnvelope, Offload, Supervisor, Workload
+
+    store = _store()
+    store.write_envelope(
+        JobEnvelope(
+            job_id="stale-destroy",
+            workload=Workload.FAILED,
+            offload=Offload.FAILED,
+            cleanup=Cleanup.LEFT_UP,
+            supervisor=Supervisor.FINISHED,
+            hints=[
+                "VM left running deliberately and is still billing: "
+                "`mighty-colab job destroy stale-destroy` when done",
+                "check, in order: the URL has not expired; the object exists",
+            ],
+        )
+    )
+
+    result = runner.invoke(app, ["job", "destroy", "stale-destroy"])
+
+    assert result.exit_code == 0
+    env = store.read_envelope("stale-destroy")
+    assert env.cleanup is Cleanup.ALREADY_ABSENT
+    assert not any("still billing" in h for h in env.hints)
+    # Non-billing diagnostic hints survive -- this isn't a blanket reset.
+    assert "check, in order: the URL has not expired; the object exists" in env.hints
+
 def _job_json(result):
     return json.loads(_clean(result.output).strip().splitlines()[-1])
 

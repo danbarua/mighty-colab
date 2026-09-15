@@ -237,12 +237,7 @@ def plan(
         bool, typer.Option("--no-probe", help="Skip network probes of data URLs")
     ] = False,
 ):
-    """Validate a spec and report what `apply` would do. Allocates nothing.
-
-    `plan` never calls `assign`. That is the whole point of having it: an
-    agent can iterate on a broken spec for free, and the first thing that
-    costs money is the thing the caller explicitly asked for.
-    """
+    """Validate a spec and report what `apply` would do. Allocates nothing."""
     from colab_cli.common import state
     from pydantic import ValidationError
 
@@ -339,8 +334,7 @@ def apply(
 ):
     """Execute a plan: provision through teardown.
 
-    Refuses a `plan.json` whose embedded spec disagrees with its own
-    recorded hash.
+    Refuses a plan.json whose embedded spec no longer matches its recorded hash.
     """
     from colab_cli.common import state
     from colab_cli.job.planner import revalidate_expiry
@@ -764,6 +758,52 @@ def _recover_off_vm_result(
     return recovered
 
 
+# Substrings, not exact matches: every "still billing"/"left running"/
+# "left up" hint in this file uses different wording (job-id, endpoint,
+# and surviving-descendant details vary per call site), so this can't be
+# a fixed set of strings.
+_STALE_BILLING_HINT_MARKERS = ("still billing", "left running", "left up")
+
+
+def _finalize_hints(env) -> None:
+    """Call once, right before persisting/emitting a `status`/`destroy`
+    envelope -- never while a job is still in flight.
+
+    Two independent problems, one fix point:
+
+    1. `env.hints` is loaded from the *previous* persisted envelope and
+       every call site downstream does `.append(...)` assuming a fresh
+       list. A hint that was true at an earlier poll -- "still billing"
+       before teardown actually succeeded -- survives forever into every
+       later envelope, including ones where `cleanup` has since become
+       `released`/`already_absent` and directly contradicts it. Once
+       cleanup is confirmed terminal-and-gone, any such hint is now
+       false; drop it. Diagnostic hints that remain true regardless of
+       cleanup outcome (e.g. "check the URL has not expired" for a stage
+       failure) are untouched -- this only targets hints about the VM's
+       own up/down state.
+    2. The same hint text can get appended more than once across repeat
+       calls (e.g. a `status --poll` re-absorbing a result that was
+       already absorbed once). Deduplicate, preserving order.
+    """
+    from colab_cli.job.models import Cleanup
+
+    hints = env.hints
+    if env.cleanup in (Cleanup.RELEASED, Cleanup.ALREADY_ABSENT):
+        hints = [
+            h
+            for h in hints
+            if not any(marker in h.lower() for marker in _STALE_BILLING_HINT_MARKERS)
+        ]
+    seen: set[str] = set()
+    deduped = []
+    for h in hints:
+        if h not in seen:
+            seen.add(h)
+            deduped.append(h)
+    env.hints = deduped
+
+
 def _release_orphaned_job(env, session, state, store) -> None:
     stop_session_keep_alive(session)
     if env.endpoint:
@@ -803,12 +843,10 @@ def status(
     ] = False,
     interval: Annotated[int, typer.Option("--interval", help="Poll interval (s)")] = 15,
 ):
-    """Report a job's state, asking the VM rather than local memory.
-
-    The distinction is load-bearing and was a real field bug: a `status`
-    that reads only the local record will happily report a healthy session
-    for twenty minutes after the VM has gone.
-    """
+    # Reads the VM, not just the local record: a status that only echoed
+    # the local record would happily report a healthy session for twenty
+    # minutes after the VM was actually gone (a real field bug).
+    """Report a job's state, asking the VM rather than local memory."""
     from colab_cli.common import state
     from colab_cli.job.transport import JobTransport
 
@@ -910,6 +948,14 @@ def status(
             else:
                 store.write_envelope(env)
 
+    # Finalize hints once, regardless of which branch above ran (or none --
+    # a terminal job with no session skips the whole block): drops any
+    # "still billing"/"left running" hint that cleanup has since made
+    # false, dedupes repeats, and persists the result. Redundant with an
+    # already-written envelope in the branches above, which is harmless --
+    # same object, same final state.
+    _finalize_hints(env)
+    store.write_envelope(env)
     _emit(env, "status")
 
 
@@ -920,12 +966,7 @@ def destroy(
         typer.Option("--cancel-only", help="Signal the workload but keep the VM"),
     ] = False,
 ):
-    """Unconditional teardown. Safe to run twice.
-
-    Exits 0 when the thing is already gone, because the whole value of an
-    unconditional teardown is that a caller can run it without first
-    working out whether it is needed.
-    """
+    """Unconditional teardown. Safe to run twice; exits 0 if already gone."""
     from colab_cli.common import state
     from colab_cli.job.transport import JobTransport
 
@@ -990,6 +1031,7 @@ def destroy(
                 "forced VM teardown because credential deletion was not confirmed"
             )
         env.supervisor = Supervisor.FINISHED
+        _finalize_hints(env)
         store.write_envelope(env)
         _emit(env, "destroy", exit_code=1)
         raise typer.Exit(1)
@@ -1016,6 +1058,7 @@ def destroy(
             env.reason = "cancel intent written; VM left running"
         else:
             env.reason = "cancel intent could not be confirmed; VM left running"
+        _finalize_hints(env)
         store.write_envelope(env)
         failed = not env.workload.terminal and (
             intent_status is None or intent_status.name != "OK"
@@ -1061,6 +1104,7 @@ def destroy(
         )
         env.retry_class = RetryClass.DO_NOT_RETRY
     env.supervisor = Supervisor.FINISHED
+    _finalize_hints(env)
     store.write_envelope(env)
     _emit(env, "destroy", exit_code=1 if env.cleanup is Cleanup.FAILED else 0)
     if env.cleanup is Cleanup.FAILED:
@@ -1108,20 +1152,16 @@ def prune(
         typer.Option("--dry-run", help="Report what would be removed without deleting anything."),
     ] = False,
 ):
-    """Delete local job records that are unambiguously safe to remove.
+    # `left_up`/`failed` are deliberately never auto-pruned: `left_up` is
+    # a still-billing VM whose local record is the only pointer to it,
+    # and `failed` means teardown's own confirmation failed, which is
+    # usually fine but the local record alone can't prove it (see
+    # docs/job/store-and-cleanup.md for the live check).
+    """Delete local job records that are safe to remove: unapplied plans,
+    and terminal jobs with cleanup=released/already_absent.
 
-    Safe: unapplied plans (`job plan` ran, `job apply` never did -- no
-    envelope was ever written), and terminal jobs whose cleanup confirmed
-    `released` or `already_absent`.
-
-    Everything else is reported and left alone, not silently skipped:
-    a job that isn't `done` yet may still be running; `cleanup=left_up`
-    means the VM was deliberately kept up and pruning the only local
-    pointer to it would be actively harmful; `cleanup=failed` means
-    teardown's own confirmation failed, which usually is fine (see
-    docs/job/store-and-cleanup.md) but needs a live check
-    (`mighty-colab sessions`) before deleting the record, not an
-    assumption.
+    Everything else (still running, cleanup=left_up, cleanup=failed) is
+    reported as skipped with a reason, never silently deleted.
     """
     from colab_cli.common import state
 
