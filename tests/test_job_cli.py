@@ -23,6 +23,7 @@ import json
 import os
 import re
 import signal
+import subprocess
 from unittest.mock import MagicMock
 
 import pytest
@@ -619,6 +620,121 @@ def test_apply_refuses_added_removed_and_renamed_bundle_files(
     assert "removed helper.py" in out
     assert "util.py" in out
     mock_common_state.client.assign.assert_not_called()
+
+
+def test_apply_async_spawns_a_detached_child_and_returns_immediately(
+    tmp_path, monkeypatch, mock_common_state
+):
+    plan_file = _locked_plan(tmp_path, "async-job")
+    calls = []
+
+    class FakeProc:
+        pid = 4242
+
+    real_popen = subprocess.Popen
+
+    def fake_popen(cmd, **kwargs):
+        if isinstance(cmd, list) and "colab_cli.cli" in cmd:
+            calls.append((cmd, kwargs))
+            return FakeProc()
+        return real_popen(cmd, **kwargs)
+
+    monkeypatch.setattr("colab_cli.commands.job.subprocess.Popen", fake_popen)
+
+    result = runner.invoke(app, ["job", "apply", str(plan_file), "--async"])
+
+    assert result.exit_code == 0
+    assert len(calls) == 1, "must spawn exactly one child, never run apply itself"
+    cmd, kwargs = calls[0]
+    assert "job" in cmd and "apply" in cmd
+    assert str(plan_file) in cmd
+    assert "--async" not in cmd, "the child must run the real, blocking apply"
+    assert kwargs.get("stdin") is not None  # detached: never inherits a TTY
+    assert "4242" in _clean(result.output)
+    assert "job status async-job --poll" in _clean(result.output)
+
+
+def test_apply_async_with_job_id_propagates_it_and_never_reads_plan_file(
+    tmp_path, monkeypatch, mock_common_state
+):
+    """--job-id is the whole point of not needing a plan file positionally
+    -- the spawn path must not require one either."""
+    calls = []
+
+    class FakeProc:
+        pid = 99
+
+    real_popen = subprocess.Popen
+
+    def fake_popen(cmd, **kwargs):
+        if isinstance(cmd, list) and "colab_cli.cli" in cmd:
+            calls.append(cmd)
+            return FakeProc()
+        return real_popen(cmd, **kwargs)
+
+    monkeypatch.setattr("colab_cli.commands.job.subprocess.Popen", fake_popen)
+
+    result = runner.invoke(
+        app, ["job", "apply", "--job-id", "preplanned-job", "--async"]
+    )
+
+    assert result.exit_code == 0
+    assert len(calls) == 1
+    assert "--job-id" in calls[0] and "preplanned-job" in calls[0]
+    assert "preplanned-job" in _clean(result.output)
+
+
+
+
+def test_apply_async_unreadable_plan_fails_fast_without_spawning(
+    tmp_path, monkeypatch, mock_common_state
+):
+    """A plan file that can't even be parsed shouldn't spawn a child
+    destined to fail identically a moment later with no one watching."""
+    bad_plan = tmp_path / "corrupt.plan.json"
+    bad_plan.write_text("not json")
+    calls = []
+    real_popen = subprocess.Popen
+
+    def fake_popen(cmd, **kwargs):
+        if isinstance(cmd, list) and "colab_cli.cli" in cmd:
+            calls.append((cmd, kwargs))
+            return MagicMock()
+        return real_popen(cmd, **kwargs)
+
+    monkeypatch.setattr("colab_cli.commands.job.subprocess.Popen", fake_popen)
+
+    result = runner.invoke(app, ["job", "apply", str(bad_plan), "--async"])
+
+    assert result.exit_code == 1
+    assert calls == []
+
+
+def test_apply_async_json_emits_job_id_pid_and_log_path(
+    tmp_path, monkeypatch, mock_common_state
+):
+    plan_file = _locked_plan(tmp_path, "async-json-job")
+
+    class FakeProc:
+        pid = 777
+
+    real_popen = subprocess.Popen
+
+    def fake_popen(cmd, **kwargs):
+        if isinstance(cmd, list) and "colab_cli.cli" in cmd:
+            return FakeProc()
+        return real_popen(cmd, **kwargs)
+
+    monkeypatch.setattr("colab_cli.commands.job.subprocess.Popen", fake_popen)
+    _json_mode(mock_common_state)
+
+    result = runner.invoke(app, ["job", "apply", str(plan_file), "--async"])
+
+    payload = _job_json(result)
+    assert result.exit_code == 0
+    assert payload["job_id"] == "async-json-job"
+    assert payload["pid"] == 777
+    assert payload["log_path"].endswith("apply.log")
 
 
 def test_plan_records_relative_path_size_and_sha256(tmp_path, mock_common_state):

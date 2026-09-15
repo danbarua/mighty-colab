@@ -29,6 +29,8 @@ import datetime
 import json
 import logging
 import os
+import subprocess
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -39,6 +41,7 @@ from typing_extensions import Annotated
 
 from colab_cli.common import build_envelope, emit_json
 from colab_cli.envelopes import (
+    JobApplyAsyncStarted,
     JobEnvelopeWrapper,
     JobListEnvelope,
     JobPlanEnvelope,
@@ -88,6 +91,68 @@ def _store() -> JobStore:
 def _new_job_id(name: str) -> str:
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     return f"{name}-{stamp}-{uuid.uuid4().hex[:6]}"
+
+
+def spawn_apply_async(
+    *,
+    plan_file: Optional[str],
+    job_id_opt: Optional[str],
+    timeout: Optional[int],
+    leave_up: bool,
+    log_path: str,
+    auth_provider=None,
+    config_path: Optional[str] = None,
+) -> int:
+    """Spawns a detached `job apply` with stdio redirected to a log file.
+
+    Re-invokes the real (synchronous) `job apply` as the child rather than
+    a bespoke worker, for the same reason `spawn_exec_async` does: every
+    existing guarantee (plan-hash revalidation, expiry checks, the apply
+    lock, unconditional cleanup in `finally`) keeps working unmodified.
+    The only difference from a foreground `apply` is where stdout/stderr
+    land, and that this process returns before the child does.
+
+    `auth_provider`/`config_path` are propagated as global flags: the
+    detached child re-parses argv from scratch and does not inherit the
+    parent's parsed Typer flags (AGENTS.md item 16). The child never gets
+    `--async` itself -- it must run the real, blocking lifecycle.
+    """
+    cmd = [sys.executable, "-m", "colab_cli.cli"]
+    if auth_provider is not None:
+        cmd.append(f"--auth={auth_provider.value}")
+    if config_path is not None:
+        cmd.extend(["--config", config_path])
+    cmd.extend(["job", "apply"])
+    if plan_file:
+        cmd.append(plan_file)
+    if job_id_opt:
+        cmd.extend(["--job-id", job_id_opt])
+    if timeout is not None:
+        cmd.extend(["--timeout", str(timeout)])
+    if leave_up:
+        cmd.append("--leave-up")
+
+    kwargs = {}
+    if sys.platform != "win32":
+        kwargs["start_new_session"] = True
+    else:
+        CREATE_NEW_PROCESS_GROUP = 0x00000200
+        DETACHED_PROCESS = 0x00000008
+        kwargs["creationflags"] = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+
+    Path(log_path).parent.mkdir(parents=True, exist_ok=True)
+    log_fp = open(log_path, "wb")
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=log_fp,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            **kwargs,
+        )
+    finally:
+        log_fp.close()
+    return proc.pid
 
 
 def _emit(env: JobEnvelope, command: str, exit_code: int = 0) -> None:
@@ -331,6 +396,13 @@ def apply(
     leave_up: Annotated[
         bool, typer.Option("--leave-up", help="Do not unassign the VM when finished")
     ] = False,
+    run_async: Annotated[
+        bool,
+        typer.Option(
+            "--async",
+            help="Spawn apply as a detached background process and return immediately",
+        ),
+    ] = False,
 ):
     """Execute a plan: provision through teardown.
 
@@ -342,6 +414,61 @@ def apply(
     from colab_cli.job.transport import JobTransport
 
     store = _store()
+
+    if run_async:
+        # Resolve just enough to know where the log goes and what to
+        # report -- not enough to duplicate any real validation. The
+        # detached child re-runs this same function without --async and
+        # does every check (plan-hash revalidation, expiry, the apply
+        # lock, plan errors/warnings) for real; this process never claims
+        # the apply lock, so there is nothing to race or double-release.
+        if job_id_opt:
+            job_id = job_id_opt
+        elif plan_file:
+            try:
+                job_id = load_plan_file(plan_file, hydrate=False).job_id
+            except ValueError as e:
+                _emit_command_message(
+                    "apply",
+                    f"[colab] Could not load protected plan ({type(e).__name__}).",
+                    reason="plan_unreadable",
+                )
+                raise typer.Exit(1) from None
+        else:
+            _emit_command_message(
+                "apply",
+                "[colab] Pass a plan file or --job-id.",
+                reason="usage_error",
+            )
+            raise typer.Exit(1)
+        log_path = str(store.job_dir(job_id) / "apply.log")
+        pid = spawn_apply_async(
+            plan_file=plan_file,
+            job_id_opt=job_id_opt,
+            timeout=timeout,
+            leave_up=leave_up,
+            log_path=log_path,
+            auth_provider=state.auth_provider,
+            config_path=state.config_path,
+        )
+        if state.json_output:
+            emit_json(
+                build_envelope(
+                    status="ok",
+                    command="job apply",
+                    job_id=job_id,
+                    pid=pid,
+                    log_path=log_path,
+                ),
+                JobApplyAsyncStarted,
+            )
+        else:
+            typer.echo(f"[job] apply started in background: {job_id} (pid {pid})")
+            typer.echo(f"  log:    {log_path}")
+            typer.echo(f"  status: mighty-colab job status {job_id} --poll")
+        return
+
+
     try:
         if plan_file:
             p = load_plan_file(plan_file, hydrate=True)
