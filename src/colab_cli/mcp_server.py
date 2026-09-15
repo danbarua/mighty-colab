@@ -408,6 +408,21 @@ class JobResourceSubscriptions:
         self._tasks: Dict[str, "asyncio.Task"] = {}
 
     async def subscribe(self, session, uri: str) -> None:
+        # Caught live: a client subscribed to `jobs://` because it's
+        # listed right alongside subscribable `job://<id>` resources with
+        # no way to know in advance which support it. "not a job://
+        # resource" reads like a malformed-URI complaint when the real
+        # answer is "valid resource, just not one that notifies" --
+        # distinguish the two rather than raising the same message for
+        # both.
+        if uri in (JOBS_LIST_URI, JOBS_RUNNING_URI, JOBS_DONE_URI):
+            raise ValueError(
+                f"{uri} does not support subscription -- its content changes "
+                f"too often (every job's every phase transition, every "
+                f"prune) to notify on. Read it directly instead; subscribe "
+                f"to individual job://<id> resources for terminal-state "
+                f"push notifications."
+            )
         job_id = _job_id_from_uri(uri)
         if job_id is None:
             raise ValueError(f"not a job:// resource: {uri}")

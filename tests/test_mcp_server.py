@@ -550,3 +550,25 @@ def test_resubscribing_the_same_uri_does_not_leak_a_second_task(tmp_path):
         await subs.unsubscribe_all()
 
     asyncio.run(scenario())
+
+
+def test_subscribing_to_jobs_list_resource_gives_a_clear_not_subscribable_error(
+    tmp_path,
+):
+    """Caught live: a client subscribed to jobs:// because it's listed
+    right alongside subscribable job://<id> resources with no way to
+    know in advance which support it. Must not read like a malformed-URI
+    complaint -- the resource is real, it just doesn't notify."""
+    import asyncio
+
+    from colab_cli.mcp_server import JobResourceSubscriptions
+
+    store = _job_store(tmp_path)
+    subs = JobResourceSubscriptions(store)
+    session = MagicMock()
+
+    for uri in ("jobs://", "jobs://running", "jobs://done"):
+        with pytest.raises(ValueError, match="does not support subscription"):
+            asyncio.run(subs.subscribe(session, uri))
+        assert subs._tasks == {}
+
