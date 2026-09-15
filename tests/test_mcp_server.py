@@ -322,3 +322,163 @@ def test_synthetic_command_schema_and_dispatch():
     ok, text = invoke_command("sample", commands["sample"], {"count": 3, "tag": ["a", "b"]})
     assert ok is True
     assert text == "count=3 flag=False tags=['a', 'b']"
+
+
+def _job_store(tmp_path):
+    from colab_cli.job.store import JobStore
+
+    return JobStore(tmp_path / "jobs")
+
+
+def _done_envelope(job_id):
+    from colab_cli.job.models import Cleanup, JobEnvelope, Offload, Supervisor, Workload
+
+    return JobEnvelope(
+        job_id=job_id,
+        workload=Workload.SUCCEEDED,
+        exit_code=0,
+        offload=Offload.OK,
+        cleanup=Cleanup.RELEASED,
+        supervisor=Supervisor.FINISHED,
+    )
+
+
+
+def test_job_uri_roundtrip():
+    from colab_cli.mcp_server import _job_id_from_uri, _job_uri
+
+    assert _job_id_from_uri(_job_uri("my-job-123")) == "my-job-123"
+    assert _job_id_from_uri("https://example.com") is None
+    assert _job_id_from_uri("job://") is None
+
+
+def test_list_job_resources_reports_status(tmp_path):
+    from colab_cli.job.models import JobEnvelope, Workload
+    from colab_cli.mcp_server import list_job_resources
+
+    store = _job_store(tmp_path)
+    (store.job_dir("planned-only")).mkdir(parents=True)
+    store.write_envelope(JobEnvelope(job_id="still-running", workload=Workload.RUNNING))
+    store.write_envelope(_done_envelope("finished"))
+
+    resources = {r.name: r for r in list_job_resources(store)}
+
+    assert set(resources) == {"planned-only", "still-running", "finished"}
+    assert resources["planned-only"].uri == "job://planned-only"
+    assert "planned, not applied" in resources["planned-only"].description
+    assert "running" in resources["still-running"].description
+    assert "done" in resources["finished"].description
+    assert all(r.mime_type == "application/json" for r in resources.values())
+
+
+def test_read_job_resource_returns_envelope_json(tmp_path):
+    import json
+
+    from colab_cli.mcp_server import read_job_resource
+
+    store = _job_store(tmp_path)
+    store.write_envelope(_done_envelope("readable"))
+
+    result = read_job_resource(store, "job://readable")
+
+    assert len(result.contents) == 1
+    content = result.contents[0]
+    assert content.uri == "job://readable"
+    assert content.mime_type == "application/json"
+    payload = json.loads(content.text)
+    assert payload["job_id"] == "readable"
+    assert payload["workload"] == "succeeded"
+
+
+def test_read_job_resource_raises_for_unknown_job(tmp_path):
+    from colab_cli.mcp_server import read_job_resource
+
+    store = _job_store(tmp_path)
+
+    with pytest.raises(ValueError, match="no envelope"):
+        read_job_resource(store, "job://does-not-exist")
+
+
+def test_read_job_resource_raises_for_non_job_uri(tmp_path):
+    from colab_cli.mcp_server import read_job_resource
+
+    store = _job_store(tmp_path)
+
+    with pytest.raises(ValueError, match="not a job:// resource"):
+        read_job_resource(store, "https://example.com")
+
+
+def test_subscription_fires_exactly_once_when_job_becomes_done(tmp_path):
+    import asyncio
+
+    from colab_cli.job.models import JobEnvelope, Workload
+    from colab_cli.mcp_server import JobResourceSubscriptions
+
+    store = _job_store(tmp_path)
+    store.write_envelope(JobEnvelope(job_id="will-finish", workload=Workload.RUNNING))
+    session = MagicMock()
+    session.send_resource_updated = MagicMock(
+        side_effect=lambda uri: asyncio.sleep(0)
+    )
+    subs = JobResourceSubscriptions(store, poll_interval=0.01)
+
+    async def scenario():
+        await subs.subscribe(session, "job://will-finish")
+        await asyncio.sleep(0.03)
+        assert session.send_resource_updated.call_count == 0
+        store.write_envelope(_done_envelope("will-finish"))
+        await asyncio.sleep(0.05)
+        assert session.send_resource_updated.call_count == 1
+        session.send_resource_updated.assert_called_once_with("job://will-finish")
+        # The watch task ends itself once it fires -- nothing left running.
+        assert subs._tasks == {}
+
+    asyncio.run(scenario())
+
+
+def test_unsubscribe_cancels_the_watch_task_before_it_fires(tmp_path):
+    import asyncio
+
+    from colab_cli.job.models import JobEnvelope, Workload
+    from colab_cli.mcp_server import JobResourceSubscriptions
+
+    store = _job_store(tmp_path)
+    store.write_envelope(JobEnvelope(job_id="never-finishes", workload=Workload.RUNNING))
+    session = MagicMock()
+    session.send_resource_updated = MagicMock(
+        side_effect=lambda uri: asyncio.sleep(0)
+    )
+    subs = JobResourceSubscriptions(store, poll_interval=0.01)
+
+    async def scenario():
+        await subs.subscribe(session, "job://never-finishes")
+        await subs.unsubscribe("job://never-finishes")
+        store.write_envelope(_done_envelope("never-finishes"))
+        await asyncio.sleep(0.05)
+        assert session.send_resource_updated.call_count == 0
+        assert subs._tasks == {}
+
+    asyncio.run(scenario())
+
+
+def test_resubscribing_the_same_uri_does_not_leak_a_second_task(tmp_path):
+    import asyncio
+
+    from colab_cli.job.models import JobEnvelope, Workload
+    from colab_cli.mcp_server import JobResourceSubscriptions
+
+    store = _job_store(tmp_path)
+    store.write_envelope(JobEnvelope(job_id="resubscribed", workload=Workload.RUNNING))
+    session = MagicMock()
+    session.send_resource_updated = MagicMock(
+        side_effect=lambda uri: asyncio.sleep(0)
+    )
+    subs = JobResourceSubscriptions(store, poll_interval=0.01)
+
+    async def scenario():
+        await subs.subscribe(session, "job://resubscribed")
+        await subs.subscribe(session, "job://resubscribed")
+        assert len(subs._tasks) == 1
+        await subs.unsubscribe_all()
+
+    asyncio.run(scenario())
