@@ -498,6 +498,16 @@ def _sync_artifacts_once(job_dir, manifest, urls, last_uploaded):
             url = _resolve_transfer_url(item, urls)
             _http_put_file(url, local_path)
             last_uploaded[path] = signature2
+            # This is the only place a periodic sync is observable at
+            # all: runner.log is pulled to the local machine on every
+            # healthy poll tick, so this line is free per-revision
+            # timing info an agent can already read without any new
+            # instrumentation -- when each checkpoint/log revision was
+            # actually captured, not just that syncing is configured.
+            print(
+                f"[runner] artifact synced path={path} "
+                f"bytes={signature2[0]} at={time.time():.0f}"
+            )
         except Exception:  # noqa: BLE001 - one bad artifact must not skip the rest
             continue
 
