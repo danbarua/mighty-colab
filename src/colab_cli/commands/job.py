@@ -34,7 +34,7 @@ import sys
 import time
 import uuid
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 import typer
 from typing_extensions import Annotated
@@ -1277,40 +1277,91 @@ def destroy(
         raise typer.Exit(1)
 
 
-def list_jobs():
-    """List local job records."""
-    from colab_cli.common import state
-    store = _store()
-    ids = store.list_jobs()
-    if state.json_output:
-        rows = []
-        for jid in ids:
-            e = store.read_envelope(jid)
+def _job_list_rows(store) -> List[Dict[str, Any]]:
+    """One row per local job record -- the single source of truth for
+    `jobs list --json`, the plain-text `jobs list` rendering, and the
+    `jobs://` MCP resource. All three must show the same information;
+    the JSON path previously carried only job_id/workload/done/endpoint,
+    thinner than what the plain-text rendering already showed
+    (workload/offload/cleanup/done) -- that gap is exactly the kind of
+    "hides information" bug this function exists to make impossible.
+    """
+    rows = []
+    for jid in store.list_jobs():
+        e = store.read_envelope(jid)
+        if e is None:
             rows.append(
                 {
                     "job_id": jid,
-                    "workload": e.workload.value if e else "pending",
-                    "done": e.done if e else False,
-                    "endpoint": e.endpoint if e else None,
+                    "phase": None,
+                    "workload": None,
+                    "offload": None,
+                    "cleanup": None,
+                    "done": False,
+                    "endpoint": None,
+                    "reason": "planned, not applied",
                 }
             )
+            continue
+        rows.append(
+            {
+                "job_id": jid,
+                "phase": e.phase.value,
+                "workload": e.workload.value,
+                "offload": e.offload.value,
+                "cleanup": e.cleanup.value,
+                "done": e.done,
+                "endpoint": e.endpoint,
+                "reason": e.reason,
+            }
+        )
+    return rows
+
+
+def list_jobs(
+    running: Annotated[
+        bool, typer.Option("--running", help="Only jobs not yet done")
+    ] = False,
+    done: Annotated[
+        bool, typer.Option("--done", help="Only jobs that have finished")
+    ] = False,
+):
+    """List local job records."""
+    from colab_cli.common import state
+
+    if running and done:
+        _emit_command_message(
+            "jobs list",
+            "[colab] --running and --done are mutually exclusive.",
+            reason="usage_error",
+        )
+        raise typer.Exit(1)
+
+    store = _store()
+    rows = _job_list_rows(store)
+    if running:
+        rows = [r for r in rows if not r["done"]]
+    elif done:
+        rows = [r for r in rows if r["done"]]
+    if state.json_output:
         emit_json(
             build_envelope(status="ok", command="jobs list", jobs=rows),
             JobListEnvelope,
         )
         return
-    if not ids:
+    if not rows:
         typer.echo("[colab] No jobs.")
         return
-    for jid in ids:
-        e = store.read_envelope(jid)
-        if e is None:
-            typer.echo(f"  {jid}  (planned, not applied)")
+    for row in rows:
+        if row["workload"] is None:
+            typer.echo(f"  {row['job_id']}  (planned, not applied)")
         else:
             typer.echo(
-                f"  {jid}  {e.workload.value}/{e.offload.value}/{e.cleanup.value}"
-                f"  done={e.done}"
+                f"  {row['job_id']}  {row['workload']}/{row['offload']}/{row['cleanup']}"
+                f"  done={row['done']}"
             )
+
+
 
 def prune(
     dry_run: Annotated[

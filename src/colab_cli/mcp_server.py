@@ -30,9 +30,11 @@ tool call -- with no global flags in the synthesized argv -- would silently
 reset both to their defaults on every single call.
 """
 
+import asyncio
 import contextlib
 import io
-from typing import Any, Dict, List, Tuple
+import json
+from typing import Any, Dict, List, Optional, Tuple
 
 import click
 import typer
@@ -270,10 +272,161 @@ def invoke_command(name: str, cmd: click.Command, arguments: Dict[str, Any]) -> 
     return True, captured()
 
 
+
+# `job://<job_id>` resources -- one per local job record, content is the
+# JobEnvelope JSON already used by `job status --json`. Terminal-only
+# subscriptions (issue #55): a client that subscribes gets exactly one
+# `notifications/resources/updated` when the job's envelope reaches `done`,
+# not one per phase transition -- that's what an agent actually blocks on,
+# and matches the protocol version this server negotiates (<= 2025-11-25,
+# `resources/subscribe`/`resources/unsubscribe`, not the 2026-07-28
+# `subscriptions/listen` streaming form).
+JOB_URI_PREFIX = "job://"
+
+
+def _job_uri(job_id: str) -> str:
+    return f"{JOB_URI_PREFIX}{job_id}"
+
+
+def _job_id_from_uri(uri: str) -> Optional[str]:
+    if not uri.startswith(JOB_URI_PREFIX):
+        return None
+    job_id = uri[len(JOB_URI_PREFIX):]
+    return job_id or None
+
+
+JOBS_LIST_URI = "jobs://"
+
+
+def list_job_resources(store) -> List[types.Resource]:
+    resources = [
+        types.Resource(
+            uri=JOBS_LIST_URI,
+            name="jobs",
+            description="All local job records (same rows as `mighty-colab jobs list --json`)",
+            mime_type="application/json",
+        )
+    ]
+    for job_id in store.list_jobs():
+        env = store.read_envelope(job_id)
+        if env is None:
+            status = "planned, not applied"
+        elif env.done:
+            status = "done"
+        else:
+            status = "running"
+        resources.append(
+            types.Resource(
+                uri=_job_uri(job_id),
+                name=job_id,
+                description=f"mighty-colab job ({status})",
+                mime_type="application/json",
+            )
+        )
+    return resources
+
+
+def read_jobs_list_resource(store) -> types.ReadResourceResult:
+    """`jobs://` -- every local job record, same rows and same source
+    (`_job_list_rows`) as `jobs list --json`: one row builder, so this
+    can never drift thinner than what `jobs list` already shows.
+
+    Not subscribable, unlike `job://<id>`: this resource's content
+    changes on every job's every phase transition plus every prune,
+    far too often to sensibly notify on. `job://<id>`'s single terminal
+    `done` transition is the thing worth pushing; this one is for an
+    agent to read on demand.
+    """
+    from colab_cli.commands.job import _job_list_rows
+
+    rows = _job_list_rows(store)
+    return types.ReadResourceResult(
+        contents=[
+            types.TextResourceContents(
+                uri=JOBS_LIST_URI,
+                mime_type="application/json",
+                text=json.dumps(rows),
+            )
+        ]
+    )
+
+
+
+def read_job_resource(store, uri: str) -> types.ReadResourceResult:
+    job_id = _job_id_from_uri(uri)
+    if job_id is None:
+        raise ValueError(f"not a job:// resource: {uri}")
+    env = store.read_envelope(job_id)
+    if env is None:
+        raise ValueError(
+            f"no envelope for job {job_id!r} -- planned but never applied, "
+            f"or the job_id doesn't exist"
+        )
+    return types.ReadResourceResult(
+        contents=[
+            types.TextResourceContents(
+                uri=uri,
+                mime_type="application/json",
+                text=env.model_dump_json(),
+            )
+        ]
+    )
+
+
+class JobResourceSubscriptions:
+    """One background task per subscribed `job://` URI, polling for `done`.
+
+    `JobStore.write_envelope` writes via atomic rename (see store.py), so
+    polling `read_envelope` mid-write is safe -- readers only ever see a
+    complete prior version or a complete new one, never a partial file.
+    """
+
+    def __init__(self, store, poll_interval: float = 2.0):
+        self._store = store
+        self._poll_interval = poll_interval
+        self._tasks: Dict[str, "asyncio.Task"] = {}
+
+    async def subscribe(self, session, uri: str) -> None:
+        job_id = _job_id_from_uri(uri)
+        if job_id is None:
+            raise ValueError(f"not a job:// resource: {uri}")
+        # Idempotent: a re-subscribe on an already-watched URI restarts
+        # cleanly rather than leaking a second task racing the first.
+        await self.unsubscribe(uri)
+        self._tasks[uri] = asyncio.create_task(self._watch(session, uri, job_id))
+
+    async def unsubscribe(self, uri: str) -> None:
+        task = self._tasks.pop(uri, None)
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    async def unsubscribe_all(self) -> None:
+        for uri in list(self._tasks):
+            await self.unsubscribe(uri)
+
+    async def _watch(self, session, uri: str, job_id: str) -> None:
+        try:
+            while True:
+                env = self._store.read_envelope(job_id)
+                if env is not None and env.done:
+                    await session.send_resource_updated(uri)
+                    return
+                await asyncio.sleep(self._poll_interval)
+        finally:
+            self._tasks.pop(uri, None)
+
+
 async def run_stdio_server(click_group: click.Group, server_name: str) -> None:
     """Start the MCP stdio server, exposing `click_group`'s commands as tools."""
     tools, commands = build_tools(click_group)
     tool_map = {t.name: t for t in tools}
+
+    from colab_cli.commands.job import _store
+
+    job_store = _store()
+    subscriptions = JobResourceSubscriptions(job_store)
 
     async def on_list_tools(ctx, params) -> types.ListToolsResult:
         return types.ListToolsResult(tools=tools)
@@ -290,6 +443,37 @@ async def run_stdio_server(click_group: click.Group, server_name: str) -> None:
             is_error=not ok,
         )
 
-    server = Server(server_name, on_list_tools=on_list_tools, on_call_tool=on_call_tool)
-    async with stdio_server() as (read_stream, write_stream):
-        await server.run(read_stream, write_stream, server.create_initialization_options())
+    async def on_list_resources(ctx, params) -> types.ListResourcesResult:
+        return types.ListResourcesResult(resources=list_job_resources(job_store))
+
+    async def on_read_resource(ctx, params) -> types.ReadResourceResult:
+        if params.uri == JOBS_LIST_URI:
+            return read_jobs_list_resource(job_store)
+        return read_job_resource(job_store, params.uri)
+
+    async def on_subscribe_resource(ctx, params) -> types.EmptyResult:
+        await subscriptions.subscribe(ctx.session, params.uri)
+        return types.EmptyResult()
+
+    async def on_unsubscribe_resource(ctx, params) -> types.EmptyResult:
+        await subscriptions.unsubscribe(params.uri)
+        return types.EmptyResult()
+
+    server = Server(
+        server_name,
+        on_list_tools=on_list_tools,
+        on_call_tool=on_call_tool,
+        on_list_resources=on_list_resources,
+        on_read_resource=on_read_resource,
+        on_subscribe_resource=on_subscribe_resource,
+        on_unsubscribe_resource=on_unsubscribe_resource,
+    )
+    try:
+        async with stdio_server() as (read_stream, write_stream):
+            await server.run(read_stream, write_stream, server.create_initialization_options())
+    finally:
+        # Every subscription's background poll task must die with the
+        # server -- an asyncio.run() that returns with orphaned tasks
+        # still scheduled logs "Task was destroyed but it is pending"
+        # noise at minimum, and holds the event loop open at worst.
+        await subscriptions.unsubscribe_all()
