@@ -704,7 +704,7 @@ def test_stage_item_error_message_never_contains_the_url():
     assert "x-goog-signature" not in str(error)
 
 
-def test_sync_artifacts_once_uploads_a_changed_file(tmp_path, monkeypatch):
+def test_sync_artifacts_once_uploads_a_changed_file(tmp_path, monkeypatch, capsys):
     from colab_cli.job.runtime_payload import runner as runner_module
 
     monkeypatch.setattr(runner_module.time, "sleep", lambda _s: None)
@@ -724,6 +724,12 @@ def test_sync_artifacts_once_uploads_a_changed_file(tmp_path, monkeypatch):
     assert len(calls) == 1
     assert calls[0][0] == "https://x.example/ckpt"
     assert "checkpoint.pt" in last_uploaded
+    # Free per-revision timing info once runner.log is synced locally --
+    # the only place a successful periodic sync is ever observable.
+    out = capsys.readouterr().out
+    assert "artifact synced" in out
+    assert "path=checkpoint.pt" in out
+    assert "bytes=2" in out
 
 
 def test_sync_artifacts_once_dedups_an_unchanged_file(tmp_path, monkeypatch):
@@ -748,6 +754,28 @@ def test_sync_artifacts_once_dedups_an_unchanged_file(tmp_path, monkeypatch):
     runner_module._sync_artifacts_once(str(tmp_path), manifest, {}, last_uploaded)
 
     assert len(calls) == 1, "unchanged file must not be re-uploaded"
+
+
+def test_sync_artifacts_once_logs_nothing_for_a_deduped_skip(tmp_path, monkeypatch, capsys):
+    """The log line is a per-revision marker, not a heartbeat -- a tick
+    that uploaded nothing new must not print anything either, or the log
+    stops meaning "this is when the checkpoint actually changed"."""
+    from colab_cli.job.runtime_payload import runner as runner_module
+
+    monkeypatch.setattr(runner_module.time, "sleep", lambda _s: None)
+    ckpt = tmp_path / "checkpoint.pt"
+    ckpt.write_bytes(b"v1")
+    monkeypatch.setattr(
+        runner_module, "_http_put_file", lambda url, path: (2, "digest")
+    )
+    manifest = [{"path": "checkpoint.pt", "url": "https://x.example/ckpt"}]
+    last_uploaded = {}
+    runner_module._sync_artifacts_once(str(tmp_path), manifest, {}, last_uploaded)
+    capsys.readouterr()  # discard the first (real) sync's log line
+
+    runner_module._sync_artifacts_once(str(tmp_path), manifest, {}, last_uploaded)
+
+    assert capsys.readouterr().out == ""
 
 
 def test_sync_artifacts_once_uploads_again_after_a_real_change(tmp_path, monkeypatch):
