@@ -363,13 +363,46 @@ def test_list_job_resources_reports_status(tmp_path):
 
     resources = {r.name: r for r in list_job_resources(store)}
 
-    assert set(resources) == {"jobs", "planned-only", "still-running", "finished"}
+    assert set(resources) == {
+        "jobs",
+        "jobs (running)",
+        "jobs (done)",
+        "planned-only",
+        "still-running",
+        "finished",
+    }
     assert resources["jobs"].uri == "jobs://"
+    assert resources["jobs (running)"].uri == "jobs://running"
+    assert resources["jobs (done)"].uri == "jobs://done"
     assert resources["planned-only"].uri == "job://planned-only"
     assert "planned, not applied" in resources["planned-only"].description
     assert "running" in resources["still-running"].description
     assert "done" in resources["finished"].description
     assert all(r.mime_type == "application/json" for r in resources.values())
+
+
+def test_read_jobs_list_resource_filters_running_and_done(tmp_path):
+    """`jobs list --running`/`--done` exist as CLI filters; the resources
+    must offer the same filtering, not just the unfiltered aggregate --
+    an agent checking on several in-flight jobs at once shouldn't have
+    to fetch everything and filter client-side."""
+    import json
+
+    from colab_cli.job.models import JobEnvelope, Workload
+    from colab_cli.mcp_server import read_jobs_list_resource
+
+    store = _job_store(tmp_path)
+    (store.job_dir("planned-only")).mkdir(parents=True)
+    store.write_envelope(JobEnvelope(job_id="still-running", workload=Workload.RUNNING))
+    store.write_envelope(_done_envelope("finished"))
+
+    running = json.loads(
+        read_jobs_list_resource(store, "jobs://running").contents[0].text
+    )
+    done = json.loads(read_jobs_list_resource(store, "jobs://done").contents[0].text)
+
+    assert {r["job_id"] for r in running} == {"planned-only", "still-running"}
+    assert {r["job_id"] for r in done} == {"finished"}
 
 
 def test_read_jobs_list_resource_matches_job_list_rows(tmp_path):

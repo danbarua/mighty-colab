@@ -296,6 +296,8 @@ def _job_id_from_uri(uri: str) -> Optional[str]:
 
 
 JOBS_LIST_URI = "jobs://"
+JOBS_RUNNING_URI = "jobs://running"
+JOBS_DONE_URI = "jobs://done"
 
 
 def list_job_resources(store) -> List[types.Resource]:
@@ -305,7 +307,19 @@ def list_job_resources(store) -> List[types.Resource]:
             name="jobs",
             description="All local job records (same rows as `mighty-colab jobs list --json`)",
             mime_type="application/json",
-        )
+        ),
+        types.Resource(
+            uri=JOBS_RUNNING_URI,
+            name="jobs (running)",
+            description="Local job records not yet done (same rows as `mighty-colab jobs list --running --json`)",
+            mime_type="application/json",
+        ),
+        types.Resource(
+            uri=JOBS_DONE_URI,
+            name="jobs (done)",
+            description="Local job records that have finished (same rows as `mighty-colab jobs list --done --json`)",
+            mime_type="application/json",
+        ),
     ]
     for job_id in store.list_jobs():
         env = store.read_envelope(job_id)
@@ -326,24 +340,31 @@ def list_job_resources(store) -> List[types.Resource]:
     return resources
 
 
-def read_jobs_list_resource(store) -> types.ReadResourceResult:
-    """`jobs://` -- every local job record, same rows and same source
-    (`_job_list_rows`) as `jobs list --json`: one row builder, so this
-    can never drift thinner than what `jobs list` already shows.
+def read_jobs_list_resource(store, uri: str = JOBS_LIST_URI) -> types.ReadResourceResult:
+    """`jobs://`, `jobs://running`, `jobs://done` -- every local job
+    record, or filtered to just the ones not yet done / just the ones
+    that have finished. Same rows and same source (`_job_list_rows`) as
+    `jobs list [--running|--done] --json`: one row builder and one
+    filter, so these can never drift thinner than the CLI or from each
+    other.
 
     Not subscribable, unlike `job://<id>`: this resource's content
     changes on every job's every phase transition plus every prune,
     far too often to sensibly notify on. `job://<id>`'s single terminal
-    `done` transition is the thing worth pushing; this one is for an
+    `done` transition is the thing worth pushing; these are for an
     agent to read on demand.
     """
     from colab_cli.commands.job import _job_list_rows
 
     rows = _job_list_rows(store)
+    if uri == JOBS_RUNNING_URI:
+        rows = [r for r in rows if not r["done"]]
+    elif uri == JOBS_DONE_URI:
+        rows = [r for r in rows if r["done"]]
     return types.ReadResourceResult(
         contents=[
             types.TextResourceContents(
-                uri=JOBS_LIST_URI,
+                uri=uri,
                 mime_type="application/json",
                 text=json.dumps(rows),
             )
@@ -447,8 +468,8 @@ async def run_stdio_server(click_group: click.Group, server_name: str) -> None:
         return types.ListResourcesResult(resources=list_job_resources(job_store))
 
     async def on_read_resource(ctx, params) -> types.ReadResourceResult:
-        if params.uri == JOBS_LIST_URI:
-            return read_jobs_list_resource(job_store)
+        if params.uri in (JOBS_LIST_URI, JOBS_RUNNING_URI, JOBS_DONE_URI):
+            return read_jobs_list_resource(job_store, params.uri)
         return read_job_resource(job_store, params.uri)
 
     async def on_subscribe_resource(ctx, params) -> types.EmptyResult:
