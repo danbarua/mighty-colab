@@ -46,7 +46,7 @@ from colab_cli.job.models import (
 )
 
 @pytest.fixture(autouse=True)
-def isolated_job_store(tmp_path, mock_common_state):
+def isolated_job_store(tmp_path, mock_common_state, monkeypatch):
     """Point the job store at tmp_path.
 
     `state` is a MagicMock, so `state.config_path` auto-vivifies into
@@ -55,6 +55,16 @@ def isolated_job_store(tmp_path, mock_common_state):
     junk envelope become the next test's input. Pin a real path instead.
     """
     mock_common_state.config_path = str(tmp_path / "cfg" / "sessions.json")
+    # `status()` respawns keep-alive (issue #54) whenever a session's
+    # `keep_alive_pid` doesn't read as alive -- true by default for every
+    # MagicMock session in this file, including tests that don't care
+    # about keep-alive at all. Without this, spawn_keep_alive's real,
+    # unmocked subprocess.Popen would actually fire in the background
+    # during unrelated tests. A safe, deterministic default; tests that
+    # care about the respawn itself override this explicitly.
+    monkeypatch.setattr(
+        "colab_cli.commands.session.spawn_keep_alive", lambda *a, **k: 424242
+    )
     return mock_common_state
 
 
@@ -1392,6 +1402,95 @@ def test_status_scrubs_an_interrupted_prelaunch_secret(monkeypatch, mock_common_
     transport.remove.assert_called_once_with(
         "/content/jobs/interrupted/mighty_runtime/.secrets/transfer.json"
     )
+
+
+def test_status_respawns_keep_alive_when_the_daemon_has_died(
+    monkeypatch, mock_common_state
+):
+    """Issue #54: the daemon has been observed dying even though
+    `spawn_keep_alive` starts it genuinely detached. Self-heal from
+    `status` regardless of why it died -- don't rely on the cause never
+    recurring."""
+    import os
+
+    from colab_cli.job.models import Supervisor
+    from colab_cli.job.runtime_payload import ident
+    from colab_cli.job.transport import ReadStatus
+
+    store = _persist_running_job(mock_common_state, job_id="dead-keepalive")
+    env = store.read_envelope("dead-keepalive")
+    env.supervisor = Supervisor.RUNNING
+    store.write_envelope(env)
+    store.write_supervisor_identity(
+        "dead-keepalive",
+        pid=os.getpid(),
+        starttime=ident.starttime(os.getpid()),
+        boot_id=ident.boot_id(),
+    )
+    session = mock_common_state.store.get.return_value
+    session.keep_alive_pid = None  # explicit, matches the fixture default
+    session.endpoint = "gpu-a100-s-example"
+    session.name = "job-dead-keepalive"
+    spawn_calls = []
+    monkeypatch.setattr(
+        "colab_cli.commands.session.spawn_keep_alive",
+        lambda endpoint, name, **kw: spawn_calls.append((endpoint, name, kw))
+        or os.getpid(),
+    )
+    transport = MagicMock()
+    transport.read_json.return_value = (None, ReadStatus.NOT_FOUND)
+    monkeypatch.setattr(
+        "colab_cli.job.transport.JobTransport", lambda *_args: transport
+    )
+
+    result = runner.invoke(app, ["job", "status", "dead-keepalive"])
+
+    assert result.exit_code == 0
+    assert len(spawn_calls) == 1
+    endpoint, name, kw = spawn_calls[0]
+    assert endpoint == "gpu-a100-s-example"
+    assert name == "job-dead-keepalive"
+    assert session.keep_alive_pid == os.getpid()
+    mock_common_state.store.add.assert_called_with(session)
+    env = store.read_envelope("dead-keepalive")
+    assert any("respawned" in h for h in env.hints)
+
+
+def test_status_does_not_respawn_a_healthy_keep_alive(monkeypatch, mock_common_state):
+    import os
+
+    from colab_cli.job.models import Supervisor
+    from colab_cli.job.runtime_payload import ident
+    from colab_cli.job.transport import ReadStatus
+
+    store = _persist_running_job(mock_common_state, job_id="healthy-keepalive")
+    env = store.read_envelope("healthy-keepalive")
+    env.supervisor = Supervisor.RUNNING
+    store.write_envelope(env)
+    store.write_supervisor_identity(
+        "healthy-keepalive",
+        pid=os.getpid(),
+        starttime=ident.starttime(os.getpid()),
+        boot_id=ident.boot_id(),
+    )
+    session = mock_common_state.store.get.return_value
+    session.keep_alive_pid = os.getpid()  # alive for the duration of this test
+    spawn_calls = []
+    monkeypatch.setattr(
+        "colab_cli.commands.session.spawn_keep_alive",
+        lambda *a, **k: spawn_calls.append((a, k)) or 1,
+    )
+    transport = MagicMock()
+    transport.read_json.return_value = (None, ReadStatus.NOT_FOUND)
+    monkeypatch.setattr(
+        "colab_cli.job.transport.JobTransport", lambda *_args: transport
+    )
+
+    result = runner.invoke(app, ["job", "status", "healthy-keepalive"])
+
+    assert result.exit_code == 0
+    assert spawn_calls == []
+
 
 
 def test_status_does_not_scrub_a_live_supervisor_before_launch(

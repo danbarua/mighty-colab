@@ -959,6 +959,41 @@ def _release_orphaned_job(env, session, state, store) -> None:
     store.write_envelope(env)
 
 
+def _ensure_keep_alive(session, state) -> Optional[str]:
+    """Respawn keep-alive if the daemon has died, returning a hint if so.
+
+    Issue #54: `spawn_keep_alive` starts a genuinely detached process
+    (`start_new_session=True`), but it has been observed dying anyway when
+    the local `job apply` invocation that started it is killed externally
+    (a wrapping tool's timeout, a closed terminal) -- confirmed via local
+    history logs showing `keep_alive_started` with no matching
+    `keep_alive_stopped`, which the daemon's own loop always logs before
+    any graceful exit. `job apply --async` (spawning apply itself as a
+    detached child) removes one specific cause of that, but the daemon
+    dying is not something mighty-colab should merely hope doesn't
+    recur -- self-heal it regardless of cause. Without a ping the
+    assignment idles out and is gone within minutes, well before a long
+    job's `wall_clock` budget elapses. `job status`/`--poll` already
+    holds a live `session` object and is what a caller is expected to
+    call periodically regardless, so it's the natural place to notice
+    and recover before that happens.
+    """
+    from colab_cli.common import pid_alive
+
+    if pid_alive(session.keep_alive_pid):
+        return None
+    from colab_cli.commands.session import spawn_keep_alive
+
+    session.keep_alive_pid = spawn_keep_alive(
+        session.endpoint,
+        session.name,
+        auth_provider=state.auth_provider,
+        config_path=state.config_path,
+    )
+    state.store.add(session)
+    return f"keep-alive had died; respawned as pid {session.keep_alive_pid}"
+
+
 def status(
     job_id: Annotated[str, typer.Argument(help="Job id")],
     poll: Annotated[
@@ -1013,6 +1048,9 @@ def status(
             env = _recover_off_vm_result(env, store, job_id) or env
             _force_release_unconfirmed_secret(env, state, store, "status")
         if session is not None:
+            keep_alive_hint = _ensure_keep_alive(session, state)
+            if keep_alive_hint:
+                env.hints.append(keep_alive_hint)
             transport = JobTransport(session, state.client, state.store)
             if must_scrub and not _scrub_transfer_secret(transport, job_id):
                 env = _recover_off_vm_result(env, store, job_id) or env
@@ -1024,6 +1062,9 @@ def status(
                 return
             if not env.workload.terminal:
                 while True:
+                    keep_alive_hint = _ensure_keep_alive(session, state)
+                    if keep_alive_hint:
+                        env.hints.append(keep_alive_hint)
                     kind, payload = _observe_remote(transport, job_id)
                     if kind == "result":
                         _absorb_remote_result(env, store, job_id, payload)
