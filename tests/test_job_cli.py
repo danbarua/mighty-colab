@@ -1585,6 +1585,41 @@ def test_status_poll_keeps_waiting_while_runner_has_not_launched_yet(
     assert env.workload is Workload.SUCCEEDED
 
 
+def test_status_poll_pulls_runner_log_locally(monkeypatch, mock_common_state):
+    """Same guarantee as exec-async: as long as the VM is alive, the log
+    is pulled locally on every healthy poll tick, not just at the end.
+    """
+    import os
+
+    from colab_cli.job.models import Supervisor
+    from colab_cli.job.runtime_payload import ident
+    from colab_cli.job.transport import ReadStatus
+
+    store = _persist_running_job(mock_common_state, job_id="log-pull")
+    env = store.read_envelope("log-pull")
+    env.supervisor = Supervisor.RUNNING
+    store.write_envelope(env)
+    store.write_supervisor_identity(
+        "log-pull",
+        pid=os.getpid(),
+        starttime=ident.starttime(os.getpid()),
+        boot_id=ident.boot_id(),
+    )
+    transport = MagicMock()
+    transport.read_json.return_value = (None, ReadStatus.NOT_FOUND)
+    transport.read_text.return_value = ("step 500: loss=0.1\n", ReadStatus.OK)
+    monkeypatch.setattr(
+        "colab_cli.job.transport.JobTransport", lambda *_args: transport
+    )
+
+    result = runner.invoke(app, ["job", "status", "log-pull"])
+
+    assert result.exit_code == 0
+    assert (store.job_dir("log-pull") / "runner.log").read_text() == (
+        "step 500: loss=0.1\n"
+    )
+
+
 def _remote_files(mapping):
     from colab_cli.job.transport import ReadStatus
 

@@ -51,7 +51,7 @@ from colab_cli.job.models import (
     Supervisor,
     Workload,
 )
-from colab_cli.job.store import JobStore
+from colab_cli.job.store import RUNNER_LOG_FILE, JobStore
 from colab_cli.job.runtime_payload import RUNTIME_PAYLOAD_VERSION
 
 _logger = logging.getLogger(__name__)
@@ -641,7 +641,13 @@ class Orchestrator:
             "            cmd += ['--stage-manifest', os.path.join(d, 'stage.manifest.json')]\n"
             "        if os.path.exists(os.path.join(d, 'offload.manifest.json')):\n"
             "            cmd += ['--offload-manifest', os.path.join(d, 'offload.manifest.json')]\n"
-            f"        cmd += ['--'] + {args}\n"
+            + (
+                f"        cmd += ['--artifact-sync-interval', "
+                f"str({self.spec.budgets.artifact_sync_interval_seconds!r})]\n"
+                if self.spec.budgets.artifact_sync_interval_seconds is not None
+                else ""
+            )
+            + f"        cmd += ['--'] + {args}\n"
             "        log = open(os.path.join(d, 'runner.log'), 'ab')\n"
             "        p = subprocess.Popen(cmd, cwd=d, env=env, stdout=log, stderr=log,\n"
             "                             stdin=subprocess.DEVNULL, start_new_session=True,\n"
@@ -712,6 +718,27 @@ class Orchestrator:
                         f"disk_free={wd.get('disk_free_bytes')} "
                         f"runner_alive={wd.get('runner_alive')}"
                     ]
+                # Every poll, not just at the end: runner.log is on VM disk
+                # the whole run (orchestrator.launch() redirects the
+                # runner's stdout/stderr there) and nothing ever reads it
+                # back today -- if the VM disappears before offload, it's
+                # gone with everything else, no different than never
+                # having been written. No new signed URL, no watchdog
+                # changes: same Contents connection already open for
+                # result.json/watchdog.json above. Best-effort: any
+                # failure here (including a transport double that doesn't
+                # implement read_text) must never break the actual verdict
+                # poll above it.
+                try:
+                    log_text, log_status = transport.read_text(
+                        f"{self.remote_dir}/{RUNNER_LOG_FILE}"
+                    )
+                    if log_status.name == "OK" and log_text is not None:
+                        log_path = self.store.job_dir(self.job_id) / RUNNER_LOG_FILE
+                        log_path.parent.mkdir(parents=True, exist_ok=True)
+                        log_path.write_text(log_text)
+                except Exception:  # noqa: BLE001 - best-effort, never fatal
+                    pass
             self._persist()
             time.sleep(interval)
 

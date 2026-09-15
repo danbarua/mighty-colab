@@ -56,6 +56,7 @@ RANGED_GET_IGNORED_RANGE = "ranged_get_ignored_range"
 DATA_SIZE_UNKNOWN = "data_size_unknown"
 SOURCE_FILE_TOO_LARGE = "source_file_too_large"
 SOURCE_PAYLOAD_LARGE = "source_payload_large"
+ARTIFACT_SYNC_INTERVAL_INVALID = "artifact_sync_interval_invalid"
 
 DIAGNOSTIC_CODES = frozenset(
     {
@@ -78,6 +79,7 @@ DIAGNOSTIC_CODES = frozenset(
         DATA_SIZE_UNKNOWN,
         SOURCE_FILE_TOO_LARGE,
         SOURCE_PAYLOAD_LARGE,
+        ARTIFACT_SYNC_INTERVAL_INVALID,
     }
 )
 
@@ -560,6 +562,46 @@ def build_plan(
                 "Remove these settings until their behavior is implemented.",
             )
         )
+
+    sync_interval = spec.budgets.artifact_sync_interval_seconds
+    if sync_interval is not None:
+        if sync_interval <= 0:
+            diagnostics.append(
+                _diagnostic(
+                    "error",
+                    ARTIFACT_SYNC_INTERVAL_INVALID,
+                    f"budgets.artifact_sync_interval_seconds must be positive, "
+                    f"got {sync_interval}",
+                    RetryClass.DO_NOT_RETRY,
+                    "Remove artifact_sync_interval_seconds or set it to a "
+                    "positive number of seconds.",
+                )
+            )
+        elif not spec.artifacts:
+            diagnostics.append(
+                _diagnostic(
+                    "warn",
+                    ARTIFACT_SYNC_INTERVAL_INVALID,
+                    "budgets.artifact_sync_interval_seconds is set but "
+                    "artifacts[] is empty; there is nothing to periodically sync",
+                    RetryClass.RETRY_SAME,
+                    "Declare artifacts[] to sync, or remove "
+                    "artifact_sync_interval_seconds.",
+                )
+            )
+        elif sync_interval >= spec.budgets.wall_clock:
+            diagnostics.append(
+                _diagnostic(
+                    "warn",
+                    ARTIFACT_SYNC_INTERVAL_INVALID,
+                    f"budgets.artifact_sync_interval_seconds "
+                    f"({sync_interval}) is not smaller than wall_clock "
+                    f"({spec.budgets.wall_clock}); periodic sync may "
+                    "never fire before the run's own deadline",
+                    RetryClass.RETRY_SAME,
+                    "Set artifact_sync_interval_seconds well below wall_clock.",
+                )
+            )
 
     diagnostics.extend(_url_diagnostics(spec))
     diagnostics.extend(_control_url_diagnostics(spec))
