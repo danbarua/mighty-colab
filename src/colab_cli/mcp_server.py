@@ -410,19 +410,17 @@ class JobResourceSubscriptions:
     async def subscribe(self, session, uri: str) -> None:
         # Caught live: a client subscribed to `jobs://` because it's
         # listed right alongside subscribable `job://<id>` resources with
-        # no way to know in advance which support it. "not a job://
-        # resource" reads like a malformed-URI complaint when the real
-        # answer is "valid resource, just not one that notifies" --
-        # distinguish the two rather than raising the same message for
-        # both.
+        # no way to know in advance which support it. Raising here was a
+        # dead end in practice: the observed client marks the
+        # subscription "succeeded" in its own bookkeeping regardless of
+        # whether the server actually confirmed it, so an error was just
+        # log noise with no visible effect. Accept it silently instead --
+        # no watch task, no notification ever, but no error either. It's
+        # still true that content changing on every job's every phase
+        # transition and every prune is too often to sensibly notify on;
+        # this just declines quietly rather than loudly.
         if uri in (JOBS_LIST_URI, JOBS_RUNNING_URI, JOBS_DONE_URI):
-            raise ValueError(
-                f"{uri} does not support subscription -- its content changes "
-                f"too often (every job's every phase transition, every "
-                f"prune) to notify on. Read it directly instead; subscribe "
-                f"to individual job://<id> resources for terminal-state "
-                f"push notifications."
-            )
+            return
         job_id = _job_id_from_uri(uri)
         if job_id is None:
             raise ValueError(f"not a job:// resource: {uri}")
