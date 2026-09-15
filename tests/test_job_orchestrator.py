@@ -703,6 +703,40 @@ def test_verify_passes_on_cpu_when_no_gpu_was_requested(tmp_path):
 
     orch.verify()  # must not raise
 
+def test_install_failure_logs_full_pip_output_before_truncating(tmp_path, caplog):
+    """A build-from-source failure puts the useful part (which package,
+    why) near the top of stderr and generic pip boilerplate ("did not run
+    successfully", "This error originates from a subprocess...") at the
+    bottom -- so truncating the envelope `reason` to a tail keeps the part
+    that is identical for every failure and throws away the part that
+    names the cause. The full text must still reach the persistent log.
+    """
+    generic_tail = "note: This error originates from a subprocess. " * 20
+    full_output = (
+        "Collecting scipy==1.15.2\n"
+        "  Cython.Compiler.Errors.CompileError: scipy requires a Fortran90 compiler\n"
+        + generic_tail
+        + "\nPIP_RC=1\n"
+    )
+    rt = _runtime_returning(full_output)
+    spec = _spec(deps=["scipy==1.15.2"])
+    orch = _orch(tmp_path, spec=spec, runtime=rt)
+    orch.session_state = SimpleNamespace(url="https://u", token="t")
+
+    with caplog.at_level("INFO", logger="colab_cli.job.orchestrator"):
+        with pytest.raises(PhaseError) as exc:
+            orch.install()
+
+    assert exc.value.retry_class is RetryClass.FIX_CODE
+    # The truncated reason alone would not tell you which package failed.
+    assert "Fortran90 compiler" not in exc.value.reason
+    # But the full text -- including the actual cause -- reached the log.
+    logged = "\n".join(r.message for r in caplog.records)
+    assert "scipy requires a Fortran90 compiler" in logged
+    assert any(
+        "colab.log" in h for h in exc.value.hints
+    ), "hint must point at the persistent log, not just the truncated reason"
+
 
 def test_verify_counts_declared_artifact_space_before_launch(tmp_path):
     spec = _spec(
@@ -831,6 +865,56 @@ def test_missing_required_artifact_fails_offload_even_on_a_clean_exit(tmp_path):
     assert orch.env.offload is Offload.FAILED
     assert orch.env.retry_class is RetryClass.FIX_CODE
     assert not orch.env.ok
+
+
+def test_missing_required_artifact_names_which_one(tmp_path):
+    """"a required artifact was not produced" alone forces a second round
+    trip to find out which one -- the declared path is not a secret."""
+    spec = _spec(
+        artifacts=[
+            ArtifactItem(path="/content/out/model.pt", url="https://x/m.pt"),
+            ArtifactItem(path="/content/out/metrics.json", url="https://x/j"),
+        ]
+    )
+    orch = _orch(tmp_path, spec=spec)
+    orch._absorb_result(
+        {
+            "workload": "succeeded",
+            "exit_code": 0,
+            "artifacts": [
+                {
+                    "path": "/content/out/metrics.json",
+                    "url_id": "https://x/j#abc",
+                    "status": "ok",
+                }
+            ],
+        }
+    )
+    assert orch.env.offload is Offload.FAILED
+    assert "/content/out/model.pt" in orch.env.reason
+    assert "/content/out/metrics.json" not in orch.env.reason
+
+
+def test_failed_artifact_offload_names_which_one(tmp_path):
+    spec = _spec(
+        artifacts=[ArtifactItem(path="/content/out/model.pt", url="https://x/m.pt")]
+    )
+    orch = _orch(tmp_path, spec=spec)
+    orch._absorb_result(
+        {
+            "workload": "succeeded",
+            "exit_code": 0,
+            "artifacts": [
+                {
+                    "path": "/content/out/model.pt",
+                    "url_id": "https://x/m.pt#abc",
+                    "status": "failed",
+                }
+            ],
+        }
+    )
+    assert orch.env.offload is Offload.FAILED
+    assert "/content/out/model.pt" in orch.env.reason
 
 
 def test_optional_artifact_missing_does_not_fail_offload(tmp_path):
@@ -1082,3 +1166,54 @@ def test_absorb_result_honors_remote_offload_failure_and_phase(tmp_path):
     assert orch.env.workload is Workload.SUCCEEDED
     assert orch.env.phase is Phase.OFFLOAD
     assert orch.env.offload is Offload.FAILED
+
+
+def test_stage_failure_surfaces_which_file_and_why(tmp_path):
+    """The runner classifies a staging failure into a safe dest+category
+    (StageItemError in runtime_payload/runner.py) before it ever leaves
+    the VM -- the envelope's `reason` must actually use it instead of
+    falling back to the fully generic message that doesn't say which
+    declared input failed or how."""
+    orch = _orch(tmp_path)
+
+    orch._absorb_result(
+        {
+            "workload": "failed",
+            "exit_code": 1,
+            "phase": "stage",
+            "exception": {
+                "type": "StageItemError",
+                "message": "inputs/2shapes_train.npz: http_error (403)",
+                "traceback": "",
+            },
+        }
+    )
+
+    assert orch.env.workload is Workload.FAILED
+    assert "inputs/2shapes_train.npz" in orch.env.reason
+    assert "http_error" in orch.env.reason
+    assert orch.env.retry_class is RetryClass.FIX_HUMAN
+
+
+def test_stage_failure_without_item_detail_falls_back_to_generic_reason(tmp_path):
+    """A stage failure that never reached a specific item (e.g. a
+    malformed manifest) has no dest/category to report -- must not crash
+    or fabricate one, just use the pre-existing generic explanation."""
+    orch = _orch(tmp_path)
+
+    orch._absorb_result(
+        {
+            "workload": "failed",
+            "exit_code": 1,
+            "phase": "stage",
+            "exception": {
+                "type": "ValueError",
+                "message": "stage failed",
+                "traceback": "",
+            },
+        }
+    )
+
+    assert orch.env.workload is Workload.FAILED
+    assert "declared input could not be fetched" in orch.env.reason
+    assert orch.env.retry_class is RetryClass.FIX_HUMAN

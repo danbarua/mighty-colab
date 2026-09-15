@@ -31,6 +31,7 @@ which is the exact wound this command exists to close.
 
 import datetime
 import json
+import logging
 import time
 import uuid
 from typing import Callable, List, Optional, Tuple
@@ -52,6 +53,8 @@ from colab_cli.job.models import (
 )
 from colab_cli.job.store import JobStore
 from colab_cli.job.runtime_payload import RUNTIME_PAYLOAD_VERSION
+
+_logger = logging.getLogger(__name__)
 
 # Remote layout. Everything the job owns lives under one directory so
 # `destroy` has exactly one thing to remove and `plan` has exactly one
@@ -361,15 +364,15 @@ class Orchestrator:
         if not self.spec.deps:
             return
         self._set_phase(Phase.INSTALL)
-        pkgs = " ".join(repr(d) for d in self.spec.deps)
+        pkgs = ", ".join(repr(d) for d in self.spec.deps)
         code = (
             "import subprocess, sys\n"
             f"pkgs = [{pkgs}]\n"
-            "r = subprocess.run([sys.executable, '-m', 'pip', 'install', "
+            "r = subprocess.run([sys.executable, '-m', 'pip', 'install', '-v', "
             "'--upgrade-strategy', 'only-if-needed', *pkgs],"
             " capture_output=True, text=True)\n"
-            "print(r.stdout[-4000:])\n"
-            "print(r.stderr[-4000:])\n"
+            "print(r.stdout[-20000:])\n"
+            "print(r.stderr[-20000:])\n"
             "print('PIP_RC=%d' % r.returncode)\n"
         )
         outputs = self._execute_code(code, timeout=INSTALL_TIMEOUT)
@@ -377,9 +380,12 @@ class Orchestrator:
         if "PIP_RC=0" not in text:
             raise PhaseError(
                 Phase.INSTALL,
-                f"pip install failed: {_tail(text)}",
+                f"pip install failed: {_tail(text, phase='install/pip')}",
                 RetryClass.FIX_CODE,
-                ["check the version pins in `deps` against what Colab preinstalls"],
+                [
+                    "check the version pins in `deps` against what Colab preinstalls",
+                    "full pip output logged to ~/.config/colab-cli/colab.log",
+                ],
             )
 
     def restart(self) -> None:
@@ -512,7 +518,11 @@ class Orchestrator:
         if "SECRET_CHANNEL_READY=1" not in _outputs_text(outputs):
             raise PhaseError(
                 Phase.STAGE,
-                "credential channel preparation failed",
+                # This kernel code is ours, not the consumer's -- its output
+                # can't contain user data or signed URLs, so there's no
+                # reason to withhold it the way stage/pip output must be.
+                f"credential channel preparation failed: "
+                f"{_tail(_outputs_text(outputs), phase='secret-channel-prepare')}",
                 RetryClass.RETRY_SAME,
             )
         self._secret_channel_prepared = True
@@ -541,7 +551,8 @@ class Orchestrator:
         if "SECRET_CHANNEL_SEALED=1" not in _outputs_text(outputs):
             raise PhaseError(
                 Phase.STAGE,
-                "credential channel sealing failed",
+                f"credential channel sealing failed: "
+                f"{_tail(_outputs_text(outputs), phase='secret-channel-seal')}",
                 RetryClass.RETRY_SAME,
             )
 
@@ -649,7 +660,7 @@ class Orchestrator:
         if pid is None:
             raise PhaseError(
                 Phase.RUN,
-                f"launch RPC returned no pid: {_tail(text)}",
+                f"launch RPC returned no pid: {_tail(text, phase='launch')}",
                 RetryClass.RETRY_SAME,
             )
         self.env.workload = Workload.RUNNING
@@ -775,27 +786,62 @@ class Orchestrator:
         if not spec.artifacts:
             env.offload = Offload.NOT_REQUIRED
         elif missing_required:
+            missing_paths = sorted(
+                declared.path
+                for declared in spec.artifacts
+                if declared.required
+                and (
+                    declared.path not in result_paths
+                    or any(
+                        artifact.path == declared.path and artifact.status == "missing"
+                        for artifact in env.artifacts
+                    )
+                )
+            )
             env.offload = Offload.FAILED
-            env.reason = "a required artifact was not produced"
+            # Declared artifact paths are caller-chosen relative paths, not
+            # signed URLs -- safe to name, and the whole point of naming
+            # them: "a required artifact was not produced" alone forces a
+            # second round trip just to find out which one.
+            env.reason = f"required artifact(s) not produced: {', '.join(missing_paths)}"
             env.retry_class = RetryClass.FIX_CODE
         elif result.get("offload") == "failed" or any(
             artifact.status == "failed" for artifact in env.artifacts
         ):
+            failed_paths = sorted(
+                artifact.path for artifact in env.artifacts if artifact.status == "failed"
+            )
             env.offload = Offload.FAILED
-            env.reason = "artifact offload failed"
+            env.reason = (
+                f"artifact offload failed: {', '.join(failed_paths)}"
+                if failed_paths
+                else "artifact offload failed"
+            )
             env.retry_class = RetryClass.RETRY_SAME
         else:
             env.offload = Offload.OK
 
-        # Stage errors are deliberately redacted by the runner because urllib
-        # exception strings can contain signed query parameters. The surviving
-        # evidence cannot distinguish expiry, access, and checksum failures.
+        # Stage failures are classified by the runner into a coarse, safe
+        # category before ever leaving the VM (see StageItemError in
+        # runtime_payload/runner.py) -- the destination path and category
+        # are not secrets; only the raw exception/URL ever was. Use that
+        # detail when the runner supplied it; fall back to the generic
+        # explanation for older runtime payloads or non-item failures
+        # (e.g. a malformed manifest) that never got that far.
         if env.phase is Phase.STAGE and env.workload is Workload.FAILED:
             env.retry_class = RetryClass.FIX_HUMAN
-            env.reason = (
-                "staging failed: a declared input could not be fetched, or "
-                "failed its sha256 check. The consumer never started."
-            )
+            detail = None
+            if isinstance(env.exception, dict):
+                msg = env.exception.get("message")
+                if msg and msg != "stage failed":
+                    detail = msg
+            if detail:
+                env.reason = f"staging failed ({detail}). The consumer never started."
+            else:
+                env.reason = (
+                    "staging failed: a declared input could not be fetched, or "
+                    "failed its sha256 check. The consumer never started."
+                )
             env.hints.append(
                 "check, in order: the URL has not expired; the object exists "
                 "and the grant covers it; data[].sha256 matches the object"
@@ -939,6 +985,17 @@ def _extract_tagged(text: str, tag: str, raw: bool = False):
     return None
 
 
-def _tail(text: str, n: int = 600) -> str:
+def _tail(text: str, n: int = 600, *, phase: str = "") -> str:
+    """Truncate `text` for the envelope's `reason`, but never lose it: pip's
+    (and similar tools') generic boilerplate ("did not run successfully",
+    "This error originates from a subprocess...") is often the *last* few
+    hundred characters regardless of which package or line actually failed,
+    so a naive tail keeps the one part that is the same for every failure
+    and discards the one part that names the cause. Log the untruncated
+    text to the persistent rotating log (~/.config/colab-cli/colab.log,
+    wired up in common.py:setup_logging) before slicing.
+    """
+    if len(text) > n:
+        _logger.info("full %s output:\n%s", phase or "phase", text)
     return text[-n:] if len(text) > n else text
 

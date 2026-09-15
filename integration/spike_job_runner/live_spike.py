@@ -2,7 +2,7 @@
 """Live spike: does the detached runner + Contents-API polling loop
 actually produce a reliable verdict on a real Colab VM?
 
-This answers the empirical questions in docs/08_job.md's Spike section
+This answers the empirical questions in docs/job/design.md's Spike section
 that no local run can: whether a kernel RPC can start a process that
 outlives it, whether the kernel really goes IDLE, and whether the
 verdict can be read back without ever calling execute_code again.

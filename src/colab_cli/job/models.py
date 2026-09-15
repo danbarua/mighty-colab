@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Job spec and envelope schemas (`docs/08_job.md`).
+"""Job spec and envelope schemas (`docs/job/design.md`).
 
 Two shapes live here and they are deliberately different:
 
@@ -32,6 +32,7 @@ import urllib.parse
 from enum import Enum
 from typing import Dict, List, Literal, Optional
 
+from packaging.requirements import InvalidRequirement, Requirement
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from colab_cli.job import RESULT_SCHEMA_VERSION, SCHEMA_VERSION
@@ -298,6 +299,20 @@ class JobSpec(BaseModel):
     ignore_warnings: bool = False
     on_offload_fail: Literal["leave_up", "destroy"] = "leave_up"
     on_run_fail: Literal["offload_anyway", "skip"] = "offload_anyway"
+
+    @field_validator("deps")
+    @classmethod
+    def _deps_are_valid_requirement_specifiers(cls, values: List[str]) -> List[str]:
+        """Each dep must be a valid pip requirement specifier (PEP 508)."""
+        for dep in values:
+            dep = dep.strip()
+            if not dep:
+                raise ValueError("empty dependency string is not allowed")
+            try:
+                Requirement(dep)
+            except InvalidRequirement as e:
+                raise ValueError(f"invalid dependency {repr(dep)}: {e}") from e
+        return values
 
     @field_validator("deps")
     @classmethod

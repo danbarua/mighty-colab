@@ -14,7 +14,7 @@
 
 """The `job` supervisor: spec-driven, VM-side-detached runs.
 
-See `docs/08_job.md` for the design and the live-spike evidence behind it.
+See `docs/job/design.md` for the design and the live-spike evidence behind it.
 
 The short version of why this exists: `exec` runs inside the kernel, and the
 kernel kills its children when the websocket drops -- which on a flaky link

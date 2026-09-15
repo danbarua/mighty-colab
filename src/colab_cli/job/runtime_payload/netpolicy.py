@@ -77,8 +77,24 @@ def check_url(url: str) -> tuple[str, str, int]:
 
 
 class _PinnedHTTPSConnection(http.client.HTTPSConnection):
-    def __init__(self, ip: str, *, server_hostname: str, **kwargs):
-        super().__init__(ip, **kwargs)
+    def __init__(self, ip: str, port: int, *, server_hostname: str, **kwargs):
+        # `port` MUST be passed explicitly, not embedded in `ip` as
+        # "host:port" or "[host]:port" and left for HTTPConnection's own
+        # `_get_hostport` to sniff out. That sniffer splits on the *last*
+        # `:` -- correct for "example.com:8080", wrong for an unbracketed
+        # IPv6 literal, whose last `:` precedes its final hextet rather
+        # than a port (getaddrinfo can return IPv6 before IPv4, so this
+        # class must handle both correctly, always). A hex tail with a
+        # letter (e.g. "::cf") raises `InvalidURL: nonnumeric port`; an
+        # all-digit tail (e.g. "::12") is worse -- it silently parses as
+        # port 12 with a truncated, wrong host, and connects successfully
+        # to the wrong place with no error at all. Passing `port`
+        # explicitly here skips that sniffing entirely (see
+        # `http.client.HTTPConnection._get_hostport`: the whole branch is
+        # gated on `if port is None`), so `self.host` ends up exactly
+        # `ip`, unmodified, which is also exactly what `socket
+        # .create_connection` below needs -- unbracketed, un-reparsed.
+        super().__init__(ip, port=port, **kwargs)
         self._server_hostname = server_hostname
 
     def connect(self) -> None:
@@ -88,17 +104,19 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
 
 
 class _PinnedHTTPSHandler(urllib.request.HTTPSHandler):
-    def __init__(self, server_hostname: str, ip: str, **kwargs):
+    def __init__(self, server_hostname: str, ip: str, port: int, **kwargs):
         super().__init__(**kwargs)
         self._server_hostname = server_hostname
         self._ip = ip
+        self._port = port
 
     def https_open(self, req):
         def builder(*args, **kwargs):
             del args
             kwargs.pop("host", None)
+            kwargs.pop("port", None)
             return _PinnedHTTPSConnection(
-                self._ip, server_hostname=self._server_hostname, **kwargs
+                self._ip, self._port, server_hostname=self._server_hostname, **kwargs
             )
 
         return self.do_open(builder, req)
@@ -131,6 +149,6 @@ def urlopen_public(req: urllib.request.Request, timeout: float):
     pinned_req.add_header("Host", host)
     opener = urllib.request.build_opener(
         _PublicRedirectHandler(),
-        _PinnedHTTPSHandler(host, ip),
+        _PinnedHTTPSHandler(host, ip, port),
     )
     return opener.open(pinned_req, timeout=timeout)

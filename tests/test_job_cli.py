@@ -736,8 +736,9 @@ def test_mcp_exposes_job_leaves_and_excludes_the_blocking_one():
     tools, commands = build_tools(typer.main.get_command(app))
     names = {t.name for t in tools}
 
-    assert {"job_plan", "job_status", "job_destroy", "job_list"} <= names
+    assert {"job_plan", "job_status", "job_destroy", "jobs_list", "jobs_prune"} <= names
     assert "job" not in names, "the bare group is a parameterless, useless tool"
+    assert "jobs" not in names, "the bare group is a parameterless, useless tool"
     assert "job_apply" not in names, (
         "apply blocks for the job's whole wall_clock -- hours -- which is the "
         "same failure mode `log --follow` is excluded for"
@@ -753,9 +754,9 @@ def test_mcp_can_actually_invoke_a_nested_leaf(mock_common_state):
     from colab_cli.mcp_server import build_tools, invoke_command
 
     _, commands = build_tools(typer.main.get_command(app))
-    ok, text = invoke_command("job_list", commands["job_list"], {})
+    ok, text = invoke_command("jobs_list", commands["jobs_list"], {})
 
-    assert ok, f"job_list failed to dispatch: {text}"
+    assert ok, f"jobs_list failed to dispatch: {text}"
 
 
 # --------------------------------------------------------------------------
@@ -1308,6 +1309,67 @@ def test_status_does_not_scrub_a_live_supervisor_before_launch(
     transport.remove.assert_not_called()
 
 
+def test_status_poll_keeps_waiting_while_runner_has_not_launched_yet(
+    monkeypatch, mock_common_state
+):
+    """`--poll` must keep polling through install/restart/verify/stage --
+    every phase before the runner actually launches reads as
+    `_observe_remote`'s "never_started" kind, since `launch.json` doesn't
+    exist yet. Previously the loop broke on the very first "never_started"
+    observation regardless of `--poll`, so a job still installing (the
+    common case right after `apply` starts) got exactly one status
+    snapshot and returned -- never waiting for `--interval` at all.
+    """
+    import os
+
+    from colab_cli.job.models import Supervisor
+    from colab_cli.job.runtime_payload import ident
+    from colab_cli.job.transport import ReadStatus
+
+    store = _persist_running_job(mock_common_state, job_id="still-installing")
+    env = store.read_envelope("still-installing")
+    env.supervisor = Supervisor.RUNNING
+    store.write_envelope(env)
+    store.write_supervisor_identity(
+        "still-installing",
+        pid=os.getpid(),
+        starttime=ident.starttime(os.getpid()),
+        boot_id=ident.boot_id(),
+    )
+    transport = MagicMock()
+    calls = {"n": 0}
+
+    def read_json(path):
+        calls["n"] += 1
+        # First two polls: runner hasn't launched (no launch.json). Third:
+        # it has, and the workload finished.
+        if path.endswith("result.json") and calls["n"] >= 5:
+            return {"workload": "succeeded", "exit_code": 0}, ReadStatus.OK
+        if path.endswith("launch.json") and calls["n"] >= 5:
+            return {"pid": 7, "starttime": "1", "boot_id": "b"}, ReadStatus.OK
+        return None, ReadStatus.NOT_FOUND
+
+    transport.read_json.side_effect = read_json
+    monkeypatch.setattr(
+        "colab_cli.job.transport.JobTransport", lambda *_args: transport
+    )
+    sleeps = []
+    monkeypatch.setattr(
+        "colab_cli.commands.job.time.sleep", lambda s: sleeps.append(s)
+    )
+
+    result = runner.invoke(
+        app, ["job", "status", "still-installing", "--poll", "--interval", "1"]
+    )
+
+    assert result.exit_code == 0
+    # Must have actually waited across multiple never_started observations
+    # rather than returning after the first one.
+    assert len(sleeps) >= 1, "status --poll returned after a single observation"
+    env = store.read_envelope("still-installing")
+    assert env.workload is Workload.SUCCEEDED
+
+
 def _remote_files(mapping):
     from colab_cli.job.transport import ReadStatus
 
@@ -1661,6 +1723,11 @@ def test_unexpected_apply_exception_emits_a_terminal_envelope(
     assert env.done
     assert env.retry_class is RetryClass.DO_NOT_RETRY
     assert env.reason == "internal supervisor failure (RuntimeError)"
+    # Regression: the old hint ("re-run with --debug") was a dead end once
+    # the job is terminal -- `job apply` on the same --job-id refuses, and
+    # `job status --debug` never re-enters this except-clause. The hint
+    # must point at where the traceback actually landed instead.
+    assert env.hints == ["local traceback logged to ~/.config/colab-cli/colab.log"]
 
 
 def test_status_poll_help_describes_recovery_cleanup():
@@ -1712,15 +1779,115 @@ def test_status_poll_finishes_cleanup_after_the_result_arrives(
     mock_common_state.client.unassign.assert_called_once_with("m-s-endpoint")
 
 
+def test_status_clears_stale_hints_from_a_prior_call(mock_common_state):
+    """A hint that was true at an earlier poll (e.g. "still billing" before
+    teardown completed) must not survive into a later call's envelope once
+    the job is fully released -- contradicting its own `cleanup` field.
+    """
+    from colab_cli.commands.job import _store
+    from colab_cli.job.models import Cleanup, JobEnvelope, Offload, Supervisor, Workload
+
+    store = _store()
+    store.write_envelope(
+        JobEnvelope(
+            job_id="stale-hint",
+            workload=Workload.FAILED,
+            offload=Offload.FAILED,
+            cleanup=Cleanup.RELEASED,
+            supervisor=Supervisor.FINISHED,
+            hints=[
+                "VM left running deliberately and is still billing: "
+                "`mighty-colab job destroy stale-hint` when done"
+            ],
+        )
+    )
+
+    result = runner.invoke(app, ["job", "status", "stale-hint"])
+
+    assert result.exit_code == 0
+    env = store.read_envelope("stale-hint")
+    assert env.hints == [], (
+        "a released, terminal job must not still claim it's 'still billing'"
+    )
+
+
+def test_status_keeps_permanent_diagnostic_hints_while_dropping_billing_ones(
+    mock_common_state,
+):
+    from colab_cli.commands.job import _store
+    from colab_cli.job.models import Cleanup, JobEnvelope, Offload, Supervisor, Workload
+
+    store = _store()
+    store.write_envelope(
+        JobEnvelope(
+            job_id="mixed-hints",
+            workload=Workload.FAILED,
+            offload=Offload.SKIPPED,
+            cleanup=Cleanup.RELEASED,
+            supervisor=Supervisor.FINISHED,
+            reason="staging failed: a declared input could not be fetched",
+            hints=[
+                "check, in order: the URL has not expired; the object exists",
+                "VM left running deliberately and is still billing: "
+                "`mighty-colab job destroy mixed-hints` when done",
+            ],
+        )
+    )
+
+    result = runner.invoke(app, ["job", "status", "mixed-hints"])
+
+    assert result.exit_code == 0
+    env = store.read_envelope("mixed-hints")
+    assert env.hints == [
+        "check, in order: the URL has not expired; the object exists"
+    ]
+
+def test_destroy_does_not_carry_stale_billing_hints_into_a_second_call(mock_common_state):
+    """Not a blanket hints reset (that would also wipe permanent diagnostic
+    hints like "check the URL has not expired") -- only hints claiming the
+    VM is still up/billing get dropped, and only once cleanup confirms it
+    genuinely isn't.
+    """
+    from colab_cli.commands.job import _store
+    from colab_cli.job.models import Cleanup, JobEnvelope, Offload, Supervisor, Workload
+
+    store = _store()
+    store.write_envelope(
+        JobEnvelope(
+            job_id="stale-destroy",
+            workload=Workload.FAILED,
+            offload=Offload.FAILED,
+            cleanup=Cleanup.LEFT_UP,
+            supervisor=Supervisor.FINISHED,
+            hints=[
+                "VM left running deliberately and is still billing: "
+                "`mighty-colab job destroy stale-destroy` when done",
+                "check, in order: the URL has not expired; the object exists",
+            ],
+        )
+    )
+
+    result = runner.invoke(app, ["job", "destroy", "stale-destroy"])
+
+    assert result.exit_code == 0
+    env = store.read_envelope("stale-destroy")
+    assert env.cleanup is Cleanup.ALREADY_ABSENT
+    assert not any("still billing" in h for h in env.hints)
+    # Non-billing diagnostic hints survive -- this isn't a blanket reset.
+    assert "check, in order: the URL has not expired; the object exists" in env.hints
+
 def _job_json(result):
     return json.loads(_clean(result.output).strip().splitlines()[-1])
 
 
 def test_job_help_summary_names_every_subcommand():
-    result = runner.invoke(app, ["job", "--help"], env={"COLUMNS": "200"})
+    job_result = runner.invoke(app, ["job", "--help"], env={"COLUMNS": "200"})
+    jobs_result = runner.invoke(app, ["jobs", "--help"], env={"COLUMNS": "200"})
 
-    assert result.exit_code == 0
-    assert "plan, apply, status, destroy, list" in _clean(result.output)
+    assert job_result.exit_code == 0
+    assert "plan, apply, status, destroy" in _clean(job_result.output)
+    assert jobs_result.exit_code == 0
+    assert "list, prune" in _clean(jobs_result.output)
 
 
 @pytest.mark.parametrize(
@@ -1841,15 +2008,143 @@ def test_list_and_nonterminal_status_json_are_query_successes(mock_common_state)
     _store().write_envelope(JobEnvelope(job_id="still-running"))
     _json_mode(mock_common_state)
 
-    listed = runner.invoke(app, ["job", "list"])
+    listed = runner.invoke(app, ["jobs", "list"])
     status_result = runner.invoke(app, ["job", "status", "still-running"])
 
     list_payload = _job_json(listed)
     status_payload = _job_json(status_result)
     assert listed.exit_code == 0
-    assert list_payload["command"] == "job list"
+    assert list_payload["command"] == "jobs list"
     assert list_payload["jobs"][0]["job_id"] == "still-running"
     assert status_result.exit_code == 0
     assert status_payload["command"] == "job status"
     assert status_payload["status"] == "ok"
     assert status_payload["done"] is False
+
+def test_prune_dry_run_reports_without_deleting(mock_common_state):
+    from colab_cli.commands.job import _store
+    from colab_cli.job.models import Cleanup, JobEnvelope, Offload, Supervisor, Workload
+
+    store = _store()
+    # Unapplied plan: `job plan` writes plan.json/spec.json but never an
+    # envelope; the directory existing with no envelope is what matters.
+    (store.job_dir("planned-only")).mkdir(parents=True)
+    store.write_envelope(
+        JobEnvelope(
+            job_id="done-released",
+            workload=Workload.SUCCEEDED,
+            offload=Offload.OK,
+            cleanup=Cleanup.RELEASED,
+            supervisor=Supervisor.FINISHED,
+        )
+    )
+
+    result = runner.invoke(app, ["jobs", "prune", "--dry-run"])
+
+    assert result.exit_code == 0
+    assert "would remove: planned-only" in result.output
+    assert "would remove: done-released" in result.output
+    # Nothing actually deleted.
+    assert set(store.list_jobs()) == {"planned-only", "done-released"}
+
+
+def test_prune_removes_safe_and_keeps_running_or_left_up(mock_common_state):
+    from colab_cli.commands.job import _store
+    from colab_cli.job.models import Cleanup, JobEnvelope, Offload, Supervisor, Workload
+
+    store = _store()
+    (store.job_dir("planned-only")).mkdir(parents=True)
+    store.write_envelope(
+        JobEnvelope(
+            job_id="done-released",
+            workload=Workload.SUCCEEDED,
+            offload=Offload.OK,
+            cleanup=Cleanup.RELEASED,
+            supervisor=Supervisor.FINISHED,
+        )
+    )
+    store.write_envelope(
+        JobEnvelope(
+            job_id="done-already-absent",
+            workload=Workload.FAILED,
+            offload=Offload.SKIPPED,
+            cleanup=Cleanup.ALREADY_ABSENT,
+            supervisor=Supervisor.FINISHED,
+        )
+    )
+    store.write_envelope(
+        JobEnvelope(job_id="still-running", workload=Workload.RUNNING)
+    )
+    store.write_envelope(
+        JobEnvelope(
+            job_id="left-up-billing",
+            workload=Workload.SUCCEEDED,
+            offload=Offload.OK,
+            cleanup=Cleanup.LEFT_UP,
+            supervisor=Supervisor.FINISHED,
+        )
+    )
+
+    result = runner.invoke(app, ["jobs", "prune"])
+
+    assert result.exit_code == 0
+    remaining = set(store.list_jobs())
+    # Deliberately-billing and still-running records must survive a prune
+    # unconditionally -- deleting "left-up-billing"'s record would destroy
+    # the only local pointer to a VM that is still running and billing.
+    assert remaining == {"still-running", "left-up-billing"}
+    assert "skipped: still-running" in result.output
+    assert "skipped: left-up-billing" in result.output
+    assert "left_up" in result.output
+
+
+def test_prune_cleanup_failed_is_kept_not_silently_removed(mock_common_state):
+    from colab_cli.commands.job import _store
+    from colab_cli.job.models import Cleanup, JobEnvelope, Offload, Supervisor, Workload
+
+    store = _store()
+    store.write_envelope(
+        JobEnvelope(
+            job_id="cleanup-failed",
+            workload=Workload.FAILED,
+            offload=Offload.SKIPPED,
+            cleanup=Cleanup.FAILED,
+            supervisor=Supervisor.FINISHED,
+        )
+    )
+
+    result = runner.invoke(app, ["jobs", "prune"])
+
+    assert result.exit_code == 0
+    assert "cleanup-failed" in store.list_jobs()
+    assert "skipped: cleanup-failed" in result.output
+    assert "mighty-colab sessions" in result.output
+
+
+def test_prune_json_reports_removed_and_skipped(mock_common_state):
+    from colab_cli.commands.job import _store
+    from colab_cli.job.models import Cleanup, JobEnvelope, Offload, Supervisor, Workload
+
+    store = _store()
+    store.write_envelope(
+        JobEnvelope(
+            job_id="done-released",
+            workload=Workload.SUCCEEDED,
+            offload=Offload.OK,
+            cleanup=Cleanup.RELEASED,
+            supervisor=Supervisor.FINISHED,
+        )
+    )
+    store.write_envelope(
+        JobEnvelope(job_id="still-running", workload=Workload.RUNNING)
+    )
+    _json_mode(mock_common_state)
+
+    result = runner.invoke(app, ["jobs", "prune"])
+
+    payload = _job_json(result)
+    assert result.exit_code == 0
+    assert payload["command"] == "jobs prune"
+    assert payload["dry_run"] is False
+    assert [r["job_id"] for r in payload["removed"]] == ["done-released"]
+    assert [s["job_id"] for s in payload["skipped"]] == ["still-running"]

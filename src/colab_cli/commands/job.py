@@ -27,6 +27,7 @@ missing.
 
 import datetime
 import json
+import logging
 import os
 import time
 import uuid
@@ -41,6 +42,7 @@ from colab_cli.envelopes import (
     JobEnvelopeWrapper,
     JobListEnvelope,
     JobPlanEnvelope,
+    JobPruneEnvelope,
 )
 from colab_cli.job.models import (
     Cleanup,
@@ -56,8 +58,13 @@ from colab_cli.job.runtime_payload import ident
 from colab_cli.job.spec_io import fetch_control_result
 from colab_cli.job.store import ApplyInProgress, JobStore, load_plan_file, write_plan_file
 
+_logger = logging.getLogger(__name__)
 job_app = typer.Typer(
-    help="Run an unattended job on a Colab VM: plan, apply, status, destroy, list.",
+    help="Run an unattended job on a Colab VM: plan, apply, status, destroy.",
+    no_args_is_help=True,
+)
+jobs_app = typer.Typer(
+    help="Manage local job records as a collection: list, prune.",
     no_args_is_help=True,
 )
 
@@ -230,12 +237,7 @@ def plan(
         bool, typer.Option("--no-probe", help="Skip network probes of data URLs")
     ] = False,
 ):
-    """Validate a spec and report what `apply` would do. Allocates nothing.
-
-    `plan` never calls `assign`. That is the whole point of having it: an
-    agent can iterate on a broken spec for free, and the first thing that
-    costs money is the thing the caller explicitly asked for.
-    """
+    """Validate a spec and report what `apply` would do. Allocates nothing."""
     from colab_cli.common import state
     from pydantic import ValidationError
 
@@ -332,8 +334,7 @@ def apply(
 ):
     """Execute a plan: provision through teardown.
 
-    Refuses a `plan.json` whose embedded spec disagrees with its own
-    recorded hash.
+    Refuses a plan.json whose embedded spec no longer matches its recorded hash.
     """
     from colab_cli.common import state
     from colab_cli.job.planner import revalidate_expiry
@@ -558,7 +559,20 @@ def apply(
         orch.env.supervisor = Supervisor.FINISHED
         orch.env.reason = f"internal supervisor failure ({type(e).__name__})"
         orch.env.retry_class = RetryClass.DO_NOT_RETRY
-        orch.env.hints.append("re-run with --debug to inspect the local traceback")
+        # `--debug` only helps while the exception is in flight (it makes
+        # this except-clause re-raise instead of swallowing) -- once the
+        # job is terminal there is nothing left to re-run: `job apply` on
+        # the same --job-id refuses (endpoint already assigned) and `job
+        # status --debug` never re-enters this code path at all. Log the
+        # traceback to the persistent rotating file every invocation
+        # already writes to (see common.py:setup_logging) and point the
+        # hint there instead of promising a re-run that can't work.
+        _logger.exception(
+            "job apply supervisor failure for job %s", p.job_id
+        )
+        orch.env.hints.append(
+            "local traceback logged to ~/.config/colab-cli/colab.log"
+        )
     finally:
         secret_removed = secret_handoff or orch.cleanup_secret_channel()
         # Teardown is how you leave, not a phase you reach: an early
@@ -744,6 +758,52 @@ def _recover_off_vm_result(
     return recovered
 
 
+# Substrings, not exact matches: every "still billing"/"left running"/
+# "left up" hint in this file uses different wording (job-id, endpoint,
+# and surviving-descendant details vary per call site), so this can't be
+# a fixed set of strings.
+_STALE_BILLING_HINT_MARKERS = ("still billing", "left running", "left up")
+
+
+def _finalize_hints(env) -> None:
+    """Call once, right before persisting/emitting a `status`/`destroy`
+    envelope -- never while a job is still in flight.
+
+    Two independent problems, one fix point:
+
+    1. `env.hints` is loaded from the *previous* persisted envelope and
+       every call site downstream does `.append(...)` assuming a fresh
+       list. A hint that was true at an earlier poll -- "still billing"
+       before teardown actually succeeded -- survives forever into every
+       later envelope, including ones where `cleanup` has since become
+       `released`/`already_absent` and directly contradicts it. Once
+       cleanup is confirmed terminal-and-gone, any such hint is now
+       false; drop it. Diagnostic hints that remain true regardless of
+       cleanup outcome (e.g. "check the URL has not expired" for a stage
+       failure) are untouched -- this only targets hints about the VM's
+       own up/down state.
+    2. The same hint text can get appended more than once across repeat
+       calls (e.g. a `status --poll` re-absorbing a result that was
+       already absorbed once). Deduplicate, preserving order.
+    """
+    from colab_cli.job.models import Cleanup
+
+    hints = env.hints
+    if env.cleanup in (Cleanup.RELEASED, Cleanup.ALREADY_ABSENT):
+        hints = [
+            h
+            for h in hints
+            if not any(marker in h.lower() for marker in _STALE_BILLING_HINT_MARKERS)
+        ]
+    seen: set[str] = set()
+    deduped = []
+    for h in hints:
+        if h not in seen:
+            seen.add(h)
+            deduped.append(h)
+    env.hints = deduped
+
+
 def _release_orphaned_job(env, session, state, store) -> None:
     stop_session_keep_alive(session)
     if env.endpoint:
@@ -783,12 +843,10 @@ def status(
     ] = False,
     interval: Annotated[int, typer.Option("--interval", help="Poll interval (s)")] = 15,
 ):
-    """Report a job's state, asking the VM rather than local memory.
-
-    The distinction is load-bearing and was a real field bug: a `status`
-    that reads only the local record will happily report a healthy session
-    for twenty minutes after the VM has gone.
-    """
+    # Reads the VM, not just the local record: a status that only echoed
+    # the local record would happily report a healthy session for twenty
+    # minutes after the VM was actually gone (a real field bug).
+    """Report a job's state, asking the VM rather than local memory."""
     from colab_cli.common import state
     from colab_cli.job.transport import JobTransport
 
@@ -882,14 +940,20 @@ def status(
                         )
                     if not poll:
                         break
-                    if kind == "never_started":
-                        break
                     time.sleep(interval)
             if orphaned and env.workload.terminal:
                 _release_orphaned_job(env, session, state, store)
             else:
                 store.write_envelope(env)
 
+    # Finalize hints once, regardless of which branch above ran (or none --
+    # a terminal job with no session skips the whole block): drops any
+    # "still billing"/"left running" hint that cleanup has since made
+    # false, dedupes repeats, and persists the result. Redundant with an
+    # already-written envelope in the branches above, which is harmless --
+    # same object, same final state.
+    _finalize_hints(env)
+    store.write_envelope(env)
     _emit(env, "status")
 
 
@@ -900,12 +964,7 @@ def destroy(
         typer.Option("--cancel-only", help="Signal the workload but keep the VM"),
     ] = False,
 ):
-    """Unconditional teardown. Safe to run twice.
-
-    Exits 0 when the thing is already gone, because the whole value of an
-    unconditional teardown is that a caller can run it without first
-    working out whether it is needed.
-    """
+    """Unconditional teardown. Safe to run twice; exits 0 if already gone."""
     from colab_cli.common import state
     from colab_cli.job.transport import JobTransport
 
@@ -970,6 +1029,7 @@ def destroy(
                 "forced VM teardown because credential deletion was not confirmed"
             )
         env.supervisor = Supervisor.FINISHED
+        _finalize_hints(env)
         store.write_envelope(env)
         _emit(env, "destroy", exit_code=1)
         raise typer.Exit(1)
@@ -996,6 +1056,7 @@ def destroy(
             env.reason = "cancel intent written; VM left running"
         else:
             env.reason = "cancel intent could not be confirmed; VM left running"
+        _finalize_hints(env)
         store.write_envelope(env)
         failed = not env.workload.terminal and (
             intent_status is None or intent_status.name != "OK"
@@ -1041,6 +1102,7 @@ def destroy(
         )
         env.retry_class = RetryClass.DO_NOT_RETRY
     env.supervisor = Supervisor.FINISHED
+    _finalize_hints(env)
     store.write_envelope(env)
     _emit(env, "destroy", exit_code=1 if env.cleanup is Cleanup.FAILED else 0)
     if env.cleanup is Cleanup.FAILED:
@@ -1065,7 +1127,7 @@ def list_jobs():
                 }
             )
         emit_json(
-            build_envelope(status="ok", command="job list", jobs=rows),
+            build_envelope(status="ok", command="jobs list", jobs=rows),
             JobListEnvelope,
         )
         return
@@ -1082,11 +1144,85 @@ def list_jobs():
                 f"  done={e.done}"
             )
 
+def prune(
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Report what would be removed without deleting anything."),
+    ] = False,
+):
+    # `left_up`/`failed` are deliberately never auto-pruned: `left_up` is
+    # a still-billing VM whose local record is the only pointer to it,
+    # and `failed` means teardown's own confirmation failed, which is
+    # usually fine but the local record alone can't prove it (see
+    # docs/job/store-and-cleanup.md for the live check).
+    """Delete local job records that are safe to remove: unapplied plans,
+    and terminal jobs with cleanup=released/already_absent.
+
+    Everything else (still running, cleanup=left_up, cleanup=failed) is
+    reported as skipped with a reason, never silently deleted.
+    """
+    from colab_cli.common import state
+
+    store = _store()
+    ids = store.list_jobs()
+    removed: list[tuple[str, str]] = []
+    skipped: list[tuple[str, str]] = []
+    for jid in ids:
+        e = store.read_envelope(jid)
+        if e is None:
+            removed.append((jid, "planned, not applied"))
+            continue
+        if e.done and e.cleanup in (Cleanup.RELEASED, Cleanup.ALREADY_ABSENT):
+            removed.append((jid, f"done, cleanup={e.cleanup.value}"))
+            continue
+        if not e.done:
+            reason = "not done -- may still be running; check `job status --poll` first"
+        elif e.cleanup is Cleanup.LEFT_UP:
+            reason = "cleanup=left_up -- VM deliberately left running, will not prune"
+        elif e.cleanup is Cleanup.FAILED:
+            reason = "cleanup=failed -- confirm with `mighty-colab sessions` before pruning by hand"
+        else:
+            reason = f"cleanup={e.cleanup.value}"
+        skipped.append((jid, reason))
+
+    if not dry_run:
+        for jid, _ in removed:
+            store.delete_job(jid)
+
+    if state.json_output:
+        emit_json(
+            build_envelope(
+                status="ok",
+                command="jobs prune",
+                dry_run=dry_run,
+                removed=[{"job_id": jid, "reason": reason} for jid, reason in removed],
+                skipped=[{"job_id": jid, "reason": reason} for jid, reason in skipped],
+            ),
+            JobPruneEnvelope,
+        )
+        return
+
+    if not removed and not skipped:
+        typer.echo("[colab] No jobs.")
+        return
+    verb = "would remove" if dry_run else "removed"
+    for jid, reason in removed:
+        typer.echo(f"  {verb}: {jid}  ({reason})")
+    for jid, reason in skipped:
+        typer.echo(f"  skipped: {jid}  ({reason})")
+    if dry_run:
+        typer.echo(f"[colab] Would prune {len(removed)} job record(s), would skip {len(skipped)}.")
+    else:
+        typer.echo(f"[colab] Pruned {len(removed)} job record(s), skipped {len(skipped)}.")
+
+
 
 def register(app: typer.Typer):
     job_app.command(name="plan")(plan)
     job_app.command(name="apply")(apply)
     job_app.command(name="status")(status)
     job_app.command(name="destroy")(destroy)
-    job_app.command(name="list")(list_jobs)
     app.add_typer(job_app, name="job")
+    jobs_app.command(name="list")(list_jobs)
+    jobs_app.command(name="prune")(prune)
+    app.add_typer(jobs_app, name="jobs")

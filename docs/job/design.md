@@ -1,6 +1,8 @@
 ---
+2026-09-15: Split `mighty-colab job` into two sibling command groups, mirroring terraform/kubectl muscle memory: `job` keeps the single-item verbs that take a spec/plan/job_id (`plan`/`apply`/`status`/`destroy`), `jobs` (new) holds the collection verbs (`list`, and the new `prune`). `jobs prune --dry-run` reports what it would remove; without `--dry-run` it deletes local job records that are unambiguously safe (`docs/job/store-and-cleanup.md` has the exact rule) and leaves everything else in place with a reason. Closes the prune/rm gap flagged below.
+2026-09-15: Moved this doc, `09_job_usage.md`, and `20_job_spec.md` into `docs/job/` (`design.md`/`usage.md`/`spec.md`) -- three docs for one command group had outgrown living as flat numbered files alongside single-topic docs. Also flagged a real gap surfaced by dogfooding: `JobStore` has no prune/rm; `~/.config/colab-cli/jobs/<job_id>/` accumulates one directory per `plan`/`apply` call forever, and nothing documents which of those are safe to delete by hand.
 log:
-2026-09-13: Added [`docs/20_job_spec.md`](20_job_spec.md): field list, everyday examples, plan refusals, and signed-URL prerequisites for a cold start.
+2026-09-13: Added [`docs/job/spec.md`](spec.md): field list, everyday examples, plan refusals, and signed-URL prerequisites for a cold start.
 2026-09-13: Fixed keep-alive health persistence for job provision as part of [#10](https://github.com/danbarua/mighty-colab/issues/10): a tolerated pre-flight failure initializes the consecutive-failure count, while success records the ping and resets it. The shared session `status`/`sessions` views derive health and retention risk from that state without claiming a server reclamation deadline.
 
 2026-09-13: Fixed [#33](https://github.com/danbarua/mighty-colab/issues/33): job provision and teardown can no longer wait forever in assignment control-plane HTTP. Both phases of `assign` and `unassign` use `(10, 30)` second connect/read deadlines. An exhausted provision timeout remains a retryable provision failure without claiming `session_lost`; an exhausted teardown retains the endpoint and records `cleanup=failed` so the possible billable assignment stays actionable. Client timeout propagation and orchestrator classification have known-answer tests; live ADC CPU assignment and teardown both completed successfully.
@@ -37,14 +39,12 @@ log:
 
 # Design: `job` — Agent job supervisor
 
-**Implemented and live-verified in the paths identified below** (2026-09-11). `mighty-colab job plan|apply|status|destroy|list` ships in `src/colab_cli/job/`. Spec files are documented in `docs/20_job_spec.md`. Usage lives in `docs/09_job_usage.md`. This document describes the current implementation and names its gaps. Long-run evidence proves that the VM, assignment, and files survived the first Contents failure at about one hour; `JobTransport` refreshing assignment metadata restored access. The probe did not distinguish bearer-token expiry from proxy endpoint rebinding. A multi-hour GPU job through that refresh remains untested. Job provision now owns the TFE keep-alive daemon used by `colab new`.
-
+**Implemented and live-verified in the paths identified below** (2026-09-11). `mighty-colab job plan|apply|status|destroy|list` ships in `src/colab_cli/job/`. Spec files are documented in `docs/job/spec.md`. Usage lives in `docs/job/usage.md`. Local job-record layout and manual cleanup safety are in `docs/job/store-and-cleanup.md`. This document describes the current implementation and names its gaps. Long-run evidence proves that the VM, assignment, and files survived the first Contents failure at about one hour; `JobTransport` refreshing assignment metadata restored access. The probe did not distinguish bearer-token expiry from proxy endpoint rebinding. A multi-hour GPU job through that refresh remains untested. Job provision now owns the TFE keep-alive daemon used by `colab new`.
 `run` stays the shebang (`new` + text-into-kernel + `stop`). `job` is the unit of work an unattended agent actually has: code, deps, data, artifacts, accelerator policy, two clocks, teardown.
 
 ## Motivation
 
-An agent composing `new` → `reinstall` → `exec-async` → `log --tail` → `stop` rediscovers the same wounds every time (`docs/AGENT_USABILITY_LEARNINGS.md`): output-gap `--timeout`, text-not-a-file `__file__`, Jupyter upload ceilings, interactive VM auth, teardown skipped on a failing `exec`, exit 0 with no verdict.
-
+An agent composing `new` → `reinstall` → `exec-async` → `log --tail` → `stop` rediscovers the same wounds every time (`../AGENT_USABILITY_LEARNINGS.md`): output-gap `--timeout`, text-not-a-file `__file__`, Jupyter upload ceilings, interactive VM auth, teardown skipped on a failing `exec`, exit 0 with no verdict.
 Those steps have a shape. The shape is a state machine. The machine belongs in code, not in a skill.
 
 ## Non-goals
