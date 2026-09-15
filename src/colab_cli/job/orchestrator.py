@@ -518,7 +518,11 @@ class Orchestrator:
         if "SECRET_CHANNEL_READY=1" not in _outputs_text(outputs):
             raise PhaseError(
                 Phase.STAGE,
-                "credential channel preparation failed",
+                # This kernel code is ours, not the consumer's -- its output
+                # can't contain user data or signed URLs, so there's no
+                # reason to withhold it the way stage/pip output must be.
+                f"credential channel preparation failed: "
+                f"{_tail(_outputs_text(outputs), phase='secret-channel-prepare')}",
                 RetryClass.RETRY_SAME,
             )
         self._secret_channel_prepared = True
@@ -547,7 +551,8 @@ class Orchestrator:
         if "SECRET_CHANNEL_SEALED=1" not in _outputs_text(outputs):
             raise PhaseError(
                 Phase.STAGE,
-                "credential channel sealing failed",
+                f"credential channel sealing failed: "
+                f"{_tail(_outputs_text(outputs), phase='secret-channel-seal')}",
                 RetryClass.RETRY_SAME,
             )
 
@@ -781,27 +786,62 @@ class Orchestrator:
         if not spec.artifacts:
             env.offload = Offload.NOT_REQUIRED
         elif missing_required:
+            missing_paths = sorted(
+                declared.path
+                for declared in spec.artifacts
+                if declared.required
+                and (
+                    declared.path not in result_paths
+                    or any(
+                        artifact.path == declared.path and artifact.status == "missing"
+                        for artifact in env.artifacts
+                    )
+                )
+            )
             env.offload = Offload.FAILED
-            env.reason = "a required artifact was not produced"
+            # Declared artifact paths are caller-chosen relative paths, not
+            # signed URLs -- safe to name, and the whole point of naming
+            # them: "a required artifact was not produced" alone forces a
+            # second round trip just to find out which one.
+            env.reason = f"required artifact(s) not produced: {', '.join(missing_paths)}"
             env.retry_class = RetryClass.FIX_CODE
         elif result.get("offload") == "failed" or any(
             artifact.status == "failed" for artifact in env.artifacts
         ):
+            failed_paths = sorted(
+                artifact.path for artifact in env.artifacts if artifact.status == "failed"
+            )
             env.offload = Offload.FAILED
-            env.reason = "artifact offload failed"
+            env.reason = (
+                f"artifact offload failed: {', '.join(failed_paths)}"
+                if failed_paths
+                else "artifact offload failed"
+            )
             env.retry_class = RetryClass.RETRY_SAME
         else:
             env.offload = Offload.OK
 
-        # Stage errors are deliberately redacted by the runner because urllib
-        # exception strings can contain signed query parameters. The surviving
-        # evidence cannot distinguish expiry, access, and checksum failures.
+        # Stage failures are classified by the runner into a coarse, safe
+        # category before ever leaving the VM (see StageItemError in
+        # runtime_payload/runner.py) -- the destination path and category
+        # are not secrets; only the raw exception/URL ever was. Use that
+        # detail when the runner supplied it; fall back to the generic
+        # explanation for older runtime payloads or non-item failures
+        # (e.g. a malformed manifest) that never got that far.
         if env.phase is Phase.STAGE and env.workload is Workload.FAILED:
             env.retry_class = RetryClass.FIX_HUMAN
-            env.reason = (
-                "staging failed: a declared input could not be fetched, or "
-                "failed its sha256 check. The consumer never started."
-            )
+            detail = None
+            if isinstance(env.exception, dict):
+                msg = env.exception.get("message")
+                if msg and msg != "stage failed":
+                    detail = msg
+            if detail:
+                env.reason = f"staging failed ({detail}). The consumer never started."
+            else:
+                env.reason = (
+                    "staging failed: a declared input could not be fetched, or "
+                    "failed its sha256 check. The consumer never started."
+                )
             env.hints.append(
                 "check, in order: the URL has not expired; the object exists "
                 "and the grant covers it; data[].sha256 matches the object"

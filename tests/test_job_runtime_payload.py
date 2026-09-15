@@ -415,6 +415,14 @@ def test_stage_hash_mismatch_does_not_run_consumer(tmp_path):
     )
     assert result["phase"] == "stage"
     assert result["workload"] == "failed"
+    # `file://` never reaches the hash check: urlopen_public's HTTPS-only
+    # policy rejects it first (BlockedDestination, not a checksum failure
+    # despite this test's name -- kept for what it does validate: a
+    # failed stage never runs the consumer). Still confirms the safe
+    # dest+category record reaches the durable result either way; see
+    # test_classify_stage_error_* below for the checksum/size/http/network
+    # categories this classifier actually exists to distinguish.
+    assert result["exception"]["message"] == "input.bin: error"
     assert not sentinel.exists()
 
 
@@ -638,6 +646,62 @@ def test_succeeded_is_refused_while_a_tagged_descendant_survives():
     )
     assert cancelled == "cancelled"
 
+
+def test_classify_stage_error_checksum_and_size_mismatch():
+    from colab_cli.job.runtime_payload.runner import _classify_stage_error
+
+    category, detail = _classify_stage_error(
+        ValueError("staged sha256 does not match manifest")
+    )
+    assert category == "checksum_mismatch"
+    assert detail is None
+    category, detail = _classify_stage_error(
+        ValueError("staged size does not match manifest")
+    )
+    assert category == "size_mismatch"
+    assert detail is None
+
+
+def test_classify_stage_error_http_and_network():
+    import urllib.error
+
+    from colab_cli.job.runtime_payload.runner import _classify_stage_error
+
+    category, detail = _classify_stage_error(
+        urllib.error.HTTPError(
+            "https://x?sig=secret", 403, "Forbidden", {}, None
+        )
+    )
+    assert category == "http_error"
+    assert detail == 403
+
+    category, detail = _classify_stage_error(
+        urllib.error.URLError("[Errno 8] nodename nor servname provided")
+    )
+    assert category == "network_error"
+    assert detail is None
+
+
+def test_stage_item_error_message_never_contains_the_url():
+    """The whole point: dest path and category only, never the wrapped
+    exception's own text, which for a urllib error can embed a signed
+    URL's query string."""
+    import urllib.error
+
+    from colab_cli.job.runtime_payload.runner import StageItemError
+
+    cause = urllib.error.HTTPError(
+        "https://storage.googleapis.com/bucket/obj?x-goog-signature=SECRET",
+        403,
+        "Forbidden",
+        {},
+        None,
+    )
+    error = StageItemError("inputs/2shapes_train.npz", cause)
+
+    assert str(error) == "inputs/2shapes_train.npz: http_error (403)"
+    assert "SECRET" not in str(error)
+    assert "x-goog-signature" not in str(error)
 
 @pytest.mark.skipif(
     not (sys.platform.startswith("linux") and Path("/proc").is_dir()),

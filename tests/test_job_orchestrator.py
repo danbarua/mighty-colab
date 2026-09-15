@@ -867,6 +867,56 @@ def test_missing_required_artifact_fails_offload_even_on_a_clean_exit(tmp_path):
     assert not orch.env.ok
 
 
+def test_missing_required_artifact_names_which_one(tmp_path):
+    """"a required artifact was not produced" alone forces a second round
+    trip to find out which one -- the declared path is not a secret."""
+    spec = _spec(
+        artifacts=[
+            ArtifactItem(path="/content/out/model.pt", url="https://x/m.pt"),
+            ArtifactItem(path="/content/out/metrics.json", url="https://x/j"),
+        ]
+    )
+    orch = _orch(tmp_path, spec=spec)
+    orch._absorb_result(
+        {
+            "workload": "succeeded",
+            "exit_code": 0,
+            "artifacts": [
+                {
+                    "path": "/content/out/metrics.json",
+                    "url_id": "https://x/j#abc",
+                    "status": "ok",
+                }
+            ],
+        }
+    )
+    assert orch.env.offload is Offload.FAILED
+    assert "/content/out/model.pt" in orch.env.reason
+    assert "/content/out/metrics.json" not in orch.env.reason
+
+
+def test_failed_artifact_offload_names_which_one(tmp_path):
+    spec = _spec(
+        artifacts=[ArtifactItem(path="/content/out/model.pt", url="https://x/m.pt")]
+    )
+    orch = _orch(tmp_path, spec=spec)
+    orch._absorb_result(
+        {
+            "workload": "succeeded",
+            "exit_code": 0,
+            "artifacts": [
+                {
+                    "path": "/content/out/model.pt",
+                    "url_id": "https://x/m.pt#abc",
+                    "status": "failed",
+                }
+            ],
+        }
+    )
+    assert orch.env.offload is Offload.FAILED
+    assert "/content/out/model.pt" in orch.env.reason
+
+
 def test_optional_artifact_missing_does_not_fail_offload(tmp_path):
     spec = _spec(
         artifacts=[
@@ -1116,3 +1166,54 @@ def test_absorb_result_honors_remote_offload_failure_and_phase(tmp_path):
     assert orch.env.workload is Workload.SUCCEEDED
     assert orch.env.phase is Phase.OFFLOAD
     assert orch.env.offload is Offload.FAILED
+
+
+def test_stage_failure_surfaces_which_file_and_why(tmp_path):
+    """The runner classifies a staging failure into a safe dest+category
+    (StageItemError in runtime_payload/runner.py) before it ever leaves
+    the VM -- the envelope's `reason` must actually use it instead of
+    falling back to the fully generic message that doesn't say which
+    declared input failed or how."""
+    orch = _orch(tmp_path)
+
+    orch._absorb_result(
+        {
+            "workload": "failed",
+            "exit_code": 1,
+            "phase": "stage",
+            "exception": {
+                "type": "StageItemError",
+                "message": "inputs/2shapes_train.npz: http_error (403)",
+                "traceback": "",
+            },
+        }
+    )
+
+    assert orch.env.workload is Workload.FAILED
+    assert "inputs/2shapes_train.npz" in orch.env.reason
+    assert "http_error" in orch.env.reason
+    assert orch.env.retry_class is RetryClass.FIX_HUMAN
+
+
+def test_stage_failure_without_item_detail_falls_back_to_generic_reason(tmp_path):
+    """A stage failure that never reached a specific item (e.g. a
+    malformed manifest) has no dest/category to report -- must not crash
+    or fabricate one, just use the pre-existing generic explanation."""
+    orch = _orch(tmp_path)
+
+    orch._absorb_result(
+        {
+            "workload": "failed",
+            "exit_code": 1,
+            "phase": "stage",
+            "exception": {
+                "type": "ValueError",
+                "message": "stage failed",
+                "traceback": "",
+            },
+        }
+    )
+
+    assert orch.env.workload is Workload.FAILED
+    assert "declared input could not be fetched" in orch.env.reason
+    assert orch.env.retry_class is RetryClass.FIX_HUMAN

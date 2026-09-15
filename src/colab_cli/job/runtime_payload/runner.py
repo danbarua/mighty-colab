@@ -15,6 +15,7 @@ import signal
 import subprocess
 import sys
 import time
+from urllib import error as urllib_error
 from urllib import request
 from urllib.parse import urlsplit
 
@@ -312,6 +313,47 @@ def _resolve_job_path(job_dir, path):
     return os.path.join(job_dir, path)
 
 
+def _classify_stage_error(error: BaseException):
+    """Coarse, safe-to-persist category for a staging failure.
+
+    Never returns the exception's own message: a urllib error's message
+    (and a `URLError`'s `.reason`) can embed the failing request's target,
+    which for a signed URL includes the query string -- exactly what
+    `urlopen_public` exists to keep out of durable records. HTTP status
+    codes are not credentials; they're safe to return as-is.
+    """
+    if isinstance(error, urllib_error.HTTPError):
+        return "http_error", error.code
+    if isinstance(error, urllib_error.URLError):
+        return "network_error", None
+    if isinstance(error, ValueError):
+        msg = str(error)
+        if "sha256" in msg:
+            return "checksum_mismatch", None
+        if "size" in msg:
+            return "size_mismatch", None
+        return "invalid_manifest_item", None
+    return "error", None
+
+
+class StageItemError(Exception):
+    """One declared input failed to stage.
+
+    Carries only values safe to persist in a durable job record: the
+    destination path (a caller-chosen relative path, never the signed
+    source URL) and a coarse category from `_classify_stage_error` --
+    never the wrapped exception's own message or `.reason`.
+    """
+
+    def __init__(self, dest: str, cause: BaseException):
+        self.dest = dest
+        self.category, self.detail = _classify_stage_error(cause)
+        summary = f"{dest}: {self.category}"
+        if self.detail is not None:
+            summary += f" ({self.detail})"
+        super().__init__(summary)
+
+
 def _stage_one(job_dir, item, urls):
     if not isinstance(item, dict):
         raise ValueError("stage item must be an object")
@@ -320,12 +362,15 @@ def _stage_one(job_dir, item, urls):
     if not isinstance(dest, str):
         raise ValueError("stage item requires dest")
     target = _resolve_job_path(job_dir, dest)
-    _http_get_to_file(
-        url,
-        target,
-        expected_size=item.get("size_bytes"),
-        expected_hash=item.get("sha256"),
-    )
+    try:
+        _http_get_to_file(
+            url,
+            target,
+            expected_size=item.get("size_bytes"),
+            expected_hash=item.get("sha256"),
+        )
+    except Exception as error:
+        raise StageItemError(dest, error) from error
 
 
 def _stage(job_dir, manifest_path, urls):
@@ -469,8 +514,13 @@ def _stage_failure(
     attempt,
     error,
 ):
-    # Do not include exception text: urllib errors can contain a signed query
-    # string, which must never become part of a durable job record.
+    # `StageItemError`'s own message is already safe to persist (dest path
+    # + coarse category, built by `_classify_stage_error` -- never the
+    # wrapped exception's raw text). Anything else staying generic is
+    # deliberate: an exception this module didn't classify itself might be
+    # a raw urllib error whose message/`.reason` can embed the failing
+    # signed URL's query string, which must never land in a durable record.
+    message = str(error) if isinstance(error, StageItemError) else "stage failed"
     result = _result_payload(
         workload="failed",
         cli_version=cli_version,
@@ -479,13 +529,13 @@ def _stage_failure(
         intent=None,
         exception={
             "type": type(error).__name__,
-            "message": "stage failed",
+            "message": message,
             "traceback": "",
         },
         survivors=[],
         tagged=[],
         detect_ok=ident.can_detect_escapees(),
-        runner_error="stage failed",
+        runner_error=message,
         attempt=attempt,
         started=started,
         phase="stage",
