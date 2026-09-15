@@ -641,7 +641,13 @@ class Orchestrator:
             "            cmd += ['--stage-manifest', os.path.join(d, 'stage.manifest.json')]\n"
             "        if os.path.exists(os.path.join(d, 'offload.manifest.json')):\n"
             "            cmd += ['--offload-manifest', os.path.join(d, 'offload.manifest.json')]\n"
-            f"        cmd += ['--'] + {args}\n"
+            + (
+                f"        cmd += ['--artifact-sync-interval', "
+                f"str({self.spec.budgets.artifact_sync_interval_seconds!r})]\n"
+                if self.spec.budgets.artifact_sync_interval_seconds is not None
+                else ""
+            )
+            + f"        cmd += ['--'] + {args}\n"
             "        log = open(os.path.join(d, 'runner.log'), 'ab')\n"
             "        p = subprocess.Popen(cmd, cwd=d, env=env, stdout=log, stderr=log,\n"
             "                             stdin=subprocess.DEVNULL, start_new_session=True,\n"

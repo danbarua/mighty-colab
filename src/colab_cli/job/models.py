@@ -266,6 +266,18 @@ class Budgets(BaseModel):
     # what `exec --timeout` does, and it kills healthy JAX/XLA.
     wall_clock: int = 3600
 
+    # Unset (the default) preserves today's behavior: artifacts[] upload
+    # exactly once, after `run` finishes. Set this to also re-PUT each
+    # declared artifact on this cadence *during* run, so a VM that
+    # disappears before offload (destroyed, preempted, wall_clock kill)
+    # only loses the interval since the last periodic sync, not
+    # everything. Requires the consumer to keep writing to the same
+    # declared path each time (a growing log, an overwritten "latest"
+    # checkpoint) -- a new path each write is never picked up mid-run,
+    # only at the final offload.
+    artifact_sync_interval_seconds: Optional[int] = None
+
+
 
 class Retry(BaseModel):
     model_config = ConfigDict(extra="forbid")

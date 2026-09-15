@@ -221,6 +221,29 @@ def test_launch_passes_transfer_secrets_only_by_inherited_fd(tmp_path):
     assert runtime.argv[separator + 1 :] == ["--deadline", "user"]
 
 
+def test_launch_passes_artifact_sync_interval_when_configured(tmp_path):
+    spec = _spec(budgets=Budgets(wall_clock=600, artifact_sync_interval_seconds=60))
+    runtime = _LaunchRuntime()
+    orch = _orch(tmp_path, spec=spec, runtime=runtime)
+    orch.session_state = SimpleNamespace(url="https://vm", token="token")
+
+    orch.launch("/content/jobs/unit-job/mighty_runtime")
+
+    flag_index = runtime.argv.index("--artifact-sync-interval")
+    assert runtime.argv[flag_index + 1] == "60"
+
+
+def test_launch_omits_artifact_sync_interval_by_default(tmp_path):
+    runtime = _LaunchRuntime()
+    orch = _orch(tmp_path, runtime=runtime)
+    orch.session_state = SimpleNamespace(url="https://vm", token="token")
+
+    orch.launch("/content/jobs/unit-job/mighty_runtime")
+
+    assert "--artifact-sync-interval" not in runtime.argv
+
+
+
 class _MissingTransferRuntime:
     def __init__(self):
         self.consumer_started = False

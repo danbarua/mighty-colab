@@ -1,5 +1,6 @@
 ---
 log:
+2026-09-15: Added `budgets.artifact_sync_interval_seconds` -- periodic mid-run re-upload of declared `artifacts[]`, not just at the end.
 2026-09-15: Moved into `docs/job/spec.md` (was `docs/20_job_spec.md`) alongside `design.md` and `usage.md`.
 2026-09-13: First version. Field list and everyday examples for a `job` spec, written for a reader who has not opened `docs/job/design.md`. Schema and plan refusals match `src/colab_cli/job/models.py` and `planner.py`. Signed HTTPS URLs are the data plane. The CLI does not mint them.
 ---
@@ -82,6 +83,7 @@ Common optional fields. Defaults apply when you omit them.
 | `control.result` | omitted | Optional off-VM copy of `result.json`. |
 | `control.log` | omitted | Not implemented. Presence is a plan error. |
 | `budgets.wall_clock` | `3600` | Watchdog kill in seconds. There is no stall kill. |
+| `budgets.artifact_sync_interval_seconds` | omitted | Re-PUT each declared `artifacts[]` path on this cadence *during* `run`, not just once at the end. Requires the consumer to keep writing to the same declared path each time; a new path each write is only picked up at the final offload. |
 | `retry.when` | `[retry_same]` | Must stay this value. Other values are plan errors. |
 | `retry.max_attempts` | `1` | Must stay `1`. |
 | `retry.mode` | `recreate` | Must stay `recreate`. |

@@ -703,6 +703,146 @@ def test_stage_item_error_message_never_contains_the_url():
     assert "SECRET" not in str(error)
     assert "x-goog-signature" not in str(error)
 
+
+def test_sync_artifacts_once_uploads_a_changed_file(tmp_path, monkeypatch):
+    from colab_cli.job.runtime_payload import runner as runner_module
+
+    monkeypatch.setattr(runner_module.time, "sleep", lambda _s: None)
+    ckpt = tmp_path / "checkpoint.pt"
+    ckpt.write_bytes(b"v1")
+    calls = []
+    monkeypatch.setattr(
+        runner_module,
+        "_http_put_file",
+        lambda url, path: calls.append((url, path)) or (2, "digest"),
+    )
+    manifest = [{"path": "checkpoint.pt", "url": "https://x.example/ckpt"}]
+    last_uploaded = {}
+
+    runner_module._sync_artifacts_once(str(tmp_path), manifest, {}, last_uploaded)
+
+    assert len(calls) == 1
+    assert calls[0][0] == "https://x.example/ckpt"
+    assert "checkpoint.pt" in last_uploaded
+
+
+def test_sync_artifacts_once_dedups_an_unchanged_file(tmp_path, monkeypatch):
+    """A checkpoint written every 30s against a 5-minute sync interval
+    should not be re-uploaded on every tick if nothing changed since the
+    last successful sync."""
+    from colab_cli.job.runtime_payload import runner as runner_module
+
+    monkeypatch.setattr(runner_module.time, "sleep", lambda _s: None)
+    ckpt = tmp_path / "checkpoint.pt"
+    ckpt.write_bytes(b"v1")
+    calls = []
+    monkeypatch.setattr(
+        runner_module,
+        "_http_put_file",
+        lambda url, path: calls.append((url, path)) or (2, "digest"),
+    )
+    manifest = [{"path": "checkpoint.pt", "url": "https://x.example/ckpt"}]
+    last_uploaded = {}
+
+    runner_module._sync_artifacts_once(str(tmp_path), manifest, {}, last_uploaded)
+    runner_module._sync_artifacts_once(str(tmp_path), manifest, {}, last_uploaded)
+
+    assert len(calls) == 1, "unchanged file must not be re-uploaded"
+
+
+def test_sync_artifacts_once_uploads_again_after_a_real_change(tmp_path, monkeypatch):
+    from colab_cli.job.runtime_payload import runner as runner_module
+
+    monkeypatch.setattr(runner_module.time, "sleep", lambda _s: None)
+    ckpt = tmp_path / "checkpoint.pt"
+    ckpt.write_bytes(b"v1")
+    calls = []
+    monkeypatch.setattr(
+        runner_module,
+        "_http_put_file",
+        lambda url, path: calls.append((url, path)) or (2, "digest"),
+    )
+    manifest = [{"path": "checkpoint.pt", "url": "https://x.example/ckpt"}]
+    last_uploaded = {}
+
+    runner_module._sync_artifacts_once(str(tmp_path), manifest, {}, last_uploaded)
+    ckpt.write_bytes(b"v2-longer-content")
+    os.utime(ckpt, (time.time() + 5, time.time() + 5))
+    runner_module._sync_artifacts_once(str(tmp_path), manifest, {}, last_uploaded)
+
+    assert len(calls) == 2
+
+
+def test_sync_artifacts_once_skips_a_file_still_being_written(tmp_path, monkeypatch):
+    """torch.save does not write atomically by default -- a snapshot taken
+    mid-write would upload a torn file. If size/mtime change across the
+    stability window, skip this tick and try again next interval."""
+    from colab_cli.job.runtime_payload import runner as runner_module
+
+    ckpt = tmp_path / "checkpoint.pt"
+    ckpt.write_bytes(b"v1")
+
+    def unstable_sleep(_seconds):
+        # Simulate the file still being written during the stability
+        # window: it grows between the two stat() calls.
+        ckpt.write_bytes(b"v1-still-writing-more-bytes")
+
+    monkeypatch.setattr(runner_module.time, "sleep", unstable_sleep)
+    calls = []
+    monkeypatch.setattr(
+        runner_module,
+        "_http_put_file",
+        lambda url, path: calls.append((url, path)) or (2, "digest"),
+    )
+    manifest = [{"path": "checkpoint.pt", "url": "https://x.example/ckpt"}]
+
+    runner_module._sync_artifacts_once(str(tmp_path), manifest, {}, {})
+
+    assert calls == [], "a file that changed mid-check must not be uploaded"
+
+
+def test_sync_artifacts_once_skips_a_missing_file(tmp_path, monkeypatch):
+    from colab_cli.job.runtime_payload import runner as runner_module
+
+    monkeypatch.setattr(runner_module.time, "sleep", lambda _s: None)
+    calls = []
+    monkeypatch.setattr(
+        runner_module,
+        "_http_put_file",
+        lambda url, path: calls.append((url, path)) or (2, "digest"),
+    )
+    manifest = [{"path": "never-written.pt", "url": "https://x.example/ckpt"}]
+
+    runner_module._sync_artifacts_once(str(tmp_path), manifest, {}, {})
+
+    assert calls == []
+
+
+def test_sync_artifacts_once_tolerates_one_bad_item_and_continues(tmp_path, monkeypatch):
+    from colab_cli.job.runtime_payload import runner as runner_module
+
+    monkeypatch.setattr(runner_module.time, "sleep", lambda _s: None)
+    (tmp_path / "a.pt").write_bytes(b"a")
+    (tmp_path / "b.pt").write_bytes(b"b")
+    calls = []
+
+    def fake_put(url, path):
+        if "a.pt" in path:
+            raise RuntimeError("boom")
+        calls.append((url, path))
+        return (1, "digest")
+
+    monkeypatch.setattr(runner_module, "_http_put_file", fake_put)
+    manifest = [
+        {"path": "a.pt", "url": "https://x.example/a"},
+        {"path": "b.pt", "url": "https://x.example/b"},
+    ]
+
+    runner_module._sync_artifacts_once(str(tmp_path), manifest, {}, {})
+
+    assert len(calls) == 1
+    assert calls[0][0] == "https://x.example/b"
+
 @pytest.mark.skipif(
     not (sys.platform.startswith("linux") and Path("/proc").is_dir()),
     reason="setsid containment requires Linux /proc",

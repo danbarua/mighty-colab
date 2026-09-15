@@ -110,6 +110,7 @@ def _parse_args(argv):
     secrets_required = False
     stage_manifest = None
     offload_manifest = None
+    artifact_sync_interval = None
     cli_version = "unknown"
     entry_option = None
     rest = []
@@ -139,6 +140,11 @@ def _parse_args(argv):
         elif argv[i] == "--offload-manifest":
             offload_manifest = _option_value(argv, i, "--offload-manifest")
             i += 2
+        elif argv[i] == "--artifact-sync-interval":
+            artifact_sync_interval = float(
+                _option_value(argv, i, "--artifact-sync-interval")
+            )
+            i += 2
         else:
             rest = ([entry_option] if entry_option else []) + argv[i:]
             break
@@ -152,6 +158,7 @@ def _parse_args(argv):
         secrets_required,
         stage_manifest,
         offload_manifest,
+        artifact_sync_interval,
         rest,
     )
 
@@ -442,6 +449,60 @@ def _offload(job_dir, manifest_path, urls):
     return records, failed
 
 
+def _sync_artifacts_once(job_dir, manifest, urls, last_uploaded):
+    """Re-PUT each declared artifact that has changed since the last
+    successful periodic sync, so the last few minutes of a checkpoint
+    are recoverable even if the VM disappears before the run's own
+    end-of-run offload ever gets to run -- destroyed early, wall_clock
+    kill, spot preemption, or a Claude deciding this was a good idea.
+
+    Same signed PUT URLs `_artifact_record` uses at end-of-run, no new
+    credential surface. Runs synchronously inside the consumer-wait loop
+    in `main()`, not a separate thread or process: single-flight is
+    guaranteed by construction (nothing else can start a second sync
+    while this one is running) at the cost of delaying cancellation
+    checks by however long the uploads in this pass take -- acceptable
+    for artifact sizes seen in practice, and this only runs once per
+    `--artifact-sync-interval`, not every loop tick.
+
+    `last_uploaded` is mutated in place: {path: (size, mtime)} of what
+    was last confirmed uploaded. Every failure mode here is silent and
+    non-fatal -- a missed periodic sync is staleness, not corruption,
+    and must never be confused with (or interfere with) the real,
+    authoritative end-of-run offload that still runs after this.
+    """
+    for item in manifest:
+        if not isinstance(item, dict):
+            continue
+        path = item.get("path")
+        if not isinstance(path, str):
+            continue
+        try:
+            local_path = _resolve_job_path(job_dir, path)
+            stat1 = os.stat(local_path)
+            signature1 = (stat1.st_size, stat1.st_mtime)
+            if last_uploaded.get(path) == signature1:
+                continue  # dedup: unchanged since the last successful sync
+            # Stability window: torch.save and friends do not write
+            # atomically by default (no temp-file-then-rename), so a
+            # snapshot taken mid-write would upload a torn file. Waiting
+            # for size+mtime to hold steady across a short window is a
+            # cheap, script-cooperation-free mitigation; it is not a
+            # substitute for the script itself writing atomically, which
+            # remains the only guarantee with no race at all.
+            time.sleep(1)
+            stat2 = os.stat(local_path)
+            signature2 = (stat2.st_size, stat2.st_mtime)
+            if signature1 != signature2:
+                continue  # still being written; try again next interval
+            url = _resolve_transfer_url(item, urls)
+            _http_put_file(url, local_path)
+            last_uploaded[path] = signature2
+        except Exception:  # noqa: BLE001 - one bad artifact must not skip the rest
+            continue
+
+
+
 def _result_payload(
     *,
     workload,
@@ -558,6 +619,7 @@ def main(argv):
             secrets_required,
             stage_manifest,
             offload_manifest,
+            artifact_sync_interval,
             rest,
         ) = _parse_args(runner_argv)
     except (TypeError, ValueError):
@@ -567,7 +629,7 @@ def main(argv):
         print(
             "usage: runner --job-dir DIR [--deadline S] [--cli-version VERSION] "
             "[--secrets-fd FD] [--stage-manifest PATH] "
-            "[--offload-manifest PATH] entry.py",
+            "[--offload-manifest PATH] [--artifact-sync-interval S] entry.py",
             file=sys.stderr,
         )
         return 2
@@ -695,6 +757,18 @@ def main(argv):
     kill_sent = False
     escalate_at = None
 
+    # Loaded once, not re-read every tick: a malformed manifest here just
+    # disables periodic sync silently -- the end-of-run _offload() below
+    # does its own load and is the one whose failure actually matters.
+    sync_manifest = []
+    if artifact_sync_interval and offload_manifest:
+        try:
+            sync_manifest = _load_manifest(offload_manifest)
+        except Exception:  # noqa: BLE001
+            sync_manifest = []
+    last_artifact_sync_at = started
+    last_uploaded = {}
+
     # INVARIANT: nothing below may prevent result.json from being written. A
     # runner that dies in its own kill path produces a spurious `unknown` -- the
     # one terminal value an agent cannot act on -- caused by cleanup rather
@@ -731,6 +805,13 @@ def main(argv):
                     job_id, signal.SIGKILL, _escapee_exclude(watchdog_proc)
                 )
                 kill_sent = True
+            if (
+                sync_manifest
+                and not term_sent
+                and now - last_artifact_sync_at >= artifact_sync_interval
+            ):
+                _sync_artifacts_once(job_dir, sync_manifest, urls, last_uploaded)
+                last_artifact_sync_at = time.time()
             time.sleep(0.2)
     except BaseException as e:  # noqa: BLE001 - verdict must still land
         runner_error = f"{type(e).__name__}: {e}"

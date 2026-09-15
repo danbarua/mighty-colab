@@ -26,6 +26,7 @@ import pytest
 from colab_cli.job.models import (
     Accelerator,
     ArtifactItem,
+    Budgets,
     CodeSpec,
     Control,
     ControlChannel,
@@ -36,6 +37,7 @@ from colab_cli.job.models import (
 from colab_cli.job.planner import (
     ACCELERATOR_UNKNOWN,
     ARTIFACT_SIZE_UNKNOWN,
+    ARTIFACT_SYNC_INTERVAL_INVALID,
     CODE_ENTRY_MISSING,
     CONTROL_URL_OBJECT_MISMATCH,
     DATA_DEST_COLLIDES_WITH_ARTIFACT,
@@ -532,6 +534,75 @@ def test_artifact_size_unknown_warning(tmp_path):
     artifacts = [ArtifactItem(path="/content/jobs/planner-test/out.pt", url=PUBLIC_URL)]
     plan = build_plan(make_spec(tmp_path, artifacts=artifacts), JOB_ID, probe=False)
     assert ARTIFACT_SIZE_UNKNOWN in diagnostic_codes(plan)
+
+
+def test_artifact_sync_interval_must_be_positive(tmp_path):
+    artifacts = [
+        ArtifactItem(path="/content/jobs/planner-test/out.pt", url=PUBLIC_URL, size_bytes=1)
+    ]
+    plan = build_plan(
+        make_spec(
+            tmp_path,
+            artifacts=artifacts,
+            budgets=Budgets(wall_clock=600, artifact_sync_interval_seconds=0),
+        ),
+        JOB_ID,
+        probe=False,
+    )
+    assert ARTIFACT_SYNC_INTERVAL_INVALID in diagnostic_codes(plan)
+    diag = next(
+        d for d in plan.diagnostics if d.code == ARTIFACT_SYNC_INTERVAL_INVALID
+    )
+    assert diag.severity == "error"
+
+
+def test_artifact_sync_interval_without_artifacts_warns(tmp_path):
+    plan = build_plan(
+        make_spec(
+            tmp_path,
+            budgets=Budgets(wall_clock=600, artifact_sync_interval_seconds=60),
+        ),
+        JOB_ID,
+        probe=False,
+    )
+    assert ARTIFACT_SYNC_INTERVAL_INVALID in diagnostic_codes(plan)
+    diag = next(
+        d for d in plan.diagnostics if d.code == ARTIFACT_SYNC_INTERVAL_INVALID
+    )
+    assert diag.severity == "warn"
+
+
+def test_artifact_sync_interval_not_smaller_than_wall_clock_warns(tmp_path):
+    artifacts = [
+        ArtifactItem(path="/content/jobs/planner-test/out.pt", url=PUBLIC_URL, size_bytes=1)
+    ]
+    plan = build_plan(
+        make_spec(
+            tmp_path,
+            artifacts=artifacts,
+            budgets=Budgets(wall_clock=60, artifact_sync_interval_seconds=60),
+        ),
+        JOB_ID,
+        probe=False,
+    )
+    assert ARTIFACT_SYNC_INTERVAL_INVALID in diagnostic_codes(plan)
+
+
+def test_artifact_sync_interval_valid_configuration_is_clean(tmp_path):
+    artifacts = [
+        ArtifactItem(path="/content/jobs/planner-test/out.pt", url=PUBLIC_URL, size_bytes=1)
+    ]
+    plan = build_plan(
+        make_spec(
+            tmp_path,
+            artifacts=artifacts,
+            budgets=Budgets(wall_clock=600, artifact_sync_interval_seconds=60),
+        ),
+        JOB_ID,
+        probe=False,
+    )
+    assert ARTIFACT_SYNC_INTERVAL_INVALID not in diagnostic_codes(plan)
+
 
 
 def test_ranged_get_ignored_warning(tmp_path, monkeypatch):
