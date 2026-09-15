@@ -138,6 +138,15 @@ class ExecAsyncStarted(EnvelopeBase):
     log_path: str
 
 
+class JobApplyAsyncStarted(EnvelopeBase):
+    """`job apply --async`. `job_id` lets the caller poll `job status
+    <job_id> --poll` without parsing it back out of `log_path`."""
+
+    job_id: str
+    pid: int
+    log_path: str
+
+
 class NewSessionEnvelope(EnvelopeBase):
     session: str
     endpoint: str

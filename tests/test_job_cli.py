@@ -23,6 +23,7 @@ import json
 import os
 import re
 import signal
+import subprocess
 from unittest.mock import MagicMock
 
 import pytest
@@ -45,7 +46,7 @@ from colab_cli.job.models import (
 )
 
 @pytest.fixture(autouse=True)
-def isolated_job_store(tmp_path, mock_common_state):
+def isolated_job_store(tmp_path, mock_common_state, monkeypatch):
     """Point the job store at tmp_path.
 
     `state` is a MagicMock, so `state.config_path` auto-vivifies into
@@ -54,6 +55,16 @@ def isolated_job_store(tmp_path, mock_common_state):
     junk envelope become the next test's input. Pin a real path instead.
     """
     mock_common_state.config_path = str(tmp_path / "cfg" / "sessions.json")
+    # `status()` respawns keep-alive (issue #54) whenever a session's
+    # `keep_alive_pid` doesn't read as alive -- true by default for every
+    # MagicMock session in this file, including tests that don't care
+    # about keep-alive at all. Without this, spawn_keep_alive's real,
+    # unmocked subprocess.Popen would actually fire in the background
+    # during unrelated tests. A safe, deterministic default; tests that
+    # care about the respawn itself override this explicitly.
+    monkeypatch.setattr(
+        "colab_cli.commands.session.spawn_keep_alive", lambda *a, **k: 424242
+    )
     return mock_common_state
 
 
@@ -619,6 +630,121 @@ def test_apply_refuses_added_removed_and_renamed_bundle_files(
     assert "removed helper.py" in out
     assert "util.py" in out
     mock_common_state.client.assign.assert_not_called()
+
+
+def test_apply_async_spawns_a_detached_child_and_returns_immediately(
+    tmp_path, monkeypatch, mock_common_state
+):
+    plan_file = _locked_plan(tmp_path, "async-job")
+    calls = []
+
+    class FakeProc:
+        pid = 4242
+
+    real_popen = subprocess.Popen
+
+    def fake_popen(cmd, **kwargs):
+        if isinstance(cmd, list) and "colab_cli.cli" in cmd:
+            calls.append((cmd, kwargs))
+            return FakeProc()
+        return real_popen(cmd, **kwargs)
+
+    monkeypatch.setattr("colab_cli.commands.job.subprocess.Popen", fake_popen)
+
+    result = runner.invoke(app, ["job", "apply", str(plan_file), "--async"])
+
+    assert result.exit_code == 0
+    assert len(calls) == 1, "must spawn exactly one child, never run apply itself"
+    cmd, kwargs = calls[0]
+    assert "job" in cmd and "apply" in cmd
+    assert str(plan_file) in cmd
+    assert "--async" not in cmd, "the child must run the real, blocking apply"
+    assert kwargs.get("stdin") is not None  # detached: never inherits a TTY
+    assert "4242" in _clean(result.output)
+    assert "job status async-job --poll" in _clean(result.output)
+
+
+def test_apply_async_with_job_id_propagates_it_and_never_reads_plan_file(
+    tmp_path, monkeypatch, mock_common_state
+):
+    """--job-id is the whole point of not needing a plan file positionally
+    -- the spawn path must not require one either."""
+    calls = []
+
+    class FakeProc:
+        pid = 99
+
+    real_popen = subprocess.Popen
+
+    def fake_popen(cmd, **kwargs):
+        if isinstance(cmd, list) and "colab_cli.cli" in cmd:
+            calls.append(cmd)
+            return FakeProc()
+        return real_popen(cmd, **kwargs)
+
+    monkeypatch.setattr("colab_cli.commands.job.subprocess.Popen", fake_popen)
+
+    result = runner.invoke(
+        app, ["job", "apply", "--job-id", "preplanned-job", "--async"]
+    )
+
+    assert result.exit_code == 0
+    assert len(calls) == 1
+    assert "--job-id" in calls[0] and "preplanned-job" in calls[0]
+    assert "preplanned-job" in _clean(result.output)
+
+
+
+
+def test_apply_async_unreadable_plan_fails_fast_without_spawning(
+    tmp_path, monkeypatch, mock_common_state
+):
+    """A plan file that can't even be parsed shouldn't spawn a child
+    destined to fail identically a moment later with no one watching."""
+    bad_plan = tmp_path / "corrupt.plan.json"
+    bad_plan.write_text("not json")
+    calls = []
+    real_popen = subprocess.Popen
+
+    def fake_popen(cmd, **kwargs):
+        if isinstance(cmd, list) and "colab_cli.cli" in cmd:
+            calls.append((cmd, kwargs))
+            return MagicMock()
+        return real_popen(cmd, **kwargs)
+
+    monkeypatch.setattr("colab_cli.commands.job.subprocess.Popen", fake_popen)
+
+    result = runner.invoke(app, ["job", "apply", str(bad_plan), "--async"])
+
+    assert result.exit_code == 1
+    assert calls == []
+
+
+def test_apply_async_json_emits_job_id_pid_and_log_path(
+    tmp_path, monkeypatch, mock_common_state
+):
+    plan_file = _locked_plan(tmp_path, "async-json-job")
+
+    class FakeProc:
+        pid = 777
+
+    real_popen = subprocess.Popen
+
+    def fake_popen(cmd, **kwargs):
+        if isinstance(cmd, list) and "colab_cli.cli" in cmd:
+            return FakeProc()
+        return real_popen(cmd, **kwargs)
+
+    monkeypatch.setattr("colab_cli.commands.job.subprocess.Popen", fake_popen)
+    _json_mode(mock_common_state)
+
+    result = runner.invoke(app, ["job", "apply", str(plan_file), "--async"])
+
+    payload = _job_json(result)
+    assert result.exit_code == 0
+    assert payload["job_id"] == "async-json-job"
+    assert payload["pid"] == 777
+    assert payload["log_path"].endswith("apply.log")
 
 
 def test_plan_records_relative_path_size_and_sha256(tmp_path, mock_common_state):
@@ -1276,6 +1402,95 @@ def test_status_scrubs_an_interrupted_prelaunch_secret(monkeypatch, mock_common_
     transport.remove.assert_called_once_with(
         "/content/jobs/interrupted/mighty_runtime/.secrets/transfer.json"
     )
+
+
+def test_status_respawns_keep_alive_when_the_daemon_has_died(
+    monkeypatch, mock_common_state
+):
+    """Issue #54: the daemon has been observed dying even though
+    `spawn_keep_alive` starts it genuinely detached. Self-heal from
+    `status` regardless of why it died -- don't rely on the cause never
+    recurring."""
+    import os
+
+    from colab_cli.job.models import Supervisor
+    from colab_cli.job.runtime_payload import ident
+    from colab_cli.job.transport import ReadStatus
+
+    store = _persist_running_job(mock_common_state, job_id="dead-keepalive")
+    env = store.read_envelope("dead-keepalive")
+    env.supervisor = Supervisor.RUNNING
+    store.write_envelope(env)
+    store.write_supervisor_identity(
+        "dead-keepalive",
+        pid=os.getpid(),
+        starttime=ident.starttime(os.getpid()),
+        boot_id=ident.boot_id(),
+    )
+    session = mock_common_state.store.get.return_value
+    session.keep_alive_pid = None  # explicit, matches the fixture default
+    session.endpoint = "gpu-a100-s-example"
+    session.name = "job-dead-keepalive"
+    spawn_calls = []
+    monkeypatch.setattr(
+        "colab_cli.commands.session.spawn_keep_alive",
+        lambda endpoint, name, **kw: spawn_calls.append((endpoint, name, kw))
+        or os.getpid(),
+    )
+    transport = MagicMock()
+    transport.read_json.return_value = (None, ReadStatus.NOT_FOUND)
+    monkeypatch.setattr(
+        "colab_cli.job.transport.JobTransport", lambda *_args: transport
+    )
+
+    result = runner.invoke(app, ["job", "status", "dead-keepalive"])
+
+    assert result.exit_code == 0
+    assert len(spawn_calls) == 1
+    endpoint, name, kw = spawn_calls[0]
+    assert endpoint == "gpu-a100-s-example"
+    assert name == "job-dead-keepalive"
+    assert session.keep_alive_pid == os.getpid()
+    mock_common_state.store.add.assert_called_with(session)
+    env = store.read_envelope("dead-keepalive")
+    assert any("respawned" in h for h in env.hints)
+
+
+def test_status_does_not_respawn_a_healthy_keep_alive(monkeypatch, mock_common_state):
+    import os
+
+    from colab_cli.job.models import Supervisor
+    from colab_cli.job.runtime_payload import ident
+    from colab_cli.job.transport import ReadStatus
+
+    store = _persist_running_job(mock_common_state, job_id="healthy-keepalive")
+    env = store.read_envelope("healthy-keepalive")
+    env.supervisor = Supervisor.RUNNING
+    store.write_envelope(env)
+    store.write_supervisor_identity(
+        "healthy-keepalive",
+        pid=os.getpid(),
+        starttime=ident.starttime(os.getpid()),
+        boot_id=ident.boot_id(),
+    )
+    session = mock_common_state.store.get.return_value
+    session.keep_alive_pid = os.getpid()  # alive for the duration of this test
+    spawn_calls = []
+    monkeypatch.setattr(
+        "colab_cli.commands.session.spawn_keep_alive",
+        lambda *a, **k: spawn_calls.append((a, k)) or 1,
+    )
+    transport = MagicMock()
+    transport.read_json.return_value = (None, ReadStatus.NOT_FOUND)
+    monkeypatch.setattr(
+        "colab_cli.job.transport.JobTransport", lambda *_args: transport
+    )
+
+    result = runner.invoke(app, ["job", "status", "healthy-keepalive"])
+
+    assert result.exit_code == 0
+    assert spawn_calls == []
+
 
 
 def test_status_does_not_scrub_a_live_supervisor_before_launch(
