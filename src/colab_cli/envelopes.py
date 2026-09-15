@@ -126,6 +126,13 @@ class JobListEnvelope(EnvelopeBase):
     jobs: List[Dict[str, Any]]
 
 
+class JobPruneEnvelope(EnvelopeBase):
+    """`jobs prune --json`. `removed` is empty when `dry_run` is true."""
+
+    dry_run: bool
+    removed: List[Dict[str, Any]]
+    skipped: List[Dict[str, Any]]
+
 class ExecAsyncStarted(EnvelopeBase):
     pid: int
     log_path: str

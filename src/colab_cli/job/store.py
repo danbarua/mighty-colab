@@ -29,6 +29,7 @@ about to exist.
 import fcntl
 import json
 import os
+import shutil
 import stat
 import tempfile
 from pathlib import Path
@@ -356,6 +357,18 @@ class JobStore:
         if not self.root.exists():
             return []
         return sorted(p.name for p in self.root.iterdir() if p.is_dir())
+
+    def delete_job(self, job_id: str) -> None:
+        """Remove a job's entire directory. Caller decides safety.
+
+        No lock check, no envelope inspection here -- `jobs prune` (the only
+        caller) already applies the safety rule (unapplied plan, or
+        terminal with cleanup released/already_absent) before calling this.
+        Kept dumb on purpose: this is deletion, it should do exactly what
+        it's told and nothing more.
+        """
+        shutil.rmtree(self.job_dir(job_id), ignore_errors=True)
+
 
     def append_event(self, job_id: str, event: dict) -> None:
         """Append one JSONL event to the job's own log.

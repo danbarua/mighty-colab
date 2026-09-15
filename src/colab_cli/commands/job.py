@@ -42,6 +42,7 @@ from colab_cli.envelopes import (
     JobEnvelopeWrapper,
     JobListEnvelope,
     JobPlanEnvelope,
+    JobPruneEnvelope,
 )
 from colab_cli.job.models import (
     Cleanup,
@@ -59,7 +60,11 @@ from colab_cli.job.store import ApplyInProgress, JobStore, load_plan_file, write
 
 _logger = logging.getLogger(__name__)
 job_app = typer.Typer(
-    help="Run an unattended job on a Colab VM: plan, apply, status, destroy, list.",
+    help="Run an unattended job on a Colab VM: plan, apply, status, destroy.",
+    no_args_is_help=True,
+)
+jobs_app = typer.Typer(
+    help="Manage local job records as a collection: list, prune.",
     no_args_is_help=True,
 )
 
@@ -1080,7 +1085,7 @@ def list_jobs():
                 }
             )
         emit_json(
-            build_envelope(status="ok", command="job list", jobs=rows),
+            build_envelope(status="ok", command="jobs list", jobs=rows),
             JobListEnvelope,
         )
         return
@@ -1097,11 +1102,89 @@ def list_jobs():
                 f"  done={e.done}"
             )
 
+def prune(
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Report what would be removed without deleting anything."),
+    ] = False,
+):
+    """Delete local job records that are unambiguously safe to remove.
+
+    Safe: unapplied plans (`job plan` ran, `job apply` never did -- no
+    envelope was ever written), and terminal jobs whose cleanup confirmed
+    `released` or `already_absent`.
+
+    Everything else is reported and left alone, not silently skipped:
+    a job that isn't `done` yet may still be running; `cleanup=left_up`
+    means the VM was deliberately kept up and pruning the only local
+    pointer to it would be actively harmful; `cleanup=failed` means
+    teardown's own confirmation failed, which usually is fine (see
+    docs/job/store-and-cleanup.md) but needs a live check
+    (`mighty-colab sessions`) before deleting the record, not an
+    assumption.
+    """
+    from colab_cli.common import state
+
+    store = _store()
+    ids = store.list_jobs()
+    removed: list[tuple[str, str]] = []
+    skipped: list[tuple[str, str]] = []
+    for jid in ids:
+        e = store.read_envelope(jid)
+        if e is None:
+            removed.append((jid, "planned, not applied"))
+            continue
+        if e.done and e.cleanup in (Cleanup.RELEASED, Cleanup.ALREADY_ABSENT):
+            removed.append((jid, f"done, cleanup={e.cleanup.value}"))
+            continue
+        if not e.done:
+            reason = "not done -- may still be running; check `job status --poll` first"
+        elif e.cleanup is Cleanup.LEFT_UP:
+            reason = "cleanup=left_up -- VM deliberately left running, will not prune"
+        elif e.cleanup is Cleanup.FAILED:
+            reason = "cleanup=failed -- confirm with `mighty-colab sessions` before pruning by hand"
+        else:
+            reason = f"cleanup={e.cleanup.value}"
+        skipped.append((jid, reason))
+
+    if not dry_run:
+        for jid, _ in removed:
+            store.delete_job(jid)
+
+    if state.json_output:
+        emit_json(
+            build_envelope(
+                status="ok",
+                command="jobs prune",
+                dry_run=dry_run,
+                removed=[{"job_id": jid, "reason": reason} for jid, reason in removed],
+                skipped=[{"job_id": jid, "reason": reason} for jid, reason in skipped],
+            ),
+            JobPruneEnvelope,
+        )
+        return
+
+    if not removed and not skipped:
+        typer.echo("[colab] No jobs.")
+        return
+    verb = "would remove" if dry_run else "removed"
+    for jid, reason in removed:
+        typer.echo(f"  {verb}: {jid}  ({reason})")
+    for jid, reason in skipped:
+        typer.echo(f"  skipped: {jid}  ({reason})")
+    if dry_run:
+        typer.echo(f"[colab] Would prune {len(removed)} job record(s), would skip {len(skipped)}.")
+    else:
+        typer.echo(f"[colab] Pruned {len(removed)} job record(s), skipped {len(skipped)}.")
+
+
 
 def register(app: typer.Typer):
     job_app.command(name="plan")(plan)
     job_app.command(name="apply")(apply)
     job_app.command(name="status")(status)
     job_app.command(name="destroy")(destroy)
-    job_app.command(name="list")(list_jobs)
     app.add_typer(job_app, name="job")
+    jobs_app.command(name="list")(list_jobs)
+    jobs_app.command(name="prune")(prune)
+    app.add_typer(jobs_app, name="jobs")

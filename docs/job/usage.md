@@ -1,4 +1,5 @@
 ---
+2026-09-15: Split `list` out of `job` into a new sibling group `jobs` (`jobs list`, `jobs prune`), mirroring terraform/kubectl's singular-vs-plural convention: `job` for single-item verbs, `jobs` for collection verbs. `jobs prune` is new.
 log:
 2026-09-15: Moved into `docs/job/usage.md` (was `docs/09_job_usage.md`) alongside `design.md` and `spec.md`.
 2026-09-13: Pointed spec authors to `docs/job/spec.md` for the field list, signed-URL prerequisites, and everyday examples.
@@ -56,19 +57,25 @@ That is the whole idea. The detached consumer survives a dropped launch-kernel c
 
 Use `mighty-colab sessions` after every interrupted run and explicitly destroy any endpoint you no longer need.
 
-## Five commands
+## Six commands, two groups
 
 ```bash
 mighty-colab job plan SPEC_FILE [--out PATH] [--no-probe]
 mighty-colab job apply [PLAN_FILE] [--job-id ID] [--timeout S] [--leave-up]
 mighty-colab job status JOB_ID [--poll] [--interval S]
 mighty-colab job destroy JOB_ID [--cancel-only]
-mighty-colab job list
+
+mighty-colab jobs list
+mighty-colab jobs prune [--dry-run]
 ```
+
+`job` takes a spec/plan/job_id -- one job at a time. `jobs` (mirrors
+`terraform`/`kubectl`'s singular-vs-plural convention) operates on the
+local record collection as a whole, and doesn't touch the VM.
 
 `plan` never allocates a VM. It writes redacted `spec.json` and `plan.json` records, writes a redacted explicit `--out` path, and creates an adjacent mode-0600 `.mighty-colab-secrets.json` sidecar when query credentials exist. Keep that sidecar beside the plan: `apply` validates and hydrates it before allocation. By default planning also performs one-byte ranged GET probes of declared data URLs; `--no-probe` disables those reads. Plans are written even with warnings or errors; `apply` refuses errors and refuses warnings unless the spec sets `ignore_warnings: true`.
 
-`apply` accepts either a plan-file positional argument or `--job-id`. `--timeout` bounds the local supervisor, not the watchdog wall clock. `--leave-up` keeps the VM after completion. `destroy --cancel-only` writes cancellation intent that runner and watchdog consume, but deliberately does not unassign the VM; failure to write the intent is an error. `list` reads local job records.
+`apply` accepts either a plan-file positional argument or `--job-id`. `--timeout` bounds the local supervisor, not the watchdog wall clock. `--leave-up` keeps the VM after completion. `destroy --cancel-only` writes cancellation intent that runner and watchdog consume, but deliberately does not unassign the VM; failure to write the intent is an error. `jobs list` reads local job records. `jobs prune` deletes the ones that are unambiguously safe (unapplied plans, confirmed-terminal-and-released) and reports what it skipped and why; see `docs/job/store-and-cleanup.md` for the exact rule and the on-disk layout.
 
 Under `--json`, every job command emits a validated envelope for normal results and expected errors. Job state is nested under `.job` and the convenience `.done`/`.ok` fields are copied to the outer wrapper. Outer `status` and `exit_code` describe the CLI invocation; nested job fields describe the workload. Thus a failed apply exits one with outer `exit_code: 1`, while a successful status query reporting that failed workload exits zero with outer `status: ok` and nested `ok: false`.
 

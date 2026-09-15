@@ -1,5 +1,10 @@
 ---
 log:
+2026-09-15: `jobs list`/`jobs prune` implemented (`mighty-colab jobs`, a
+sibling command group to `job` — collection-scoped verbs live there,
+single-job verbs stay under `job`). This doc's manual-cleanup section is
+now the *safety rationale* `jobs prune` itself implements, not a
+workaround for a missing command.
 2026-09-15: First version. Written after a dogfooding session accumulated 58
 local job records with no documented way to prune them, and after
 `overlap-pursuit-b-attractor-*` `job plan` retries during that same session
@@ -11,14 +16,14 @@ made it clear `(planned, not applied)` records need explaining too.
 `docs/job/design.md` is the design record, `docs/job/usage.md` is the
 command guide, `docs/job/spec.md` is the spec-file reference. This is the
 one thing none of the three cover: where local job records live on disk,
-what each file means, and what is actually safe to delete by hand.
+what each file means, and what `jobs prune` treats as safe to delete.
 
-**There is no `job prune` or `job rm` command yet.** `JobStore.list_jobs()`
-(`src/colab_cli/job/store.py`) just enumerates every subdirectory under the
-store root — nothing expires, nothing gets garbage-collected, and `job list`
-will show every job this machine has ever planned or applied, forever. This
-doc exists so a manual cleanup doesn't need to be re-derived from source
-every time it comes up.
+**Prefer `mighty-colab jobs prune` (`--dry-run` first) over deleting these
+directories by hand.** It implements exactly the safety rule in "What's
+safe to delete" below, and reports what it skipped and why. The rest of
+this doc explains what that command is actually doing, for anyone
+auditing it or forced to clean up by hand (a different machine, a broken
+install, scripting around it).
 
 ## Where records live
 
@@ -51,7 +56,7 @@ redaction treatment for the same reason (AGENTS.md's data-plane credential
 rules apply here too: full URLs only ever live in caller-owned specs and
 this one owner-mode sidecar).
 
-## What `job list`'s summary column means
+## What `jobs list`'s summary column means
 
 ```
 overlap-pursuit-b-1000-verify-20260914T012727Z-8b286e  (planned, not applied)
@@ -60,15 +65,16 @@ overlap-pursuit-b-1000-verify-20260914T020218Z-bdd4c4  succeeded/ok/released  do
 ```
 
 The three-slash field is `workload/offload/cleanup` off the envelope, read
-straight off `envelope.json` — `job list` does not re-check the VM. For a
+straight off `envelope.json` — `jobs list` does not re-check the VM. For a
 trustworthy live answer for one job, use `job status --poll <job_id>`
 instead, which asks the VM.
 
-## What's safe to delete by hand
+## What `jobs prune` treats as safe to delete
 
-There is no supported command for this yet — the following is what's true
-about the on-disk state, for manually clearing a directory that's grown
-past what `job list` is useful for.
+`mighty-colab jobs prune` (`--dry-run` first) applies this rule
+automatically and reports what it removed and skipped, with reasons. This
+is what it's actually checking, for anyone auditing the command or forced
+to replicate it by hand:
 
 - **`(planned, not applied)`** — always safe. `apply` never ran; no VM was
   ever touched. This is the bulk of what accumulates from `job plan`
@@ -94,6 +100,12 @@ past what `job list` is useful for.
 ## Live check commands
 
 ```bash
+# Preview what jobs prune would remove, without deleting anything
+mighty-colab jobs prune --dry-run
+
+# Actually prune (unapplied plans + confirmed-terminal jobs only)
+mighty-colab jobs prune
+
 # Trustworthy verdict for one job (asks the VM, not local memory)
 mighty-colab job status --poll <job_id>
 
@@ -105,6 +117,6 @@ mighty-colab job destroy <job_id>
 ```
 
 `mighty-colab sessions` is the ground truth for "is anything billing right
-now" — it asks the server directly, unlike `job list`'s envelope-only view.
+now" — it asks the server directly, unlike `jobs list`'s envelope-only view.
 Always confirm with it after any manual cleanup, the same way AGENTS.md
 already requires after any `job apply` failure.

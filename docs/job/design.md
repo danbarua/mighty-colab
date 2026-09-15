@@ -1,4 +1,5 @@
 ---
+2026-09-15: Split `mighty-colab job` into two sibling command groups, mirroring terraform/kubectl muscle memory: `job` keeps the single-item verbs that take a spec/plan/job_id (`plan`/`apply`/`status`/`destroy`), `jobs` (new) holds the collection verbs (`list`, and the new `prune`). `jobs prune --dry-run` reports what it would remove; without `--dry-run` it deletes local job records that are unambiguously safe (`docs/job/store-and-cleanup.md` has the exact rule) and leaves everything else in place with a reason. Closes the prune/rm gap flagged below.
 2026-09-15: Moved this doc, `09_job_usage.md`, and `20_job_spec.md` into `docs/job/` (`design.md`/`usage.md`/`spec.md`) -- three docs for one command group had outgrown living as flat numbered files alongside single-topic docs. Also flagged a real gap surfaced by dogfooding: `JobStore` has no prune/rm; `~/.config/colab-cli/jobs/<job_id>/` accumulates one directory per `plan`/`apply` call forever, and nothing documents which of those are safe to delete by hand.
 log:
 2026-09-13: Added [`docs/job/spec.md`](spec.md): field list, everyday examples, plan refusals, and signed-URL prerequisites for a cold start.

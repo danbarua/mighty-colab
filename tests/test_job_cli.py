@@ -736,8 +736,9 @@ def test_mcp_exposes_job_leaves_and_excludes_the_blocking_one():
     tools, commands = build_tools(typer.main.get_command(app))
     names = {t.name for t in tools}
 
-    assert {"job_plan", "job_status", "job_destroy", "job_list"} <= names
+    assert {"job_plan", "job_status", "job_destroy", "jobs_list", "jobs_prune"} <= names
     assert "job" not in names, "the bare group is a parameterless, useless tool"
+    assert "jobs" not in names, "the bare group is a parameterless, useless tool"
     assert "job_apply" not in names, (
         "apply blocks for the job's whole wall_clock -- hours -- which is the "
         "same failure mode `log --follow` is excluded for"
@@ -753,9 +754,9 @@ def test_mcp_can_actually_invoke_a_nested_leaf(mock_common_state):
     from colab_cli.mcp_server import build_tools, invoke_command
 
     _, commands = build_tools(typer.main.get_command(app))
-    ok, text = invoke_command("job_list", commands["job_list"], {})
+    ok, text = invoke_command("jobs_list", commands["jobs_list"], {})
 
-    assert ok, f"job_list failed to dispatch: {text}"
+    assert ok, f"jobs_list failed to dispatch: {text}"
 
 
 # --------------------------------------------------------------------------
@@ -1722,10 +1723,13 @@ def _job_json(result):
 
 
 def test_job_help_summary_names_every_subcommand():
-    result = runner.invoke(app, ["job", "--help"], env={"COLUMNS": "200"})
+    job_result = runner.invoke(app, ["job", "--help"], env={"COLUMNS": "200"})
+    jobs_result = runner.invoke(app, ["jobs", "--help"], env={"COLUMNS": "200"})
 
-    assert result.exit_code == 0
-    assert "plan, apply, status, destroy, list" in _clean(result.output)
+    assert job_result.exit_code == 0
+    assert "plan, apply, status, destroy" in _clean(job_result.output)
+    assert jobs_result.exit_code == 0
+    assert "list, prune" in _clean(jobs_result.output)
 
 
 @pytest.mark.parametrize(
@@ -1846,15 +1850,143 @@ def test_list_and_nonterminal_status_json_are_query_successes(mock_common_state)
     _store().write_envelope(JobEnvelope(job_id="still-running"))
     _json_mode(mock_common_state)
 
-    listed = runner.invoke(app, ["job", "list"])
+    listed = runner.invoke(app, ["jobs", "list"])
     status_result = runner.invoke(app, ["job", "status", "still-running"])
 
     list_payload = _job_json(listed)
     status_payload = _job_json(status_result)
     assert listed.exit_code == 0
-    assert list_payload["command"] == "job list"
+    assert list_payload["command"] == "jobs list"
     assert list_payload["jobs"][0]["job_id"] == "still-running"
     assert status_result.exit_code == 0
     assert status_payload["command"] == "job status"
     assert status_payload["status"] == "ok"
     assert status_payload["done"] is False
+
+def test_prune_dry_run_reports_without_deleting(mock_common_state):
+    from colab_cli.commands.job import _store
+    from colab_cli.job.models import Cleanup, JobEnvelope, Offload, Supervisor, Workload
+
+    store = _store()
+    # Unapplied plan: `job plan` writes plan.json/spec.json but never an
+    # envelope; the directory existing with no envelope is what matters.
+    (store.job_dir("planned-only")).mkdir(parents=True)
+    store.write_envelope(
+        JobEnvelope(
+            job_id="done-released",
+            workload=Workload.SUCCEEDED,
+            offload=Offload.OK,
+            cleanup=Cleanup.RELEASED,
+            supervisor=Supervisor.FINISHED,
+        )
+    )
+
+    result = runner.invoke(app, ["jobs", "prune", "--dry-run"])
+
+    assert result.exit_code == 0
+    assert "would remove: planned-only" in result.output
+    assert "would remove: done-released" in result.output
+    # Nothing actually deleted.
+    assert set(store.list_jobs()) == {"planned-only", "done-released"}
+
+
+def test_prune_removes_safe_and_keeps_running_or_left_up(mock_common_state):
+    from colab_cli.commands.job import _store
+    from colab_cli.job.models import Cleanup, JobEnvelope, Offload, Supervisor, Workload
+
+    store = _store()
+    (store.job_dir("planned-only")).mkdir(parents=True)
+    store.write_envelope(
+        JobEnvelope(
+            job_id="done-released",
+            workload=Workload.SUCCEEDED,
+            offload=Offload.OK,
+            cleanup=Cleanup.RELEASED,
+            supervisor=Supervisor.FINISHED,
+        )
+    )
+    store.write_envelope(
+        JobEnvelope(
+            job_id="done-already-absent",
+            workload=Workload.FAILED,
+            offload=Offload.SKIPPED,
+            cleanup=Cleanup.ALREADY_ABSENT,
+            supervisor=Supervisor.FINISHED,
+        )
+    )
+    store.write_envelope(
+        JobEnvelope(job_id="still-running", workload=Workload.RUNNING)
+    )
+    store.write_envelope(
+        JobEnvelope(
+            job_id="left-up-billing",
+            workload=Workload.SUCCEEDED,
+            offload=Offload.OK,
+            cleanup=Cleanup.LEFT_UP,
+            supervisor=Supervisor.FINISHED,
+        )
+    )
+
+    result = runner.invoke(app, ["jobs", "prune"])
+
+    assert result.exit_code == 0
+    remaining = set(store.list_jobs())
+    # Deliberately-billing and still-running records must survive a prune
+    # unconditionally -- deleting "left-up-billing"'s record would destroy
+    # the only local pointer to a VM that is still running and billing.
+    assert remaining == {"still-running", "left-up-billing"}
+    assert "skipped: still-running" in result.output
+    assert "skipped: left-up-billing" in result.output
+    assert "left_up" in result.output
+
+
+def test_prune_cleanup_failed_is_kept_not_silently_removed(mock_common_state):
+    from colab_cli.commands.job import _store
+    from colab_cli.job.models import Cleanup, JobEnvelope, Offload, Supervisor, Workload
+
+    store = _store()
+    store.write_envelope(
+        JobEnvelope(
+            job_id="cleanup-failed",
+            workload=Workload.FAILED,
+            offload=Offload.SKIPPED,
+            cleanup=Cleanup.FAILED,
+            supervisor=Supervisor.FINISHED,
+        )
+    )
+
+    result = runner.invoke(app, ["jobs", "prune"])
+
+    assert result.exit_code == 0
+    assert "cleanup-failed" in store.list_jobs()
+    assert "skipped: cleanup-failed" in result.output
+    assert "mighty-colab sessions" in result.output
+
+
+def test_prune_json_reports_removed_and_skipped(mock_common_state):
+    from colab_cli.commands.job import _store
+    from colab_cli.job.models import Cleanup, JobEnvelope, Offload, Supervisor, Workload
+
+    store = _store()
+    store.write_envelope(
+        JobEnvelope(
+            job_id="done-released",
+            workload=Workload.SUCCEEDED,
+            offload=Offload.OK,
+            cleanup=Cleanup.RELEASED,
+            supervisor=Supervisor.FINISHED,
+        )
+    )
+    store.write_envelope(
+        JobEnvelope(job_id="still-running", workload=Workload.RUNNING)
+    )
+    _json_mode(mock_common_state)
+
+    result = runner.invoke(app, ["jobs", "prune"])
+
+    payload = _job_json(result)
+    assert result.exit_code == 0
+    assert payload["command"] == "jobs prune"
+    assert payload["dry_run"] is False
+    assert [r["job_id"] for r in payload["removed"]] == ["done-released"]
+    assert [s["job_id"] for s in payload["skipped"]] == ["still-running"]
