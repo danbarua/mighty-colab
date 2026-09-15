@@ -59,7 +59,13 @@ from colab_cli.job.models import (
 from colab_cli.job.orchestrator import Orchestrator, PhaseError, stop_session_keep_alive
 from colab_cli.job.runtime_payload import ident
 from colab_cli.job.spec_io import fetch_control_result
-from colab_cli.job.store import ApplyInProgress, JobStore, load_plan_file, write_plan_file
+from colab_cli.job.store import (
+    ApplyInProgress,
+    JobStore,
+    RUNNER_LOG_FILE,
+    load_plan_file,
+    write_plan_file,
+)
 
 _logger = logging.getLogger(__name__)
 job_app = typer.Typer(
@@ -1065,6 +1071,22 @@ def status(
                     keep_alive_hint = _ensure_keep_alive(session, state)
                     if keep_alive_hint:
                         env.hints.append(keep_alive_hint)
+                    # Same Contents connection already open for the result
+                    # poll below -- no new signed URL, no watchdog changes.
+                    # runner.log is on VM disk the whole run and nothing
+                    # else ever reads it back; if the VM disappears before
+                    # offload, it's gone with everything else. Best-effort:
+                    # any failure here must never break the verdict poll.
+                    try:
+                        log_text, log_status = transport.read_text(
+                            f"/content/jobs/{job_id}/{RUNNER_LOG_FILE}"
+                        )
+                        if log_status.name == "OK" and log_text is not None:
+                            (store.job_dir(job_id) / RUNNER_LOG_FILE).write_text(
+                                log_text
+                            )
+                    except Exception:  # noqa: BLE001 - best-effort, never fatal
+                        pass
                     kind, payload = _observe_remote(transport, job_id)
                     if kind == "result":
                         _absorb_remote_result(env, store, job_id, payload)

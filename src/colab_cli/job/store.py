@@ -43,6 +43,7 @@ ENVELOPE_FILE = "envelope.json"
 SPEC_FILE = "spec.json"
 SUPERVISOR_IDENTITY_FILE = "supervisor.json"
 APPLY_LOCK_FILE = "apply.lock"
+RUNNER_LOG_FILE = "runner.log"
 
 
 SECRET_SIDECAR_SUFFIX = ".mighty-colab-secrets.json"

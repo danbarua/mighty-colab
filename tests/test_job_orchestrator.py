@@ -24,6 +24,7 @@ reading the implementation.
 import json
 import os
 import tempfile
+import time
 from contextlib import redirect_stdout
 from enum import Enum
 from io import StringIO
@@ -1000,6 +1001,62 @@ def test_poll_returns_the_verdict_when_result_json_appears(tmp_path):
     assert orch.env.workload is Workload.FAILED
     assert orch.env.exit_code == 1
     assert orch.env.supervisor is Supervisor.FINISHED
+
+
+def test_poll_pulls_runner_log_locally_every_healthy_tick(tmp_path):
+    """As long as the VM is alive, runner.log must be pulled locally on
+    every healthy poll tick -- same guarantee exec-async already gives
+    (check the log at any moment, not just at the end), now true for
+    `job apply`/`job apply --async` too. No new signed URL: reuses the
+    same Contents connection already open for result.json/watchdog.json.
+    """
+    orch = _orch(tmp_path)
+    transport = MagicMock()
+    transport.read_json.return_value = (None, FakeStatus.NOT_FOUND)
+    transport.read_text.return_value = ("step 100: loss=0.5\n", FakeStatus.OK)
+
+    orch.poll(transport, deadline=time.time() + 0.05, interval=0)
+
+    local_log = JobStore(tmp_path / "jobs").job_dir("unit-job") / "runner.log"
+    assert local_log.read_text() == "step 100: loss=0.5\n"
+
+
+def test_poll_does_not_write_runner_log_when_the_pull_fails(tmp_path):
+    orch = _orch(tmp_path)
+    transport = MagicMock()
+    transport.read_json.return_value = (None, FakeStatus.NOT_FOUND)
+    transport.read_text.return_value = (None, FakeStatus.NOT_FOUND)
+
+    orch.poll(transport, deadline=time.time() + 0.05, interval=0)
+
+    local_log = JobStore(tmp_path / "jobs").job_dir("unit-job") / "runner.log"
+    assert not local_log.exists()
+
+
+
+
+def test_poll_survives_a_broken_read_text_without_losing_the_verdict(tmp_path):
+    """The log pull is best-effort auxiliary telemetry, not the verdict
+    path -- a transport double (or a real transient failure) that raises
+    out of read_text must never prevent the actual result from being
+    absorbed."""
+    orch = _orch(tmp_path)
+    transport = MagicMock()
+    calls = {"n": 0}
+
+    def read_json(path):
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            return {"workload": "succeeded", "exit_code": 0}, FakeStatus.OK
+        return None, FakeStatus.NOT_FOUND
+
+    transport.read_json.side_effect = read_json
+    transport.read_text.side_effect = RuntimeError("boom")
+
+    orch.poll(transport, deadline=9e18, interval=0)
+
+    assert orch.env.workload is Workload.SUCCEEDED
+    assert orch.env.exit_code == 0
 
 
 # --------------------------------------------------------------------------
