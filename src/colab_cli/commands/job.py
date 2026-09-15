@@ -940,8 +940,6 @@ def status(
                         )
                     if not poll:
                         break
-                    if kind == "never_started":
-                        break
                     time.sleep(interval)
             if orphaned and env.workload.terminal:
                 _release_orphaned_job(env, session, state, store)

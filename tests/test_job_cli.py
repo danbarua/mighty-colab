@@ -1309,6 +1309,67 @@ def test_status_does_not_scrub_a_live_supervisor_before_launch(
     transport.remove.assert_not_called()
 
 
+def test_status_poll_keeps_waiting_while_runner_has_not_launched_yet(
+    monkeypatch, mock_common_state
+):
+    """`--poll` must keep polling through install/restart/verify/stage --
+    every phase before the runner actually launches reads as
+    `_observe_remote`'s "never_started" kind, since `launch.json` doesn't
+    exist yet. Previously the loop broke on the very first "never_started"
+    observation regardless of `--poll`, so a job still installing (the
+    common case right after `apply` starts) got exactly one status
+    snapshot and returned -- never waiting for `--interval` at all.
+    """
+    import os
+
+    from colab_cli.job.models import Supervisor
+    from colab_cli.job.runtime_payload import ident
+    from colab_cli.job.transport import ReadStatus
+
+    store = _persist_running_job(mock_common_state, job_id="still-installing")
+    env = store.read_envelope("still-installing")
+    env.supervisor = Supervisor.RUNNING
+    store.write_envelope(env)
+    store.write_supervisor_identity(
+        "still-installing",
+        pid=os.getpid(),
+        starttime=ident.starttime(os.getpid()),
+        boot_id=ident.boot_id(),
+    )
+    transport = MagicMock()
+    calls = {"n": 0}
+
+    def read_json(path):
+        calls["n"] += 1
+        # First two polls: runner hasn't launched (no launch.json). Third:
+        # it has, and the workload finished.
+        if path.endswith("result.json") and calls["n"] >= 5:
+            return {"workload": "succeeded", "exit_code": 0}, ReadStatus.OK
+        if path.endswith("launch.json") and calls["n"] >= 5:
+            return {"pid": 7, "starttime": "1", "boot_id": "b"}, ReadStatus.OK
+        return None, ReadStatus.NOT_FOUND
+
+    transport.read_json.side_effect = read_json
+    monkeypatch.setattr(
+        "colab_cli.job.transport.JobTransport", lambda *_args: transport
+    )
+    sleeps = []
+    monkeypatch.setattr(
+        "colab_cli.commands.job.time.sleep", lambda s: sleeps.append(s)
+    )
+
+    result = runner.invoke(
+        app, ["job", "status", "still-installing", "--poll", "--interval", "1"]
+    )
+
+    assert result.exit_code == 0
+    # Must have actually waited across multiple never_started observations
+    # rather than returning after the first one.
+    assert len(sleeps) >= 1, "status --poll returned after a single observation"
+    env = store.read_envelope("still-installing")
+    assert env.workload is Workload.SUCCEEDED
+
+
 def _remote_files(mapping):
     from colab_cli.job.transport import ReadStatus
 
