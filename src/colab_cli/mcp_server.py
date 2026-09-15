@@ -43,6 +43,7 @@ from mcp.server.lowlevel import Server
 from mcp.server.stdio import stdio_server
 
 from colab_cli.common import _strip_ansi
+from colab_cli.job.models import Workload
 
 # Commands that require a live human at a terminal (interactive shell, editor,
 # TTY auth ceremony) or are internal-only. Never exposed as MCP tools, even
@@ -438,10 +439,18 @@ class JobResourceSubscriptions:
         existing = self._store.read_envelope(job_id)
         if existing is not None and existing.done:
             return
+        # Baseline for the workload-transition notification below: only
+        # fire it for a transition observed *after* subscribing, not for
+        # a job that was already past pending before this subscribe
+        # existed (same "only transitions, never discovery" rule as the
+        # done check above).
+        initial_workload = existing.workload if existing is not None else Workload.PENDING
         # Idempotent: a re-subscribe on an already-watched URI restarts
         # cleanly rather than leaking a second task racing the first.
         await self.unsubscribe(uri)
-        self._tasks[uri] = asyncio.create_task(self._watch(session, uri, job_id))
+        self._tasks[uri] = asyncio.create_task(
+            self._watch(session, uri, job_id, initial_workload)
+        )
 
     async def unsubscribe(self, uri: str) -> None:
         task = self._tasks.pop(uri, None)
@@ -454,13 +463,37 @@ class JobResourceSubscriptions:
         for uri in list(self._tasks):
             await self.unsubscribe(uri)
 
-    async def _watch(self, session, uri: str, job_id: str) -> None:
+    async def _watch(
+        self, session, uri: str, job_id: str, initial_workload: Workload
+    ) -> None:
+        # A poll loop is exactly what a subscription exists to replace --
+        # an agent burning tool-calls/turns on `jobs list --running` just
+        # to learn whether staging finished, before `run` has even
+        # started, is the same "sleeping while waiting" problem `--poll`
+        # already had for the pre-launch phases (see the never_started
+        # fix). workload leaving pending answers the actually load-
+        # bearing question -- staging succeeded (now running) or failed
+        # outright -- without waiting for the job's own, possibly
+        # hours-later, terminal `done`.
+        # One notification per meaningful, separately-observed event --
+        # not one per condition. Checking `done` first and returning
+        # immediately means a job that goes straight from pending to a
+        # terminal state in a single tick (e.g. staging fails before the
+        # consumer ever ran) fires exactly once, not twice: the workload-
+        # transition check below is only ever reached on a tick where the
+        # job is *not yet* done, so pending -> running -> done (the
+        # normal path, observed as two separate ticks) still fires twice.
+        workload_notified = initial_workload is not Workload.PENDING
         try:
             while True:
                 env = self._store.read_envelope(job_id)
-                if env is not None and env.done:
-                    await session.send_resource_updated(uri)
-                    return
+                if env is not None:
+                    if env.done:
+                        await session.send_resource_updated(uri)
+                        return
+                    if not workload_notified and env.workload is not Workload.PENDING:
+                        await session.send_resource_updated(uri)
+                        workload_notified = True
                 await asyncio.sleep(self._poll_interval)
         finally:
             self._tasks.pop(uri, None)
