@@ -410,22 +410,34 @@ class JobResourceSubscriptions:
     async def subscribe(self, session, uri: str) -> None:
         # Caught live: a client subscribed to `jobs://` because it's
         # listed right alongside subscribable `job://<id>` resources with
-        # no way to know in advance which support it. "not a job://
-        # resource" reads like a malformed-URI complaint when the real
-        # answer is "valid resource, just not one that notifies" --
-        # distinguish the two rather than raising the same message for
-        # both.
+        # no way to know in advance which support it. Raising here was a
+        # dead end in practice: the observed client marks the
+        # subscription "succeeded" in its own bookkeeping regardless of
+        # whether the server actually confirmed it, so an error was just
+        # log noise with no visible effect. Accept it silently instead --
+        # no watch task, no notification ever, but no error either. It's
+        # still true that content changing on every job's every phase
+        # transition and every prune is too often to sensibly notify on;
+        # this just declines quietly rather than loudly.
         if uri in (JOBS_LIST_URI, JOBS_RUNNING_URI, JOBS_DONE_URI):
-            raise ValueError(
-                f"{uri} does not support subscription -- its content changes "
-                f"too often (every job's every phase transition, every "
-                f"prune) to notify on. Read it directly instead; subscribe "
-                f"to individual job://<id> resources for terminal-state "
-                f"push notifications."
-            )
+            return
         job_id = _job_id_from_uri(uri)
         if job_id is None:
             raise ValueError(f"not a job:// resource: {uri}")
+        # Once done=True it never changes again (envelopes are immutable
+        # once terminal) -- if the job was already done before this
+        # subscribe, there is no future "change" to report. Firing
+        # anyway forces every client through the same "is this actually
+        # new, or just a reconnect echo?" disambiguation on every single
+        # reconnect, for every already-known-terminal job it happens to
+        # be subscribed to (observed live: a client burning several
+        # turns re-confirming "old data" on reconnect instead of
+        # tracking the one thing that actually changed). A client that
+        # wants the current state of an already-done job can just read()
+        # it -- that's what the notification handler already points to.
+        existing = self._store.read_envelope(job_id)
+        if existing is not None and existing.done:
+            return
         # Idempotent: a re-subscribe on an already-watched URI restarts
         # cleanly rather than leaking a second task racing the first.
         await self.unsubscribe(uri)

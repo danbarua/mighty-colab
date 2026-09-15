@@ -504,6 +504,38 @@ def test_subscription_fires_exactly_once_when_job_becomes_done(tmp_path):
     asyncio.run(scenario())
 
 
+def test_subscribing_to_an_already_done_job_does_not_fire(tmp_path):
+    """Observed live: reconnecting re-subscribes every previously-watched
+    job://<id>, including ones that finished (and were already read)
+    long before the reconnect. Firing again forced the receiving agent
+    to re-derive "is this actually new, or a reconnect echo?" for every
+    already-known-terminal job on every reconnect -- pure noise, since
+    done=True never changes again once true. Subscribing to a job that's
+    already done must be a silent no-op: no watch task, no notification.
+    A client that wants the current state can just read() it.
+    """
+    import asyncio
+
+    from colab_cli.mcp_server import JobResourceSubscriptions
+
+    store = _job_store(tmp_path)
+    store.write_envelope(_done_envelope("already-finished"))
+    session = MagicMock()
+    session.send_resource_updated = MagicMock(
+        side_effect=lambda uri: asyncio.sleep(0)
+    )
+    subs = JobResourceSubscriptions(store, poll_interval=0.01)
+
+    async def scenario():
+        await subs.subscribe(session, "job://already-finished")
+        await asyncio.sleep(0.03)
+        assert session.send_resource_updated.call_count == 0
+        assert subs._tasks == {}
+
+    asyncio.run(scenario())
+
+
+
 def test_unsubscribe_cancels_the_watch_task_before_it_fires(tmp_path):
     import asyncio
 
@@ -552,13 +584,14 @@ def test_resubscribing_the_same_uri_does_not_leak_a_second_task(tmp_path):
     asyncio.run(scenario())
 
 
-def test_subscribing_to_jobs_list_resource_gives_a_clear_not_subscribable_error(
-    tmp_path,
-):
+def test_subscribing_to_jobs_list_resource_is_a_silent_no_op(tmp_path):
     """Caught live: a client subscribed to jobs:// because it's listed
     right alongside subscribable job://<id> resources with no way to
-    know in advance which support it. Must not read like a malformed-URI
-    complaint -- the resource is real, it just doesn't notify."""
+    know in advance which support it. Raising here was a dead end in
+    practice -- the observed client marks the subscription "succeeded"
+    regardless of whether the server confirmed it, so an error was just
+    log noise with no visible effect. Accept it silently: no watch task,
+    no notification ever, but no error either."""
     import asyncio
 
     from colab_cli.mcp_server import JobResourceSubscriptions
@@ -568,7 +601,8 @@ def test_subscribing_to_jobs_list_resource_gives_a_clear_not_subscribable_error(
     session = MagicMock()
 
     for uri in ("jobs://", "jobs://running", "jobs://done"):
-        with pytest.raises(ValueError, match="does not support subscription"):
-            asyncio.run(subs.subscribe(session, uri))
+        asyncio.run(subs.subscribe(session, uri))  # must not raise
         assert subs._tasks == {}
+    session.send_resource_updated.assert_not_called()
+
 
