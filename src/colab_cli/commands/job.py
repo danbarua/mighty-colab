@@ -1318,12 +1318,31 @@ def _job_list_rows(store) -> List[Dict[str, Any]]:
     return rows
 
 
-def list_jobs():
+def list_jobs(
+    running: Annotated[
+        bool, typer.Option("--running", help="Only jobs not yet done")
+    ] = False,
+    done: Annotated[
+        bool, typer.Option("--done", help="Only jobs that have finished")
+    ] = False,
+):
     """List local job records."""
     from colab_cli.common import state
 
+    if running and done:
+        _emit_command_message(
+            "jobs list",
+            "[colab] --running and --done are mutually exclusive.",
+            reason="usage_error",
+        )
+        raise typer.Exit(1)
+
     store = _store()
     rows = _job_list_rows(store)
+    if running:
+        rows = [r for r in rows if not r["done"]]
+    elif done:
+        rows = [r for r in rows if r["done"]]
     if state.json_output:
         emit_json(
             build_envelope(status="ok", command="jobs list", jobs=rows),
@@ -1341,6 +1360,7 @@ def list_jobs():
                 f"  {row['job_id']}  {row['workload']}/{row['offload']}/{row['cleanup']}"
                 f"  done={row['done']}"
             )
+
 
 
 def prune(

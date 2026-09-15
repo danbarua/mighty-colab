@@ -2280,6 +2280,37 @@ def test_jobs_list_json_does_not_hide_offload_cleanup_phase_or_reason(
     assert unapplied["workload"] is None
     assert unapplied["reason"] == "planned, not applied"
 
+
+def test_jobs_list_running_and_done_filters(mock_common_state):
+    from colab_cli.commands.job import _store
+    from colab_cli.job.models import Cleanup, JobEnvelope, Offload, Supervisor, Workload
+
+    store = _store()
+    (store.job_dir("planned-only")).mkdir(parents=True)
+    store.write_envelope(JobEnvelope(job_id="still-running", workload=Workload.RUNNING))
+    store.write_envelope(
+        JobEnvelope(
+            job_id="done-job",
+            workload=Workload.SUCCEEDED,
+            offload=Offload.OK,
+            cleanup=Cleanup.RELEASED,
+            supervisor=Supervisor.FINISHED,
+        )
+    )
+    _json_mode(mock_common_state)
+
+    running_result = runner.invoke(app, ["jobs", "list", "--running"])
+    done_result = runner.invoke(app, ["jobs", "list", "--done"])
+    both_result = runner.invoke(app, ["jobs", "list", "--running", "--done"])
+
+    running_ids = {r["job_id"] for r in _job_json(running_result)["jobs"]}
+    done_ids = {r["job_id"] for r in _job_json(done_result)["jobs"]}
+    assert running_result.exit_code == 0
+    assert running_ids == {"planned-only", "still-running"}
+    assert done_result.exit_code == 0
+    assert done_ids == {"done-job"}
+    assert both_result.exit_code == 1
+
 def test_prune_dry_run_reports_without_deleting(mock_common_state):
     from colab_cli.commands.job import _store
     from colab_cli.job.models import Cleanup, JobEnvelope, Offload, Supervisor, Workload
