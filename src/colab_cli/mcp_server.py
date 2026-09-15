@@ -33,6 +33,7 @@ reset both to their defaults on every single call.
 import asyncio
 import contextlib
 import io
+import json
 from typing import Any, Dict, List, Optional, Tuple
 
 import click
@@ -294,8 +295,18 @@ def _job_id_from_uri(uri: str) -> Optional[str]:
     return job_id or None
 
 
+JOBS_LIST_URI = "jobs://"
+
+
 def list_job_resources(store) -> List[types.Resource]:
-    resources = []
+    resources = [
+        types.Resource(
+            uri=JOBS_LIST_URI,
+            name="jobs",
+            description="All local job records (same rows as `mighty-colab jobs list --json`)",
+            mime_type="application/json",
+        )
+    ]
     for job_id in store.list_jobs():
         env = store.read_envelope(job_id)
         if env is None:
@@ -313,6 +324,32 @@ def list_job_resources(store) -> List[types.Resource]:
             )
         )
     return resources
+
+
+def read_jobs_list_resource(store) -> types.ReadResourceResult:
+    """`jobs://` -- every local job record, same rows and same source
+    (`_job_list_rows`) as `jobs list --json`: one row builder, so this
+    can never drift thinner than what `jobs list` already shows.
+
+    Not subscribable, unlike `job://<id>`: this resource's content
+    changes on every job's every phase transition plus every prune,
+    far too often to sensibly notify on. `job://<id>`'s single terminal
+    `done` transition is the thing worth pushing; this one is for an
+    agent to read on demand.
+    """
+    from colab_cli.commands.job import _job_list_rows
+
+    rows = _job_list_rows(store)
+    return types.ReadResourceResult(
+        contents=[
+            types.TextResourceContents(
+                uri=JOBS_LIST_URI,
+                mime_type="application/json",
+                text=json.dumps(rows),
+            )
+        ]
+    )
+
 
 
 def read_job_resource(store, uri: str) -> types.ReadResourceResult:
@@ -410,6 +447,8 @@ async def run_stdio_server(click_group: click.Group, server_name: str) -> None:
         return types.ListResourcesResult(resources=list_job_resources(job_store))
 
     async def on_read_resource(ctx, params) -> types.ReadResourceResult:
+        if params.uri == JOBS_LIST_URI:
+            return read_jobs_list_resource(job_store)
         return read_job_resource(job_store, params.uri)
 
     async def on_subscribe_resource(ctx, params) -> types.EmptyResult:

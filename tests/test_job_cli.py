@@ -2236,6 +2236,50 @@ def test_list_and_nonterminal_status_json_are_query_successes(mock_common_state)
     assert status_payload["status"] == "ok"
     assert status_payload["done"] is False
 
+
+
+def test_jobs_list_json_does_not_hide_offload_cleanup_phase_or_reason(
+    mock_common_state,
+):
+    """The JSON row previously carried only job_id/workload/done/endpoint --
+    thinner than the plain-text rendering, which already showed
+    workload/offload/cleanup/done. A JSON consumer (including the
+    `jobs://` MCP resource, which reuses this same row builder) must see
+    at least as much as a human reading the plain-text output does.
+    """
+    from colab_cli.commands.job import _store
+    from colab_cli.job.models import Cleanup, JobEnvelope, Offload, Supervisor, Workload
+
+    store = _store()
+    (store.job_dir("unapplied")).mkdir(parents=True)
+    store.write_envelope(
+        JobEnvelope(
+            job_id="rich-row",
+            workload=Workload.FAILED,
+            offload=Offload.SKIPPED,
+            cleanup=Cleanup.RELEASED,
+            supervisor=Supervisor.FINISHED,
+            reason="staging failed: inputs/x.npz: http_error (403)",
+            endpoint="gpu-a100-example",
+        )
+    )
+    _json_mode(mock_common_state)
+
+    result = runner.invoke(app, ["jobs", "list"])
+
+    payload = _job_json(result)
+    rows = {r["job_id"]: r for r in payload["jobs"]}
+    assert result.exit_code == 0
+    rich = rows["rich-row"]
+    assert rich["workload"] == "failed"
+    assert rich["offload"] == "skipped"
+    assert rich["cleanup"] == "released"
+    assert rich["endpoint"] == "gpu-a100-example"
+    assert rich["reason"] == "staging failed: inputs/x.npz: http_error (403)"
+    unapplied = rows["unapplied"]
+    assert unapplied["workload"] is None
+    assert unapplied["reason"] == "planned, not applied"
+
 def test_prune_dry_run_reports_without_deleting(mock_common_state):
     from colab_cli.commands.job import _store
     from colab_cli.job.models import Cleanup, JobEnvelope, Offload, Supervisor, Workload
