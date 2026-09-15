@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Job spec and envelope schemas (`docs/08_job.md`).
+"""Job spec and envelope schemas (`docs/job/design.md`).
 
 Two shapes live here and they are deliberately different:
 

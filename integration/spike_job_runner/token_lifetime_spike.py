@@ -7,7 +7,7 @@ write-up drew the wrong conclusion ("the VM was reset under a live
 assignment"). The discriminator showed that fresh assignment metadata
 restored access and that the files remained intact. Because `adopt` refreshes
 both the token and proxy endpoint, it did not distinguish token expiry from
-endpoint rebinding. See `docs/08_job.md`'s long-run section.
+endpoint rebinding. See `docs/job/design.md`'s long-run section.
 
 Original docstring follows.
 

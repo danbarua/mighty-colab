@@ -1,6 +1,7 @@
 ---
 log:
-2026-09-13: First version. Field list and everyday examples for a `job` spec, written for a reader who has not opened `docs/08_job.md`. Schema and plan refusals match `src/colab_cli/job/models.py` and `planner.py`. Signed HTTPS URLs are the data plane. The CLI does not mint them.
+2026-09-15: Moved into `docs/job/spec.md` (was `docs/20_job_spec.md`) alongside `design.md` and `usage.md`.
+2026-09-13: First version. Field list and everyday examples for a `job` spec, written for a reader who has not opened `docs/job/design.md`. Schema and plan refusals match `src/colab_cli/job/models.py` and `planner.py`. Signed HTTPS URLs are the data plane. The CLI does not mint them.
 ---
 
 # Job spec files
@@ -9,7 +10,7 @@ A spec is a YAML file that describes one unattended Colab job.
 
 `mighty-colab job plan` reads that file. It writes a local plan. It does not allocate a VM.
 
-`docs/08_job.md` is the design record. `docs/09_job_usage.md` is the command guide. This file is the spec itself.
+`docs/job/design.md` is the design record. `docs/job/usage.md` is the command guide. This file is the spec itself.
 
 Unknown fields are rejected. Extra keys fail validation.
 
