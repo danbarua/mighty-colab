@@ -504,6 +504,104 @@ def test_subscription_fires_exactly_once_when_job_becomes_done(tmp_path):
     asyncio.run(scenario())
 
 
+def test_subscription_fires_on_workload_leaving_pending_then_again_on_done(tmp_path):
+    """The load-bearing question while a job is still installing/staging
+    isn't "is it done" (that could be hours away) -- it's "did staging
+    succeed or fail", i.e. did workload leave pending. Without this, an
+    agent has no way to stop polling jobs list --running just to learn
+    whether run has even started."""
+    import asyncio
+
+    from colab_cli.job.models import JobEnvelope, Workload
+    from colab_cli.mcp_server import JobResourceSubscriptions
+
+    store = _job_store(tmp_path)
+    store.write_envelope(JobEnvelope(job_id="staging-then-running", workload=Workload.PENDING))
+    session = MagicMock()
+    session.send_resource_updated = MagicMock(side_effect=lambda uri: asyncio.sleep(0))
+    subs = JobResourceSubscriptions(store, poll_interval=0.01)
+
+    async def scenario():
+        await subs.subscribe(session, "job://staging-then-running")
+        await asyncio.sleep(0.03)
+        assert session.send_resource_updated.call_count == 0
+        store.write_envelope(
+            JobEnvelope(job_id="staging-then-running", workload=Workload.RUNNING)
+        )
+        await asyncio.sleep(0.05)
+        assert session.send_resource_updated.call_count == 1
+        store.write_envelope(_done_envelope("staging-then-running"))
+        await asyncio.sleep(0.05)
+        assert session.send_resource_updated.call_count == 2
+        assert subs._tasks == {}
+
+    asyncio.run(scenario())
+
+
+def test_subscription_fires_only_once_when_pending_goes_straight_to_terminal(tmp_path):
+    """pending -> failed in a single observed tick (e.g. staging failed
+    before the consumer ever ran) must fire exactly once, not twice --
+    the workload-transition signal and the done signal are the same
+    single event here, not two."""
+    import asyncio
+
+    from colab_cli.job.models import Cleanup, JobEnvelope, Offload, Supervisor, Workload
+    from colab_cli.mcp_server import JobResourceSubscriptions
+
+    store = _job_store(tmp_path)
+    store.write_envelope(JobEnvelope(job_id="fails-outright", workload=Workload.PENDING))
+    session = MagicMock()
+    session.send_resource_updated = MagicMock(side_effect=lambda uri: asyncio.sleep(0))
+    subs = JobResourceSubscriptions(store, poll_interval=0.01)
+
+    async def scenario():
+        await subs.subscribe(session, "job://fails-outright")
+        store.write_envelope(
+            JobEnvelope(
+                job_id="fails-outright",
+                workload=Workload.FAILED,
+                offload=Offload.SKIPPED,
+                cleanup=Cleanup.RELEASED,
+                supervisor=Supervisor.FINISHED,
+            )
+        )
+        await asyncio.sleep(0.05)
+        assert session.send_resource_updated.call_count == 1
+        assert subs._tasks == {}
+
+    asyncio.run(scenario())
+
+
+def test_subscribing_while_already_running_does_not_fire_for_the_pre_existing_state(
+    tmp_path,
+):
+    """Same 'only transitions, never discovery' rule as the already-done
+    case: subscribing to a job that's already running (not pending, not
+    done) must not fire immediately for state that predates the
+    subscribe -- only a later transition to done should fire."""
+    import asyncio
+
+    from colab_cli.job.models import JobEnvelope, Workload
+    from colab_cli.mcp_server import JobResourceSubscriptions
+
+    store = _job_store(tmp_path)
+    store.write_envelope(JobEnvelope(job_id="already-running", workload=Workload.RUNNING))
+    session = MagicMock()
+    session.send_resource_updated = MagicMock(side_effect=lambda uri: asyncio.sleep(0))
+    subs = JobResourceSubscriptions(store, poll_interval=0.01)
+
+    async def scenario():
+        await subs.subscribe(session, "job://already-running")
+        await asyncio.sleep(0.03)
+        assert session.send_resource_updated.call_count == 0
+        store.write_envelope(_done_envelope("already-running"))
+        await asyncio.sleep(0.05)
+        assert session.send_resource_updated.call_count == 1
+
+    asyncio.run(scenario())
+
+
+
 def test_subscribing_to_an_already_done_job_does_not_fire(tmp_path):
     """Observed live: reconnecting re-subscribes every previously-watched
     job://<id>, including ones that finished (and were already read)
