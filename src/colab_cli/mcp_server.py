@@ -424,6 +424,20 @@ class JobResourceSubscriptions:
         job_id = _job_id_from_uri(uri)
         if job_id is None:
             raise ValueError(f"not a job:// resource: {uri}")
+        # Once done=True it never changes again (envelopes are immutable
+        # once terminal) -- if the job was already done before this
+        # subscribe, there is no future "change" to report. Firing
+        # anyway forces every client through the same "is this actually
+        # new, or just a reconnect echo?" disambiguation on every single
+        # reconnect, for every already-known-terminal job it happens to
+        # be subscribed to (observed live: a client burning several
+        # turns re-confirming "old data" on reconnect instead of
+        # tracking the one thing that actually changed). A client that
+        # wants the current state of an already-done job can just read()
+        # it -- that's what the notification handler already points to.
+        existing = self._store.read_envelope(job_id)
+        if existing is not None and existing.done:
+            return
         # Idempotent: a re-subscribe on an already-watched URI restarts
         # cleanly rather than leaking a second task racing the first.
         await self.unsubscribe(uri)

@@ -504,6 +504,38 @@ def test_subscription_fires_exactly_once_when_job_becomes_done(tmp_path):
     asyncio.run(scenario())
 
 
+def test_subscribing_to_an_already_done_job_does_not_fire(tmp_path):
+    """Observed live: reconnecting re-subscribes every previously-watched
+    job://<id>, including ones that finished (and were already read)
+    long before the reconnect. Firing again forced the receiving agent
+    to re-derive "is this actually new, or a reconnect echo?" for every
+    already-known-terminal job on every reconnect -- pure noise, since
+    done=True never changes again once true. Subscribing to a job that's
+    already done must be a silent no-op: no watch task, no notification.
+    A client that wants the current state can just read() it.
+    """
+    import asyncio
+
+    from colab_cli.mcp_server import JobResourceSubscriptions
+
+    store = _job_store(tmp_path)
+    store.write_envelope(_done_envelope("already-finished"))
+    session = MagicMock()
+    session.send_resource_updated = MagicMock(
+        side_effect=lambda uri: asyncio.sleep(0)
+    )
+    subs = JobResourceSubscriptions(store, poll_interval=0.01)
+
+    async def scenario():
+        await subs.subscribe(session, "job://already-finished")
+        await asyncio.sleep(0.03)
+        assert session.send_resource_updated.call_count == 0
+        assert subs._tasks == {}
+
+    asyncio.run(scenario())
+
+
+
 def test_unsubscribe_cancels_the_watch_task_before_it_fires(tmp_path):
     import asyncio
 
