@@ -352,6 +352,122 @@ def test_job_uri_roundtrip():
     assert _job_id_from_uri("job://") is None
 
 
+def test_job_list_watcher_fires_when_a_new_job_appears(tmp_path):
+    """Closes the gap observed live: a fresh job created mid-session (a
+    separate job apply process this server has no other visibility into)
+    ran to completion with nobody subscribed, because the client only
+    ever discovers resources at connect time. list_changed tells it to
+    look again."""
+    import asyncio
+
+    from colab_cli.job.store import JobStore
+    from colab_cli.mcp_server import JobListWatcher
+
+    store = JobStore(tmp_path / "jobs")
+    (store.job_dir("existing-job")).mkdir(parents=True)
+    watcher = JobListWatcher(store, poll_interval=0.01)
+    session = MagicMock()
+    session.send_resource_list_changed = MagicMock(side_effect=lambda: asyncio.sleep(0))
+
+    async def scenario():
+        watcher.start(session)
+        await asyncio.sleep(0.03)
+        assert session.send_resource_list_changed.call_count == 0
+        (store.job_dir("brand-new-job")).mkdir(parents=True)
+        await asyncio.sleep(0.03)
+        assert session.send_resource_list_changed.call_count == 1
+        await watcher.stop()
+
+    asyncio.run(scenario())
+
+
+def test_job_list_watcher_fires_when_a_job_is_pruned(tmp_path):
+    import asyncio
+    import shutil
+
+    from colab_cli.job.store import JobStore
+    from colab_cli.mcp_server import JobListWatcher
+
+    store = JobStore(tmp_path / "jobs")
+    (store.job_dir("about-to-be-pruned")).mkdir(parents=True)
+    watcher = JobListWatcher(store, poll_interval=0.01)
+    session = MagicMock()
+    session.send_resource_list_changed = MagicMock(side_effect=lambda: asyncio.sleep(0))
+
+    async def scenario():
+        watcher.start(session)
+        shutil.rmtree(store.job_dir("about-to-be-pruned"))
+        await asyncio.sleep(0.03)
+        assert session.send_resource_list_changed.call_count == 1
+        await watcher.stop()
+
+    asyncio.run(scenario())
+
+
+def test_job_list_watcher_does_not_fire_when_nothing_changes(tmp_path):
+    import asyncio
+
+    from colab_cli.job.store import JobStore
+    from colab_cli.mcp_server import JobListWatcher
+
+    store = JobStore(tmp_path / "jobs")
+    (store.job_dir("steady-state")).mkdir(parents=True)
+    watcher = JobListWatcher(store, poll_interval=0.01)
+    session = MagicMock()
+    session.send_resource_list_changed = MagicMock(side_effect=lambda: asyncio.sleep(0))
+
+    async def scenario():
+        watcher.start(session)
+        await asyncio.sleep(0.05)
+        assert session.send_resource_list_changed.call_count == 0
+        await watcher.stop()
+
+    asyncio.run(scenario())
+
+
+def test_job_list_watcher_start_is_idempotent(tmp_path):
+    import asyncio
+
+    from colab_cli.job.store import JobStore
+    from colab_cli.mcp_server import JobListWatcher
+
+    store = JobStore(tmp_path / "jobs")
+    watcher = JobListWatcher(store, poll_interval=0.01)
+    session = MagicMock()
+
+    async def scenario():
+        watcher.start(session)
+        first_task = watcher._task
+        watcher.start(session)  # a second on_list_resources call
+        assert watcher._task is first_task
+        await watcher.stop()
+
+    asyncio.run(scenario())
+
+
+def test_job_list_watcher_stop_cancels_the_task(tmp_path):
+    import asyncio
+
+    from colab_cli.job.store import JobStore
+    from colab_cli.mcp_server import JobListWatcher
+
+    store = JobStore(tmp_path / "jobs")
+    watcher = JobListWatcher(store, poll_interval=0.01)
+    session = MagicMock()
+    session.send_resource_list_changed = MagicMock(side_effect=lambda: asyncio.sleep(0))
+
+    async def scenario():
+        watcher.start(session)
+        await watcher.stop()
+        assert watcher._task is None
+        (store.job_dir("after-stop")).mkdir(parents=True)
+        await asyncio.sleep(0.03)
+        assert session.send_resource_list_changed.call_count == 0
+
+    asyncio.run(scenario())
+
+
+
 def test_list_job_resources_reports_status(tmp_path):
     from colab_cli.job.models import JobEnvelope, Workload
     from colab_cli.mcp_server import list_job_resources
@@ -368,17 +484,83 @@ def test_list_job_resources_reports_status(tmp_path):
         "jobs (running)",
         "jobs (done)",
         "planned-only",
+        "planned-only (logs)",
         "still-running",
+        "still-running (logs)",
         "finished",
+        "finished (logs)",
     }
     assert resources["jobs"].uri == "jobs://"
     assert resources["jobs (running)"].uri == "jobs://running"
     assert resources["jobs (done)"].uri == "jobs://done"
     assert resources["planned-only"].uri == "job://planned-only"
+    assert resources["planned-only (logs)"].uri == "job://planned-only/logs"
+    assert resources["planned-only (logs)"].mime_type == "text/plain"
     assert "planned, not applied" in resources["planned-only"].description
     assert "running" in resources["still-running"].description
     assert "done" in resources["finished"].description
-    assert all(r.mime_type == "application/json" for r in resources.values())
+    json_resources = {
+        name: r for name, r in resources.items() if not name.endswith("(logs)")
+    }
+    assert all(r.mime_type == "application/json" for r in json_resources.values())
+
+
+
+def test_read_job_logs_resource_returns_synced_local_log(tmp_path):
+    from colab_cli.job.store import RUNNER_LOG_FILE
+    from colab_cli.mcp_server import read_job_logs_resource
+
+    store = _job_store(tmp_path)
+    store.write_envelope(_done_envelope("logged-job"))
+    (store.job_dir("logged-job") / RUNNER_LOG_FILE).write_text("step 100: loss=0.5\n")
+
+    result = read_job_logs_resource(store, "job://logged-job/logs")
+
+    assert len(result.contents) == 1
+    content = result.contents[0]
+    assert content.uri == "job://logged-job/logs"
+    assert content.mime_type == "text/plain"
+    assert content.text == "step 100: loss=0.5\n"
+
+
+def test_read_job_logs_resource_returns_empty_text_when_nothing_synced_yet(tmp_path):
+    """A job that was just applied has no runner.log locally yet -- that
+    is a normal, not-yet-synced state, not an error."""
+    from colab_cli.mcp_server import read_job_logs_resource
+
+    store = _job_store(tmp_path)
+    store.write_envelope(_done_envelope("no-log-yet"))
+
+    result = read_job_logs_resource(store, "job://no-log-yet/logs")
+
+    assert result.contents[0].text == ""
+
+
+def test_read_job_logs_resource_raises_for_unknown_job(tmp_path):
+    from colab_cli.mcp_server import read_job_logs_resource
+
+    store = _job_store(tmp_path)
+
+    with pytest.raises(ValueError, match="no envelope"):
+        read_job_logs_resource(store, "job://does-not-exist/logs")
+
+
+def test_subscribing_to_a_job_logs_resource_is_a_silent_no_op(tmp_path):
+    """Same reasoning as jobs://: runner.log changes on every poll tick,
+    far too often to sensibly notify on."""
+    import asyncio
+
+    from colab_cli.mcp_server import JobResourceSubscriptions
+
+    store = _job_store(tmp_path)
+    store.write_envelope(_done_envelope("logged-job"))
+    subs = JobResourceSubscriptions(store)
+    session = MagicMock()
+
+    asyncio.run(subs.subscribe(session, "job://logged-job/logs"))  # must not raise
+
+    assert subs._tasks == {}
+    session.send_resource_updated.assert_not_called()
 
 
 def test_read_jobs_list_resource_filters_running_and_done(tmp_path):

@@ -39,7 +39,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import click
 import typer
 import mcp.types as types
-from mcp.server.lowlevel import Server
+from mcp.server.lowlevel import NotificationOptions, Server
 from mcp.server.stdio import stdio_server
 
 from colab_cli.common import _strip_ansi
@@ -296,6 +296,20 @@ def _job_id_from_uri(uri: str) -> Optional[str]:
     return job_id or None
 
 
+JOB_LOGS_SUFFIX = "/logs"
+
+
+def _job_logs_uri(job_id: str) -> str:
+    return f"{_job_uri(job_id)}{JOB_LOGS_SUFFIX}"
+
+
+def _job_id_from_logs_uri(uri: str) -> Optional[str]:
+    if not uri.startswith(JOB_URI_PREFIX) or not uri.endswith(JOB_LOGS_SUFFIX):
+        return None
+    job_id = uri[len(JOB_URI_PREFIX) : -len(JOB_LOGS_SUFFIX)]
+    return job_id or None
+
+
 JOBS_LIST_URI = "jobs://"
 JOBS_RUNNING_URI = "jobs://running"
 JOBS_DONE_URI = "jobs://done"
@@ -336,6 +350,15 @@ def list_job_resources(store) -> List[types.Resource]:
                 name=job_id,
                 description=f"mighty-colab job ({status})",
                 mime_type="application/json",
+            )
+        )
+        resources.append(
+            types.Resource(
+                uri=_job_logs_uri(job_id),
+                name=f"{job_id} (logs)",
+                description="Locally synced runner.log for this job (pulled on every "
+                "healthy poll tick while apply/status --poll is active)",
+                mime_type="text/plain",
             )
         )
     return resources
@@ -395,6 +418,34 @@ def read_job_resource(store, uri: str) -> types.ReadResourceResult:
     )
 
 
+def read_job_logs_resource(store, uri: str) -> types.ReadResourceResult:
+    """`job://<id>/logs` -- the locally synced `runner.log` for one job.
+
+    Reads the same file `Orchestrator.poll()` / `status --poll` already
+    pull to `store.job_dir(job_id) / RUNNER_LOG_FILE` on every healthy
+    poll tick -- no new sync mechanism, this just exposes what's already
+    on disk. Empty text (not an error) if the job exists but nothing has
+    synced yet, e.g. the job was only just applied.
+    """
+    from colab_cli.job.store import RUNNER_LOG_FILE
+
+    job_id = _job_id_from_logs_uri(uri)
+    if job_id is None:
+        raise ValueError(f"not a job://<id>/logs resource: {uri}")
+    if store.read_envelope(job_id) is None and not store.job_dir(job_id).exists():
+        raise ValueError(
+            f"no envelope for job {job_id!r} -- planned but never applied, "
+            f"or the job_id doesn't exist"
+        )
+    log_path = store.job_dir(job_id) / RUNNER_LOG_FILE
+    text = log_path.read_text() if log_path.exists() else ""
+    return types.ReadResourceResult(
+        contents=[
+            types.TextResourceContents(uri=uri, mime_type="text/plain", text=text)
+        ]
+    )
+
+
 class JobResourceSubscriptions:
     """One background task per subscribed `job://` URI, polling for `done`.
 
@@ -420,7 +471,9 @@ class JobResourceSubscriptions:
         # still true that content changing on every job's every phase
         # transition and every prune is too often to sensibly notify on;
         # this just declines quietly rather than loudly.
-        if uri in (JOBS_LIST_URI, JOBS_RUNNING_URI, JOBS_DONE_URI):
+        if uri in (JOBS_LIST_URI, JOBS_RUNNING_URI, JOBS_DONE_URI) or uri.endswith(
+            JOB_LOGS_SUFFIX
+        ):
             return
         job_id = _job_id_from_uri(uri)
         if job_id is None:
@@ -499,6 +552,54 @@ class JobResourceSubscriptions:
             self._tasks.pop(uri, None)
 
 
+class JobListWatcher:
+    """Fires `notifications/resources/list_changed` whenever the set of
+    local job records changes (a new job appears, or one is pruned).
+
+    Closes a real gap: a client that auto-subscribes to every resource it
+    discovers via `resources/list` only ever discovers the jobs that
+    existed at connect time. A job created mid-session (a fresh `job
+    apply`, run by a completely separate process this server has no
+    other visibility into) would otherwise run to completion with nobody
+    watching it -- observed live: a job finished with `done=True` and no
+    notification ever fired, because nothing told the client a new
+    subscribable resource had appeared for it to subscribe to.
+
+    One instance per server connection, not per-URI like
+    `JobResourceSubscriptions` -- there is exactly one job *list* to
+    watch, however many individual jobs exist within it.
+    """
+
+    def __init__(self, store, poll_interval: float = 5.0):
+        self._store = store
+        self._poll_interval = poll_interval
+        self._task: Optional["asyncio.Task"] = None
+        self._known: Optional[set] = None
+
+    def start(self, session) -> None:
+        if self._task is not None:
+            return
+        self._known = set(self._store.list_jobs())
+        self._task = asyncio.create_task(self._watch(session))
+
+    async def stop(self) -> None:
+        if self._task is None:
+            return
+        self._task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await self._task
+        self._task = None
+
+    async def _watch(self, session) -> None:
+        while True:
+            await asyncio.sleep(self._poll_interval)
+            current = set(self._store.list_jobs())
+            if current != self._known:
+                self._known = current
+                await session.send_resource_list_changed()
+
+
+
 async def run_stdio_server(click_group: click.Group, server_name: str) -> None:
     """Start the MCP stdio server, exposing `click_group`'s commands as tools."""
     tools, commands = build_tools(click_group)
@@ -508,6 +609,7 @@ async def run_stdio_server(click_group: click.Group, server_name: str) -> None:
 
     job_store = _store()
     subscriptions = JobResourceSubscriptions(job_store)
+    job_list_watcher = JobListWatcher(job_store)
 
     async def on_list_tools(ctx, params) -> types.ListToolsResult:
         return types.ListToolsResult(tools=tools)
@@ -525,11 +627,17 @@ async def run_stdio_server(click_group: click.Group, server_name: str) -> None:
         )
 
     async def on_list_resources(ctx, params) -> types.ListResourcesResult:
+        # Started lazily on first list, not at server startup: this is
+        # the first point a real ctx.session (and its live send_*
+        # methods) is available at all.
+        job_list_watcher.start(ctx.session)
         return types.ListResourcesResult(resources=list_job_resources(job_store))
 
     async def on_read_resource(ctx, params) -> types.ReadResourceResult:
         if params.uri in (JOBS_LIST_URI, JOBS_RUNNING_URI, JOBS_DONE_URI):
             return read_jobs_list_resource(job_store, params.uri)
+        if params.uri.endswith(JOB_LOGS_SUFFIX):
+            return read_job_logs_resource(job_store, params.uri)
         return read_job_resource(job_store, params.uri)
 
     async def on_subscribe_resource(ctx, params) -> types.EmptyResult:
@@ -551,10 +659,15 @@ async def run_stdio_server(click_group: click.Group, server_name: str) -> None:
     )
     try:
         async with stdio_server() as (read_stream, write_stream):
-            await server.run(read_stream, write_stream, server.create_initialization_options())
+            init_options = server.create_initialization_options(
+                notification_options=NotificationOptions(resources_changed=True)
+            )
+            await server.run(read_stream, write_stream, init_options)
     finally:
-        # Every subscription's background poll task must die with the
-        # server -- an asyncio.run() that returns with orphaned tasks
-        # still scheduled logs "Task was destroyed but it is pending"
-        # noise at minimum, and holds the event loop open at worst.
+        # Every background task -- per-job watches and the job-list
+        # watcher alike -- must die with the server, or an asyncio.run()
+        # that returns with orphaned tasks still scheduled logs "Task was
+        # destroyed but it is pending" noise at minimum, and holds the
+        # event loop open at worst.
         await subscriptions.unsubscribe_all()
+        await job_list_watcher.stop()
