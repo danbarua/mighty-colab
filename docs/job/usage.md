@@ -1,9 +1,10 @@
 ---
+2026-09-16: Added [`docs/job/mcp.md`](mcp.md): the MCP resource/notification layer (`job://<id>` terminal-only subscribe, `job://<id>/logs`, `jobs://running`/`jobs://done`, `resources/list_changed`) that lets an agent driving `job apply --async` learn a job finished without polling `job status` in a loop. Live-verified this session across several real jobs.
 2026-09-15: Split `list` out of `job` into a new sibling group `jobs` (`jobs list`, `jobs prune`), mirroring terraform/kubectl's singular-vs-plural convention: `job` for single-item verbs, `jobs` for collection verbs. `jobs prune` is new.
 log:
 2026-09-15: Moved into `docs/job/usage.md` (was `docs/09_job_usage.md`) alongside `design.md` and `spec.md`.
 2026-09-13: Pointed spec authors to `docs/job/spec.md` for the field list, signed-URL prerequisites, and everyday examples.
-2026-09-11: First version. Usage guide for `mighty-colab job`, written for an agent (or a human) running real science unattended. Design rationale lives in `docs/job/design.md`; this file is how to drive it.
+2026-09-11: First version. Usage guide for `mighty-colab job`, written for an agent (or a human) running real science unattended. Design rationale lives in `docs/job/design.md`; the MCP resource/notification layer for watching a job without polling is in `docs/job/mcp.md`; this file is how to drive it.
 2026-09-11: Added the GCS `control.result` signing sequence after live testing exposed two requirements: pre-create the object before signing GET, and pass the signed PUT through to the remote runner. The repaired path overwrote the placeholder with a terminal result; nested job envelopes now identify their creating CLI version. Signed GCS data input and artifact output were also verified live.
 2026-09-11: Live-verified the detached boundary with `integration/repro_job_kernel_restart/`. Job sessions now retain their launch kernel identity, public `restart-kernel` targets it, the consumer survives with unchanged process identity and continued progress, and apply closes its local kernel client before returning.
 2026-09-11: Audited this guide against the implemented CLI, schema, state machine, transport, and tests. Corrected command syntax, plan and bundle behavior, envelope semantics, signed-URL persistence, and supervisor recovery; added the current operational limits.
