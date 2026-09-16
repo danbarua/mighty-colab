@@ -1,14 +1,6 @@
 ---
 log:
-2026-09-16: First version. Written after a live dogfooding session: three
-real `job apply --async` runs (one CPU, plus watching two real ~90-minute
-A100 jobs from a separate agent's session) proved `resources/list_changed`,
-`job://<id>`, `job://<id>/logs`, and the terminal-only `job://<id>`
-subscribe/notify path end to end, including the one gap found live (a
-stale, pre-existing server connection never receives `list_changed` for a
-job it already knew about at connect time -- not a bug, the intended
-"only transitions, never discovery" rule applied one layer up from where
-it was designed for).
+2026-09-16: First version.
 ---
 
 # `job` MCP resources and notifications
@@ -46,15 +38,14 @@ ever fires for it.
 
 `job://<id>/logs` reads the exact file `Orchestrator.poll()` and `status
 --poll` already pull to `store.job_dir(job_id)/runner.log` on every
-healthy poll tick, and — as of the `cleanup()` fix below — once more
-immediately before the VM is released. No new sync mechanism; this just
-exposes what's already on disk. Empty text, not an error, if the job
-exists but nothing has synced yet.
+healthy poll tick, plus once more from `cleanup()` immediately before
+the VM is released. No new sync mechanism; this just exposes what's
+already on disk. Empty text, not an error, if the job exists but
+nothing has synced yet.
 
 ## Notifications
 
-Two independent mechanisms, both necessary, proven separately live this
-session:
+Two independent mechanisms:
 
 **`notifications/resources/list_changed`** (`JobListWatcher`, one
 instance per server connection). Fires when the *set* of local job
@@ -63,6 +54,15 @@ process, or a `jobs prune`. Closes the real gap a naive client has: one
 that auto-subscribes to every resource discovered via `resources/list`
 only ever discovers jobs that existed at connect time. Without this, a
 job created mid-session runs to completion with nobody watching it.
+
+Baseline is connect-time, not job-creation-time: `JobListWatcher.start()`
+records the current job set on the connection's first `resources/list`
+call and only fires for jobs added or removed after that. A job that
+already existed when the client connected is never announced this way —
+it was already in that first `resources/list` response, so there is
+nothing new to report. Not a limitation to work around; call
+`resources/list` once at connect time to get the baseline, then rely on
+`list_changed` for anything after.
 
 **Per-job `resources/updated`** (`JobResourceSubscriptions`, one
 background task per subscribed `job://<id>` URI, 2s poll of the local
@@ -89,45 +89,12 @@ actually new, or just a reconnect echo?" on every reconnect for every
 already-known-terminal job it's subscribed to. A client that wants an
 already-done job's current state just `read()`s it.
 
-**Subscribing to a non-`job://<id>` resource is also a silent no-op, not
-an error.** Caught live: a client subscribed to `jobs://` because it's
-listed alongside subscribable `job://<id>` resources with no way to know
-in advance which support it, and raising was a dead end — the observed
-client marks the subscription "succeeded" in its own bookkeeping
-regardless of what the server actually did, so an error was pure log
-noise with no visible effect.
-
-## What live dogfooding proved, and the one gap it found
-
-Three real `job apply --async` runs on the freshly-deployed feature,
-plus two ~90-minute real A100 jobs from a separate agent's session
-watched through the same server, confirmed:
-
-- A workload-transition notification fires the moment a new job leaves
-  `pending`, and a second, distinct notification fires on `done` —
-  observed as two separate `[MCP notification]` deliveries for the same
-  job, matching the design exactly.
-- `job://<id>/logs` returns real synced content mid-run, not just at
-  completion.
-- `jobs://running` / `jobs://done` correctly partition an accumulated set
-  of 13+ jobs with no lag or leakage across the split.
-- `resources/list_changed` correctly advertises new jobs to a **freshly
-  connected** client (27 resources, including every job's `/logs`
-  sub-resource, all present and correct on connect).
-
-**The one real gap found live**: a long-lived server connection that
-predates a given job's creation never fires `list_changed` for it,
-because `JobListWatcher.start()` captures `self._known` at *connection*
-time, not at job-creation time relative to the client's own knowledge.
-This is not a bug in the notification logic — it's the intended
-"terminal-only, only fire on a transition observed after watching
-started" rule (the same rule `JobResourceSubscriptions` applies per-job)
-applied one layer up, to the watcher's own startup baseline, where a
-stale MCP host connection means the baseline itself is stale. The
-practical fix is host-side (reconnect periodically, or after any
-"nothing new for a long time" suspicion), not server-side; documented
-here so the next person who sees a silent job doesn't re-diagnose it as
-a server defect.
+**Subscribing to a non-`job://<id>` resource is a silent no-op, not an
+error.** A client can't tell which listed resources support subscription
+without trying, so a subscribe on `jobs://` is expected. Raising would
+accomplish nothing: an MCP client's own subscription bookkeeping tracks
+the request as sent regardless of the server's response, so an error
+here is invisible to the client and pure log noise on the server.
 
 ## Known gaps
 
@@ -140,6 +107,3 @@ a server defect.
   above) — an agent that wants live progress across *all* jobs still has
   to poll one of the `jobs://*` resources on demand. Per-job subscribe
   is the only push-based path.
-- **Stale-connection blind spot**, described above: not fixable
-  server-side without changing what "the set of jobs this connection
-  already knows about" means.

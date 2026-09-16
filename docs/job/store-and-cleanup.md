@@ -1,14 +1,6 @@
 ---
 log:
-2026-09-15: `jobs list`/`jobs prune` implemented (`mighty-colab jobs`, a
-sibling command group to `job` — collection-scoped verbs live there,
-single-job verbs stay under `job`). This doc's manual-cleanup section is
-now the *safety rationale* `jobs prune` itself implements, not a
-workaround for a missing command.
-2026-09-15: First version. Written after a dogfooding session accumulated 58
-local job records with no documented way to prune them, and after
-`overlap-pursuit-b-attractor-*` `job plan` retries during that same session
-made it clear `(planned, not applied)` records need explaining too.
+2026-09-15: First version, then `jobs list`/`jobs prune` implemented the same day (`mighty-colab jobs`, a sibling command group to `job`). This doc's manual-cleanup section is now the safety rationale `jobs prune` itself implements, not a workaround for a missing command.
 ---
 
 # Job store layout and manual cleanup

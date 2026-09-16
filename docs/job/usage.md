@@ -1,32 +1,10 @@
 ---
-2026-09-16: Added [`docs/job/mcp.md`](mcp.md): the MCP resource/notification layer (`job://<id>` terminal-only subscribe, `job://<id>/logs`, `jobs://running`/`jobs://done`, `resources/list_changed`) that lets an agent driving `job apply --async` learn a job finished without polling `job status` in a loop. Live-verified this session across several real jobs.
-2026-09-15: Split `list` out of `job` into a new sibling group `jobs` (`jobs list`, `jobs prune`), mirroring terraform/kubectl's singular-vs-plural convention: `job` for single-item verbs, `jobs` for collection verbs. `jobs prune` is new.
 log:
-2026-09-15: Moved into `docs/job/usage.md` (was `docs/09_job_usage.md`) alongside `design.md` and `spec.md`.
+2026-09-16: Added `docs/job/mcp.md`: the MCP notification layer that lets an agent driving `job apply --async` learn a job finished without polling.
+2026-09-15: Split `jobs list`/`jobs prune` out of `job` into a new sibling group. Moved this guide into `docs/job/usage.md`.
 2026-09-13: Pointed spec authors to `docs/job/spec.md` for the field list, signed-URL prerequisites, and everyday examples.
-2026-09-11: First version. Usage guide for `mighty-colab job`, written for an agent (or a human) running real science unattended. Design rationale lives in `docs/job/design.md`; the MCP resource/notification layer for watching a job without polling is in `docs/job/mcp.md`; this file is how to drive it.
-2026-09-11: Added the GCS `control.result` signing sequence after live testing exposed two requirements: pre-create the object before signing GET, and pass the signed PUT through to the remote runner. The repaired path overwrote the placeholder with a terminal result; nested job envelopes now identify their creating CLI version. Signed GCS data input and artifact output were also verified live.
-2026-09-11: Live-verified the detached boundary with `integration/repro_job_kernel_restart/`. Job sessions now retain their launch kernel identity, public `restart-kernel` targets it, the consumer survives with unchanged process identity and continued progress, and apply closes its local kernel client before returning.
-2026-09-11: Audited this guide against the implemented CLI, schema, state machine, transport, and tests. Corrected command syntax, plan and bundle behavior, envelope semantics, signed-URL persistence, and supervisor recovery; added the current operational limits.
-2026-09-11: Addressed PR #15 peer review: cancellation now reaches detached workloads, destroy preserves remote verdicts, SHA-256 input is validated, supervisor failures terminalize, control PUT credentials stay out of kernel history, unsupported policies fail planning, status absorbs full remote results, and declared artifact sizes count in the disk gate. Source-byte locking remains [#20](https://github.com/danbarua/mighty-colab/issues/20).
-2026-09-11: Live-verified `destroy --cancel-only` against a running CPU workload: the remote verdict became `cancelled`, the assignment remained listed until full destroy, and final teardown removed the endpoint.
-2026-09-11: Fixed and live-verified [#18](https://github.com/danbarua/mighty-colab/issues/18): generated records and remote manifests redact signed URL queries; owner-mode sidecars and an ephemeral descriptor handoff hold the credentials; missing required handoffs fail closed; recovery scrubs or tears down; credential-bearing source files are rejected. The live CPU regression proved a signed data URL remained usable while its sentinel stayed absent from command output, durable job records, remote files, and kernel history, then confirmed teardown.
-2026-09-11: Fixed and live-verified [#16](https://github.com/danbarua/mighty-colab/issues/16): `status --poll` recovers an orphaned supervisor by absorbing a complete remote result or classifying a dead runner, then finishing cleanup.
-2026-09-11: Fixed [#20](https://github.com/danbarua/mighty-colab/issues/20): plans lock source path/size/SHA-256; apply refuses drift before assignment and stages only locked bytes.
-2026-09-11: Fixed [#19](https://github.com/danbarua/mighty-colab/issues/19): apply claims the job ID before assignment; a live second owner fails closed; a stale lock is taken over; a job that already has an endpoint is refused.
-2026-09-11: Fixed [#22](https://github.com/danbarua/mighty-colab/issues/22): stage, poll, cancel, and recovery share one JobTransport with deadlines and one refresh; kernel restart is bounded; timed-out writes confirm before retry.
-2026-09-11: Fixed [#25](https://github.com/danbarua/mighty-colab/issues/25): job URLs are resolved; non-public and mixed DNS answers are rejected; requests pin a validated address; redirects are re-checked.
-2026-09-12: Fixed [#27](https://github.com/danbarua/mighty-colab/issues/27): GCS control-result URL pairs must identify one object; `status` and `destroy` automatically use the GET URL as a bounded terminal-result fallback when the VM result is unavailable. Unsupported retry, resume, control-log, and run-failure policy values remain plan errors.
-2026-09-12: Fixed [#26](https://github.com/danbarua/mighty-colab/issues/26): terminal local and off-VM results identify the CLI build and exact shipped runtime payload under explicit result schema version 2; current readers continue to accept version-1 records.
-2026-09-12: Hardened #26 result recovery after review: terminal absorption validates on a copy and commits only a complete record; malformed VM and off-VM results leave existing envelope state unchanged.
-2026-09-11: Fixed [#23](https://github.com/danbarua/mighty-colab/issues/23): tagged `setsid` descendants are signalled with identity checks; `succeeded` is refused if any survive or if escapee detection is unavailable.
-2026-09-11: Fixed [#21](https://github.com/danbarua/mighty-colab/issues/21): transfers stream while hashing; oversized source fails at plan/apply before assignment; verify reports source/input/output/free totals.
-
-
-2026-09-12: Fixed [#24](https://github.com/danbarua/mighty-colab/issues/24): help, expected-error JSON, process exit codes, and outer envelope fields now agree; nested workload state remains distinct from CLI query success.
-
-2026-09-11: Fixed and live-verified [#17](https://github.com/danbarua/mighty-colab/issues/17): `job apply` starts and owns the TFE keep-alive daemon; destroy/cleanup stop it except on deliberate leave-up.
-
+2026-09-12: Fixed GCS control-result URL pairing and automatic fallback (#27), added result/envelope provenance under schema 2 (#26, later hardened), and fixed CLI help/error/exit-code consistency (#24).
+2026-09-11: First version, written the same day `job` was implemented and live-verified end to end: CPU and T4 GPU runs, install/restart/verify, workload failure with cleanup, signed GCS data/artifact/control-result paths, launch-kernel restart, cancel-only termination, and job-owned keep-alive (#17). Also closed secret handling (#18), crash recovery (#16), source-file locking (#20), exclusive job-ID claims (#19), transport deadlines (#22), URL validation (#25), descendant cleanup (#23), and transfer streaming (#21).
 ---
 
 # Running a job
