@@ -1082,6 +1082,35 @@ def test_poll_survives_a_broken_read_text_without_losing_the_verdict(tmp_path):
     assert orch.env.exit_code == 0
 
 
+
+def test_cleanup_pulls_runner_log_once_more_before_releasing_the_vm(tmp_path):
+    """The run's last output can land after the final poll tick that still
+    saw "not done yet" -- cleanup() must pull runner.log one more time,
+    through the same Contents transport poll() used, before the VM
+    disappears for good."""
+    client = MagicMock()
+    transport = MagicMock()
+    orch = _orch(tmp_path, client=client, transport_factory=lambda _s: transport)
+    orch.env.endpoint = "m-s-abc"
+
+    # poll()'s last healthy tick only sees the log as of that moment.
+    transport.read_json.return_value = (None, FakeStatus.NOT_FOUND)
+    transport.read_text.return_value = ("round 0: heartbeat\n", FakeStatus.OK)
+    orch.poll(transport, deadline=time.time() + 0.05, interval=0)
+
+    local_log = JobStore(tmp_path / "jobs").job_dir("unit-job") / "runner.log"
+    assert local_log.read_text() == "round 0: heartbeat\n"
+
+    # The script wrote its last line between that tick and process exit.
+    transport.read_text.return_value = (
+        "round 0: heartbeat\nfinished\n",
+        FakeStatus.OK,
+    )
+    orch.cleanup()
+
+    assert local_log.read_text() == "round 0: heartbeat\nfinished\n"
+    client.unassign.assert_called_once_with("m-s-abc")
+
 # --------------------------------------------------------------------------
 # Cleanup
 # --------------------------------------------------------------------------

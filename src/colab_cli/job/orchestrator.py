@@ -170,6 +170,27 @@ class Orchestrator:
             self._job_transport = self.transport_factory(self.session_state)
         return self._job_transport
 
+    def _pull_runner_log(self, transport) -> None:
+        """Best-effort: copy the VM's runner.log to local disk.
+
+        Called every healthy poll tick, and once more from `cleanup()`
+        immediately before the VM is released -- the run's last output,
+        written between the final poll tick and process exit, would
+        otherwise never make it off the VM. Any failure here (including a
+        transport double that doesn't implement `read_text`) must never
+        break the actual verdict poll or block teardown.
+        """
+        try:
+            log_text, log_status = transport.read_text(
+                f"{self.remote_dir}/{RUNNER_LOG_FILE}"
+            )
+            if log_status.name == "OK" and log_text is not None:
+                log_path = self.store.job_dir(self.job_id) / RUNNER_LOG_FILE
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                log_path.write_text(log_text)
+        except Exception:  # noqa: BLE001 - best-effort, never fatal
+            pass
+
 
     # -- provision -------------------------------------------------------
 
@@ -725,20 +746,8 @@ class Orchestrator:
                 # gone with everything else, no different than never
                 # having been written. No new signed URL, no watchdog
                 # changes: same Contents connection already open for
-                # result.json/watchdog.json above. Best-effort: any
-                # failure here (including a transport double that doesn't
-                # implement read_text) must never break the actual verdict
-                # poll above it.
-                try:
-                    log_text, log_status = transport.read_text(
-                        f"{self.remote_dir}/{RUNNER_LOG_FILE}"
-                    )
-                    if log_status.name == "OK" and log_text is not None:
-                        log_path = self.store.job_dir(self.job_id) / RUNNER_LOG_FILE
-                        log_path.parent.mkdir(parents=True, exist_ok=True)
-                        log_path.write_text(log_text)
-                except Exception:  # noqa: BLE001 - best-effort, never fatal
-                    pass
+                # result.json/watchdog.json above.
+                self._pull_runner_log(transport)
             self._persist()
             time.sleep(interval)
 
@@ -941,6 +950,10 @@ class Orchestrator:
                 )
             self._persist()
             return
+        # Last chance: the run's final output can land after the last
+        # poll tick that still returned "not done yet" -- pull once more
+        # before the VM that holds it disappears for good.
+        self._pull_runner_log(self.job_transport())
         self._stop_keep_alive()
         try:
             self.client.unassign(self.env.endpoint)
