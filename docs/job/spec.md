@@ -1,8 +1,7 @@
 ---
 log:
-2026-09-15: Added `budgets.artifact_sync_interval_seconds` -- periodic mid-run re-upload of declared `artifacts[]`, not just at the end.
-2026-09-15: Moved into `docs/job/spec.md` (was `docs/20_job_spec.md`) alongside `design.md` and `usage.md`.
-2026-09-13: First version. Field list and everyday examples for a `job` spec, written for a reader who has not opened `docs/job/design.md`. Schema and plan refusals match `src/colab_cli/job/models.py` and `planner.py`. Signed HTTPS URLs are the data plane. The CLI does not mint them.
+2026-09-15: Added `budgets.artifact_sync_interval_seconds` (periodic mid-run re-upload of declared `artifacts[]`). Moved into `docs/job/spec.md`.
+2026-09-13: First version. Field list and everyday examples for a `job` spec, written for a reader who has not opened `docs/job/design.md`.
 ---
 
 # Job spec files
