@@ -29,6 +29,10 @@
     - Integration tests are located in `integration/` (e.g., `integration/repro_plot_redirection/test.sh`).
     - To run an integration test, use: `uv run bash integration/repro_<name>/test.sh`.
     - `uv run` ensures the `colab` command (entry point) is available in the shell environment.
+- **Failure Detail**: When a job fails, its operator, human or AI, is away. Unless the operator has asked otherwise, `job` makes a best-effort attempt to clean up and leave no VM running, so re-creating a failure means re-running a multi-process workflow across several distributed systems, which costs significant time. Every error record MUST carry the detail an operator needs to diagnose the cause from the record alone. Reporting that an error occurred is never sufficient. Examples of detail that must be kept:
+    - A package failed to install: which package, which version, from which index? Was the cause user input (a bad pin), a package index or provider failure, or a transient failure that can be retried? `retry_class` exists to carry that last distinction.
+    - A server returned an HTTP error: which operation failed, against which target (its URL identity, never a signed query string), with which status, and what did the response body say? Was it one file in an otherwise successful batch, and what was different about that file (size, name, type)?
+  Keep the exception type and message, HTTP status, a response body excerpt, exit codes, and the relevant part of tool output. Remove only credentials: signed-URL query strings, tokens, passwords, private keys. A record like `{"error": true, "message": "failed"}`, or one that keeps only an exception class name, is a defect. These examples are not exhaustive.
 - **Continuous Improvement**: Whenever the user provides feedback, workflow advice, or corrections, immediately encode that advice into this `AGENTS.md` file. The goal is to learn from review and never repeat the same errors.
 
 ## Git & Commit Conventions

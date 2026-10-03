@@ -1,5 +1,6 @@
 ---
 log:
+2026-10-03: Documented the copy of VM records before every release, `destroy --wait`, artifact failure detail, and unbuffered consumer output.
 2026-09-16: Added `docs/job/mcp.md`: the MCP notification layer that lets an agent driving `job apply --async` learn a job finished without polling.
 2026-09-15: Split `jobs list`/`jobs prune` out of `job` into a new sibling group. Moved this guide into `docs/job/usage.md`.
 2026-09-13: Pointed spec authors to `docs/job/spec.md` for the field list, signed-URL prerequisites, and everyday examples.
@@ -42,7 +43,7 @@ Use `mighty-colab sessions` after every interrupted run and explicitly destroy a
 mighty-colab job plan SPEC_FILE [--out PATH] [--no-probe]
 mighty-colab job apply [PLAN_FILE] [--job-id ID] [--timeout S] [--leave-up]
 mighty-colab job status JOB_ID [--poll] [--interval S]
-mighty-colab job destroy JOB_ID [--cancel-only]
+mighty-colab job destroy JOB_ID [--cancel-only] [--wait S]
 
 mighty-colab jobs list
 mighty-colab jobs prune [--dry-run]
@@ -54,7 +55,7 @@ local record collection as a whole, and doesn't touch the VM.
 
 `plan` never allocates a VM. It writes redacted `spec.json` and `plan.json` records, writes a redacted explicit `--out` path, and creates an adjacent mode-0600 `.mighty-colab-secrets.json` sidecar when query credentials exist. Keep that sidecar beside the plan: `apply` validates and hydrates it before allocation. By default planning also performs one-byte ranged GET probes of declared data URLs; `--no-probe` disables those reads. Plans are written even with warnings or errors; `apply` refuses errors and refuses warnings unless the spec sets `ignore_warnings: true`.
 
-`apply` accepts either a plan-file positional argument or `--job-id`. `--timeout` bounds the local supervisor, not the watchdog wall clock. `--leave-up` keeps the VM after completion. `destroy --cancel-only` writes cancellation intent that runner and watchdog consume, but deliberately does not unassign the VM; failure to write the intent is an error. `jobs list` reads local job records. `jobs prune` deletes the ones that are unambiguously safe (unapplied plans, confirmed-terminal-and-released) and reports what it skipped and why; see `docs/job/store-and-cleanup.md` for the exact rule and the on-disk layout.
+`apply` accepts either a plan-file positional argument or `--job-id`. `--timeout` bounds the local supervisor, not the watchdog wall clock. `--leave-up` keeps the VM after completion. `destroy --cancel-only` writes cancellation intent that runner and watchdog consume, but deliberately does not unassign the VM; failure to write the intent is an error. A full `destroy` of a running job writes the same intent and waits up to `--wait` seconds (default 300) for the runner to stop the job, upload artifacts and write its result before release. If the job's `job apply` is still running, `destroy` waits for that supervisor to release the VM instead of releasing it a second time. `jobs list` reads local job records. `jobs prune` deletes the ones that are unambiguously safe (unapplied plans, confirmed-terminal-and-released) and reports what it skipped and why; see `docs/job/store-and-cleanup.md` for the exact rule and the on-disk layout.
 
 Under `--json`, every job command emits a validated envelope for normal results and expected errors. Job state is nested under `.job` and the convenience `.done`/`.ok` fields are copied to the outer wrapper. Outer `status` and `exit_code` describe the CLI invocation; nested job fields describe the workload. Thus a failed apply exits one with outer `exit_code: 1`, while a successful status query reporting that failed workload exits zero with outer `status: ok` and nested `ok: false`.
 
@@ -120,7 +121,7 @@ directory, so the same spec works from anywhere.
 There is no SDK to import, no heartbeat to emit, no callback to register.
 `runpy` executes your entry with a real `sys.argv`, a real `__file__`, and
 `sys.path[0]` set to its own directory, which is what `python train.py` gives
-you locally. `if __name__ == "__main__":` works. With `kind: bundle`, sibling
+you locally. `if __name__ == "__main__":` works. The script runs with `PYTHONUNBUFFERED=1`, so its output reaches `runner.log` as it is printed. With `kind: bundle`, sibling
 modules below `root` are uploaded and sibling imports work. With `kind: file`,
 only the entry file is uploaded; undeclared sibling modules are absent.
 
@@ -236,6 +237,17 @@ persisted envelope unchanged.
 
 **Artifacts are attempted even when your run fails.** `on_run_fail: offload_anyway` is the only implemented value; planning rejects `skip` rather than silently ignoring it. A missing optional artifact does not fail offload, but a failed PUT currently fails scalar offload even when that artifact is optional.
 
+A failed artifact says why. Its record in the envelope's `artifacts[]` carries `error`:
+
+```json
+{"exception": "HTTPStatusError",
+ "reason": "HTTP 413 Payload Too Large (upload cut short: BrokenPipeError: [Errno 32] Broken pipe)",
+ "http_status": 413,
+ "body": "<html><head><title>413 Request Entity Too Large</title>..."}
+```
+
+`body` is the first 300 bytes of the response. When the server closes the connection before its response can be read, `exception` is `UploadCutShort`, `http_status` is `null`, and `reason` names the send error and the error from reading the response. The envelope's `reason` names each failed artifact with its cause, and `job status` prints each artifact's error and response body. `runner.log` gets one `[runner] artifact upload failed` line per failure. A destination behind Cloudflare rejects any request body over 100 MB with 413.
+
 `sha256` must be exactly 64 hexadecimal characters. It is worth the trouble: it is the only thing that distinguishes your dataset from a truncated copy, and a silently truncated input produces a result that looks plausible and is wrong.
 
 The plan records each source file's relative path, size, and SHA-256. Apply refuses added, removed, renamed, or changed files before assignment and stages only those locked bytes. Re-run `job plan` after every source change.
@@ -282,7 +294,7 @@ After an interrupted apply, run `status --poll`; it uses the control-result GET 
 
 ## Cost discipline
 
-Normal apply paths attempt cleanup in a `finally` block, including unexpected exceptions before and during run. `--leave-up`, an interrupted local supervisor, and `on_offload_fail: leave_up` can leave an allocation. Hard process death can also leave a non-terminal record; local state is not proof of release.
+Normal apply paths attempt cleanup in a `finally` block, including unexpected exceptions before and during run. Before any release, by `apply`, `destroy` or `status --poll`, the VM's `runner.log`, `install.log`, `result.json`, `watchdog.json`, `launch.json`, `exception.json`, `cancel.json` and manifests are copied into `~/.config/colab-cli/jobs/<id>/`. The envelope's `hints` name what was copied. Read those files after a failure; the VM is gone. `--leave-up`, an interrupted local supervisor, and `on_offload_fail: leave_up` can leave an allocation. Hard process death can also leave a non-terminal record; local state is not proof of release.
 
 When in doubt:
 
@@ -302,3 +314,5 @@ Be aware of these before trusting a long run:
 - Retry/recreate/resume and `control.log` are not implemented; planning rejects non-default policy values.
 
 Verified live on 2026-09-11: CPU and T4 GPU runs end to end; install/restart/verify with a real dependency pin; the workload failure path with cleanup; proxy access recovery after the approximately 60-minute failure; explicit public launch-kernel restart while a detached consumer continued; cancel-only termination while the assignment remained live, followed by full teardown; signed GCS data GET, artifact PUT, and control-result PUT; job-owned TFE keep-alive through idle leave-up and destroy; and supervisor crash recovery via `status --poll` after killing apply during run. These runs do not verify platform-initiated kernel replacement or the gaps above.
+
+Verified live on 2026-10-03 with CPU jobs: a failed install copying `install.log` before release; `destroy` of a running job waiting for its live `apply --async` supervisor, and, after that supervisor was killed, waiting for the runner's result itself, each reporting the runner's `cancelled` verdict and copying the VM records before release; and a failed artifact PUT through a Cloudflare-proxied destination recording `http_status: 404` and the response body. The early-413 recovery for a body over Cloudflare's 100 MB limit is verified against loopback TLS servers only.

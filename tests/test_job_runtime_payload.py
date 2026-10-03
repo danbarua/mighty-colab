@@ -522,6 +522,11 @@ def test_staged_payload_and_runner_share_a_secret_channel_without_persisting_it(
         + "\ndef urlopen_public(req, timeout):\n"
         + "    import urllib.request as _ur\n"
         + "    return _ur.urlopen(req, timeout=timeout)\n"
+        + "\ndef _public_connection(url, timeout):\n"
+        + "    import http.client as _hc\n"
+        + "    from urllib.parse import urlsplit as _us\n"
+        + "    _p = _us(url)\n"
+        + "    return _hc.HTTPConnection(_p.hostname, _p.port, timeout=timeout), _p.hostname\n"
     )
 
 
@@ -929,3 +934,338 @@ def test_consumer_args_after_separator_are_verbatim(tmp_path):
         "--deadline",
         "1",
     ]
+
+# --------------------------------------------------------------------------
+# Artifact upload failures carry their cause
+# --------------------------------------------------------------------------
+
+
+def _reject_without_reading_body(status_line: bytes, body_for):
+    """Serve one response per connection as soon as the request headers
+    arrive, then close without reading the request body -- what Cloudflare
+    does with a body over its upload limit. `body_for(request_head)` builds
+    the response body."""
+    import socket
+
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    sock.listen(5)
+
+    def serve():
+        while True:
+            try:
+                conn, _ = sock.accept()
+            except OSError:
+                return
+            head = b""
+            while b"\r\n\r\n" not in head:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    break
+                head += chunk
+            body = body_for(head)
+            conn.sendall(
+                status_line
+                + b"\r\nContent-Type: text/html\r\nConnection: close\r\n"
+                + b"Content-Length: %d\r\n\r\n" % len(body)
+                + body
+            )
+            conn.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+    return sock
+
+
+def _loopback_put(monkeypatch):
+    """Production policy refuses loopback; these tests prove what the
+    runner records, not the address policy."""
+    import http.client
+    from urllib.parse import urlsplit
+
+    from colab_cli.job.runtime_payload import netpolicy
+
+    def connection(url, timeout):
+        parts = urlsplit(url)
+        return (
+            http.client.HTTPConnection(parts.hostname, parts.port, timeout=timeout),
+            parts.hostname,
+        )
+
+    monkeypatch.setattr(netpolicy, "_public_connection", connection)
+
+
+def test_artifact_record_keeps_a_413_sent_before_the_body_was_read(
+    tmp_path, monkeypatch
+):
+    """A server that rejects an upload from its headers and closes makes
+    the client's send fail with a broken pipe. The record must still carry
+    the server's status and body, not only the broken pipe."""
+    from colab_cli.job.runtime_payload import runner
+
+    _loopback_put(monkeypatch)
+    body = b"<html><title>413 Request Entity Too Large</title>cloudflare</html>"
+    sock = _reject_without_reading_body(
+        b"HTTP/1.1 413 Payload Too Large", lambda _head: body
+    )
+    (tmp_path / "adapter.tar").write_bytes(os.urandom(4 * 1024 * 1024))
+    url = f"http://127.0.0.1:{sock.getsockname()[1]}/drop/adapter.tar"
+    try:
+        record = runner._artifact_record(
+            str(tmp_path), {"path": "adapter.tar", "url": url}, {}
+        )
+    finally:
+        sock.close()
+
+    assert record["status"] == "failed"
+    assert record["bytes"] == 4 * 1024 * 1024
+    error = record["error"]
+    assert error["exception"] == "HTTPStatusError"
+    assert error["http_status"] == 413
+    assert "413" in error["reason"]
+    assert "upload cut short" in error["reason"]
+    assert "Errno" in error["reason"]
+    assert error["body"] == body.decode()
+
+
+def test_artifact_record_keeps_at_most_300_bytes_of_the_response_body(
+    tmp_path, monkeypatch
+):
+    from colab_cli.job.runtime_payload import runner
+
+    _loopback_put(monkeypatch)
+    sock = _reject_without_reading_body(
+        b"HTTP/1.1 403 Forbidden", lambda _head: b"x" * 5000
+    )
+    (tmp_path / "out.bin").write_bytes(b"small")
+    url = f"http://127.0.0.1:{sock.getsockname()[1]}/out.bin"
+    try:
+        record = runner._artifact_record(
+            str(tmp_path), {"path": "out.bin", "url": url}, {}
+        )
+    finally:
+        sock.close()
+
+    assert record["error"]["http_status"] == 403
+    assert record["error"]["body"] == "x" * 300
+
+
+def test_artifact_failure_detail_never_contains_the_signed_query(
+    tmp_path, monkeypatch
+):
+    """A server may echo the request target in its error body. The query
+    string carries the signature and must not reach the record."""
+    from colab_cli.job.runtime_payload import runner
+
+    _loopback_put(monkeypatch)
+    sentinel = "ARTIFACT_ERROR_SENTINEL"
+    sock = _reject_without_reading_body(
+        b"HTTP/1.1 403 Forbidden", lambda head: head.split(b"\r\n", 1)[0]
+    )
+    (tmp_path / "out.bin").write_bytes(b"small")
+    url = f"http://127.0.0.1:{sock.getsockname()[1]}/out.bin?sig={sentinel}"
+    reference = hashlib.sha256(url.encode()).hexdigest()
+    item = {"path": "out.bin", "url_ref": reference, "url_id": runner._url_id(url)}
+    try:
+        record = runner._artifact_record(str(tmp_path), item, {reference: url})
+    finally:
+        sock.close()
+
+    assert record["error"]["http_status"] == 403
+    assert "PUT /out.bin" in record["error"]["body"]
+    assert sentinel not in json.dumps(record)
+
+
+def test_artifact_record_keeps_a_transport_error_without_a_response(
+    tmp_path, monkeypatch
+):
+    from colab_cli.job.runtime_payload import runner
+
+    def reset(_url, _path):
+        raise ConnectionResetError(104, "Connection reset by peer")
+
+    monkeypatch.setattr(runner, "_http_put_file", reset)
+    (tmp_path / "out.bin").write_bytes(b"small")
+
+    record = runner._artifact_record(
+        str(tmp_path), {"path": "out.bin", "url": "https://x.example/out.bin"}, {}
+    )
+
+    assert record["status"] == "failed"
+    assert record["error"] == {
+        "exception": "ConnectionResetError",
+        "reason": "[Errno 104] Connection reset by peer",
+        "http_status": None,
+        "body": None,
+    }
+
+
+def test_offload_records_why_an_artifact_url_could_not_be_resolved(tmp_path):
+    from colab_cli.job.runtime_payload import runner
+
+    manifest = tmp_path / "offload.json"
+    manifest.write_text(
+        json.dumps(
+            [
+                {
+                    "path": "out.bin",
+                    "url_ref": "0" * 64,
+                    "url_id": "https://x.example/out.bin#000000000000",
+                }
+            ]
+        )
+    )
+
+    records, failed = runner._offload(str(tmp_path), str(manifest), {})
+
+    assert failed is True
+    assert records[0]["status"] == "failed"
+    assert records[0]["error"]["exception"] == "ValueError"
+    assert records[0]["error"]["reason"] == (
+        "manifest credential reference is unavailable"
+    )
+
+
+def test_offload_logs_one_line_per_failed_artifact(tmp_path, monkeypatch, capsys):
+    from colab_cli.job.runtime_payload import runner
+    from colab_cli.job.runtime_payload.netpolicy import HTTPStatusError
+
+    def reject(_url, _path):
+        raise HTTPStatusError(413, "Payload Too Large", b"too big")
+
+    monkeypatch.setattr(runner, "_http_put_file", reject)
+    for name in ("a.bin", "b.bin"):
+        (tmp_path / name).write_bytes(b"x")
+    manifest = tmp_path / "offload.json"
+    manifest.write_text(
+        json.dumps(
+            [
+                {"path": "a.bin", "url": "https://x.example/a.bin"},
+                {"path": "b.bin", "url": "https://x.example/b.bin"},
+            ]
+        )
+    )
+
+    runner._offload(str(tmp_path), str(manifest), {})
+
+    lines = [
+        line
+        for line in capsys.readouterr().out.splitlines()
+        if line.startswith("[runner] artifact upload failed")
+    ]
+    assert len(lines) == 2
+    assert "path=a.bin" in lines[0]
+    assert "http_status=413" in lines[0]
+    assert "exception=HTTPStatusError" in lines[0]
+    assert "path=b.bin" in lines[1]
+
+
+def test_offload_logs_an_unreadable_manifest(tmp_path, capsys):
+    from colab_cli.job.runtime_payload import runner
+
+    manifest = tmp_path / "offload.json"
+    manifest.write_text("{not json")
+
+    records, failed = runner._offload(str(tmp_path), str(manifest), {})
+
+    assert (records, failed) == ([], True)
+    assert "[runner] offload manifest unreadable" in capsys.readouterr().out
+
+
+def test_consumer_runs_with_unbuffered_output(tmp_path):
+    """runner.log is the consumer's stdout. Buffered output is lost when the
+    consumer is killed, and lags behind every mid-run pull."""
+    proc, _result, _job_dir = _run(
+        tmp_path, "import os\nprint('UNBUFFERED=' + os.environ.get('PYTHONUNBUFFERED', ''))\n"
+    )
+    assert "UNBUFFERED=1" in proc.stdout
+
+
+def test_artifact_put_sends_the_headers_urllib_sent(tmp_path, monkeypatch):
+    """A CDN in front of the destination can challenge a request that has
+    no User-Agent."""
+    import urllib.request
+
+    from colab_cli.job.runtime_payload import runner
+
+    _loopback_put(monkeypatch)
+    heads = []
+    sock = _reject_without_reading_body(
+        b"HTTP/1.1 200 OK", lambda head: heads.append(head) or b""
+    )
+    (tmp_path / "out.bin").write_bytes(b"abc")
+    url = f"http://127.0.0.1:{sock.getsockname()[1]}/out.bin"
+    try:
+        runner._http_put_file(url, str(tmp_path / "out.bin"))
+    finally:
+        sock.close()
+
+    lines = heads[0].decode().split("\r\n")
+    assert f"User-Agent: Python-urllib/{urllib.request.__version__}" in lines
+    assert "Accept-Encoding: identity" in lines
+    assert "Content-Type: application/octet-stream" in lines
+    assert "Content-Length: 3" in lines
+
+
+
+def test_artifact_record_keeps_why_the_response_could_not_be_read(
+    tmp_path, monkeypatch
+):
+    """The send fails and no response arrives: both failures belong in the
+    record, not only the broken pipe."""
+    import socket
+
+    from colab_cli.job.runtime_payload import runner
+
+    _loopback_put(monkeypatch)
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    sock.listen(5)
+
+    def close_after_headers():
+        conn, _ = sock.accept()
+        head = b""
+        while b"\r\n\r\n" not in head:
+            head += conn.recv(4096)
+        conn.close()
+
+    threading.Thread(target=close_after_headers, daemon=True).start()
+    (tmp_path / "out.bin").write_bytes(os.urandom(4 * 1024 * 1024))
+    url = f"http://127.0.0.1:{sock.getsockname()[1]}/out.bin"
+    try:
+        record = runner._artifact_record(
+            str(tmp_path), {"path": "out.bin", "url": url}, {}
+        )
+    finally:
+        sock.close()
+
+    error = record["error"]
+    assert error["http_status"] is None
+    assert error["exception"] == "UploadCutShort"
+    assert error["reason"].split(":")[0] in {"BrokenPipeError", "ConnectionResetError"}
+    assert "then reading the response failed" in error["reason"]
+
+
+def test_redact_queries_removes_every_query_string():
+    from colab_cli.job.runtime_payload.redact import redact_queries
+
+    text = (
+        "HTTPSConnectionPool(host='x', port=443): Max retries exceeded with url: "
+        "/api/contents/content/jobs/j/runner.log?colab-runtime-proxy-token=SECRET1 "
+        "and https://storage.example/o?X-Goog-Signature=SECRET2&x=1, no query: https://a/b"
+    )
+    redacted = redact_queries(text)
+    assert "SECRET1" not in redacted
+    assert "SECRET2" not in redacted
+    assert "/api/contents/content/jobs/j/runner.log?<redacted>" in redacted
+    assert "https://storage.example/o?<redacted>" in redacted
+    assert "no query: https://a/b" in redacted
+
+
+def test_transfer_error_redacts_queries_of_urls_it_was_not_given():
+    from colab_cli.job.runtime_payload import runner
+
+    error = runner._transfer_error(
+        ValueError("redirected to https://other.example/x?sig=SECRET"), None
+    )
+    assert "SECRET" not in error["reason"]
+    assert "https://other.example/x?<redacted>" in error["reason"]

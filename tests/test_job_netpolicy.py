@@ -62,3 +62,14 @@ def test_pinned_connection_handles_unbracketed_ipv6_and_nondefault_port():
 
     assert conn.host == "2a00:1450:4009:c08::cf"
     assert conn.port == 8443
+
+
+def test_put_refuses_a_non_public_destination():
+    import io
+
+    from colab_cli.job.runtime_payload.netpolicy import put_public
+
+    with pytest.raises(BlockedDestination):
+        put_public("https://[fe80::1]/obj", io.BytesIO(b"x"), 1, {}, timeout=1)
+    with pytest.raises(BlockedDestination):
+        put_public("http://storage.example.test/obj", io.BytesIO(b"x"), 1, {}, timeout=1)

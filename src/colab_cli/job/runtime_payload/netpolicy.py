@@ -12,6 +12,7 @@ import http.client
 import ipaddress
 import socket
 import ssl
+import sys
 import urllib.error
 import urllib.request
 from urllib.parse import urlsplit, urlunsplit
@@ -19,6 +20,34 @@ from urllib.parse import urlsplit, urlunsplit
 
 class BlockedDestination(Exception):
     """The URL resolved to a non-public destination."""
+
+
+class HTTPStatusError(Exception):
+    """A request got a non-2xx response.
+
+    `body` holds the first bytes of the response body. `send_error` is set
+    when the server answered before the request body was fully sent.
+    """
+
+    def __init__(self, status, reason, body, send_error=None):
+        message = f"HTTP {status} {reason}".rstrip()
+        if send_error is not None:
+            message += f" (upload cut short: {type(send_error).__name__}: {send_error})"
+        super().__init__(message)
+        self.status = status
+        self.reason = reason
+        self.body = body
+        self.send_error = send_error
+
+
+class UploadCutShort(Exception):
+    """The request body could not be fully sent, and the server's response
+    does not explain why. The message names the send error and what
+    happened when the response was read."""
+
+    def __init__(self, send_error, after):
+        super().__init__(f"{type(send_error).__name__}: {send_error}; {after}")
+        self.send_error = send_error
 
 
 def _literal_host(host: str) -> str:
@@ -152,3 +181,67 @@ def urlopen_public(req: urllib.request.Request, timeout: float):
         _PinnedHTTPSHandler(host, ip, port),
     )
     return opener.open(pinned_req, timeout=timeout)
+
+
+def _public_connection(url: str, timeout: float):
+    host, ip, port = check_url(url)
+    return _PinnedHTTPSConnection(ip, port, server_hostname=host, timeout=timeout), host
+
+
+def put_public(url, body, length, headers, timeout, body_limit=300):
+    """PUT `length` bytes read from `body` to a public HTTPS destination.
+
+    Uses `http.client` directly rather than urllib: a server that rejects
+    an upload from its headers (a proxy's size limit, an expired
+    signature) answers and closes while the body is still being sent.
+    urllib then raises only the broken pipe. Reading the response after
+    the send fails recovers the server's status and the first
+    `body_limit` bytes of its body, raised as `HTTPStatusError`. A PUT is
+    never redirected, so there are no further hops to check.
+    """
+
+    connection, host = _public_connection(url, timeout)
+    parts = urlsplit(url)
+    target = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
+    try:
+        connection.putrequest("PUT", target, skip_host=True, skip_accept_encoding=True)
+        # The headers urllib sends: a request without a User-Agent can be
+        # challenged by a CDN in front of the destination.
+        connection.putheader("Host", host)
+        connection.putheader("User-Agent", "Python-urllib/%d.%d" % sys.version_info[:2])
+        connection.putheader("Accept-Encoding", "identity")
+        connection.putheader("Connection", "close")
+        connection.putheader("Content-Length", str(length))
+        for name, value in headers.items():
+            connection.putheader(name, value)
+        connection.endheaders()
+        send_error = None
+        try:
+            while True:
+                chunk = body.read(1024 * 1024)
+                if not chunk:
+                    break
+                connection.send(chunk)
+        except OSError as error:
+            send_error = error
+        try:
+            response = connection.getresponse()
+        except (OSError, http.client.HTTPException) as response_error:
+            if send_error is None:
+                raise
+            raise UploadCutShort(
+                send_error,
+                "then reading the response failed: "
+                f"{type(response_error).__name__}: {response_error}",
+            ) from response_error
+        excerpt = response.read(body_limit)
+        if 200 <= response.status < 300:
+            if send_error is not None:
+                raise UploadCutShort(
+                    send_error,
+                    f"the server answered HTTP {response.status} {response.reason}",
+                )
+            return response.status
+        raise HTTPStatusError(response.status, response.reason, excerpt, send_error)
+    finally:
+        connection.close()

@@ -86,7 +86,14 @@ DIAGNOSTIC_CODES = frozenset(
 # Files and directories owned by the launcher/supervisor.  A consumer must not
 # be able to overwrite one of these records by choosing a destination path.
 _RESERVED_FILES = frozenset(
-    {"launch.json", "result.json", "exception.json", "watchdog.json", "cancel.json"}
+    {
+        "launch.json",
+        "result.json",
+        "exception.json",
+        "watchdog.json",
+        "cancel.json",
+        "install.log",
+    }
 )
 _RESERVED_DIRECTORIES = frozenset({"mighty_runtime"})
 

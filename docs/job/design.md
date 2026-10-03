@@ -1,5 +1,6 @@
 ---
 log:
+2026-10-03: Every release of a job VM now copies the VM's records (runner.log, install.log, result.json and the other runner files) into the local job directory first; `destroy` on a running job waits for the runner's result before release; failed artifact records carry the HTTP status, response body excerpt and exception.
 2026-09-16: Three real A100 runs (87-96 min, past the ~60-minute proxy-token boundary) completed cleanly -- direct evidence for the previously-untested multi-hour-GPU gap. Fixed `cleanup()` losing a run's final log lines on the terminating poll tick (PR #67), documented the MCP notification layer (`docs/job/mcp.md`), and filed #68/#69 against the retry/resume gap.
 2026-09-15: Split `job` (single-item verbs) from new `jobs` (`list`, `prune`), closing the local-record-accumulation gap `jobs prune` now handles. Moved this doc and its siblings into `docs/job/`.
 2026-09-13: Added `docs/job/spec.md`. Fixed keep-alive health persistence (#10) and unbounded control-plane HTTP waits during provision/teardown (#33).
@@ -164,7 +165,8 @@ plan.json
   -> run         launch runner/watchdog; runner performs data GET, consumer run,
                  artifact PUT, and optional control-result PUT
   -> offload     absorb the runner's artifact results locally
-  -> cleanup     unassign, report already absent, or leave up
+  -> cleanup     copy VM records locally, then unassign; or report already
+                 absent, or leave up
 ```
 
 `install` precedes `stage`, so a bad dependency pin fails before source upload and disk is measured after installation. Data GET is executed by the remote runner during `run`, not by the local stage phase.
@@ -200,6 +202,12 @@ The outer JSON `status` and `exit_code` describe the CLI invocation. Job state r
 
 `not_required` means the spec declared no artifacts. `skipped` is a terminal schema value but the current runner normally attempts declared artifacts even after failure. Per-artifact results are preserved; any recorded upload failure currently makes scalar offload fail, including a failed optional upload.
 
+A failed artifact record carries `error`: the exception type, its message, and for an HTTP response the status and the first 300 bytes of the body. Query strings are removed from every text field. The runner sends artifact PUTs through `http.client` and reads the response after a send error: a proxy that rejects an upload from its headers and closes the connection (Cloudflare answers a body over 100 MB with 413) is recorded as that status and body, not as the broken pipe urllib would report. When the response cannot be read after the failed send, the record's exception is `UploadCutShort`, with no status; its reason names the send error (for example `BrokenPipeError: [Errno 32] Broken pipe`) and the error from reading the response. An artifact whose URL cannot be resolved from the credential handoff records the resolution error the same way. Query strings are removed from every URL in error text, including relative request targets, by `runtime_payload/redact.py`, which the runner and the local supervisor share. Each failure also writes one flushed `[runner] artifact upload failed path=... http_status=... exception=... reason=...` line to `runner.log`, and the envelope's `reason` names each failed artifact with its cause, for example `artifact offload failed: /content/out/adapter.tar (HTTP 413 Payload Too Large)`.
+
+Every release of a job VM first copies the VM's records into the local job directory: `apply` cleanup (including after setup and bootstrap failures), `destroy`, the forced teardown after an unconfirmed credential deletion, and `status --poll` orphan cleanup. The copy reads `runner.log`, `install.log`, `result.json`, `exception.json`, `watchdog.json`, `launch.json`, `cancel.json` and both manifests, never anything under `mighty_runtime/`. Absent files are skipped. Copying stops when the session is lost, and no new read starts after 120 seconds, so an unreachable VM delays its own release by at most that budget plus one read's transport timeout. The envelope gets a hint naming what was copied and where, or why copying stopped. `install` sends pip output to `install.log` on the VM as well as through the kernel, so it survives a dropped kernel connection. The runner logs its terminal summary line before writing `result.json`, and the consumer runs with `PYTHONUNBUFFERED=1`, so `runner.log` is complete when the supervisor sees the result.
+
+`destroy` on a running job writes the cancel intent and then waits up to `--wait` seconds (default 300) for the runner to stop the workload, upload artifacts and write `result.json`, polling every 5 seconds. It stops waiting early when the runner is dead, never started, or the assignment is gone. It then absorbs the result, copies the records, and unassigns. `--wait 0` releases at once. When no result arrives, a hint says why: the wait ran out, the runner is dead or never started, the assignment is gone, or reading the VM failed. A result that cannot be absorbed does not stop the release; a hint keeps the parse error and the raw verdict fields. A job with no local session is released without a copy, and a hint says the records were not copied. When the `job apply` that owns the job is still running (`job apply --async`), that supervisor absorbs the result, copies the records and releases the VM; `destroy` waits for its envelope to show a terminal cleanup and reports it without unassigning a second time. If the supervisor left the VM up, failed to release it, or did not finish within `--wait`, `destroy` releases it from the supervisor's latest envelope and adds a hint saying which.
+
 `job status --poll` recovers an orphaned job. It identifies the original supervisor by PID, process start time, and boot identity. If that process is gone, it absorbs a complete `result.json` when present, or classifies a dead runner from `launch.json` identity plus `watchdog.json` `runner_alive`, then finishes cleanup. A live runner is left running. Cleanup failure preserves the remote workload verdict. Deliberate `left_up` is not auto-destroyed. A concurrently running healthy supervisor is never scrubbed.
 
 Every envelope carries the result schema version, the CLI version resolved before launch, and `runtime_payload_version`, a `sha256:` identity derived from the exact Python files shipped as `mighty_runtime`. The runner writes the same two provenance values into terminal on-VM and off-VM `result.json` records, and result absorption copies the producer values back into the local envelope. Results and envelopes that carry these fields use result schema 2; plans and other runner records remain schema 1. Result absorption is transactional: it accepts schema 1 for old records, requires both producer fields for schema 2, promotes a legacy envelope from the producer's explicit schema 2, rejects unknown result schemas, and leaves the envelope unchanged when any terminal field is invalid. Current readers accept old result-schema-1 envelopes, default a missing runtime version to an empty string, and preserve local provenance when an old remote result omits it. Envelopes also carry phase, requested/actual accelerator, ordered string hints, timestamps, and relevant result details. The local files are:
@@ -211,6 +219,10 @@ Every envelope carries the result schema version, the CLI version resolved befor
   envelope.json
   events.jsonl
   supervisor.json      # PID, process start time, and boot identity while apply runs
+  runner.log           # copied every poll and before release
+  install.log, result.json, exception.json, watchdog.json, launch.json,
+  cancel.json, offload.manifest.json, stage.manifest.json
+                       # copied from the VM before release, when present
 ```
 
 The remote files include:
@@ -226,6 +238,7 @@ The remote files include:
   launch.json
   watchdog.json
   runner.log
+  install.log          # pip output, when deps are declared
   result.json
   exception.json       # optional
   cancel.json          # optional intent
@@ -235,7 +248,7 @@ The local JSON writes use atomic replacement, but the store has no cross-process
 
 ## Testing strategy
 
-The permanent suite covers model validation, plan diagnostics without reflected inputs, redacted plan/spec persistence with owner-only hydration, canonical URL identity and credential-marker hashing, source-bundle credential rejection against immutable upload snapshots, expiry revalidation, isolated descriptor handoff and unlinking, interrupted-recovery deletion/forced teardown, healthy-supervisor race exclusion, runner exit/cancel behavior, duplicate remote launch, transport refresh, phase transitions, CLI parsing, and envelope truth tables. Live integrations cover CPU and T4 jobs, signed GCS data/artifact/control-result paths, dependency restart/verify, workload failure, token refresh recovery, explicit launch-kernel restart, cancel-only termination with assignment retention, and job-owned TFE keep-alive through idle leave-up and destroy.
+The permanent suite covers model validation, plan diagnostics without reflected inputs, redacted plan/spec persistence with owner-only hydration, canonical URL identity and credential-marker hashing, source-bundle credential rejection against immutable upload snapshots, expiry revalidation, isolated descriptor handoff and unlinking, interrupted-recovery deletion/forced teardown, healthy-supervisor race exclusion, runner exit/cancel behavior, duplicate remote launch, transport refresh, phase transitions, CLI parsing, and envelope truth tables. Live integrations cover CPU and T4 jobs, signed GCS data/artifact/control-result paths, dependency restart/verify, workload failure, token refresh recovery, explicit launch-kernel restart, cancel-only termination with assignment retention, and job-owned TFE keep-alive through idle leave-up and destroy. They also cover the VM record copy before release after a failed install and on `destroy`, `destroy` waiting for a live `apply --async` supervisor and for the runner after its supervisor was killed, and artifact failure detail from a Cloudflare-proxied destination. The early-413 recovery for bodies over Cloudflare's 100 MB limit is covered by loopback TLS tests, not a live upload.
 
 The current gaps need regression coverage before their claims can be promoted: optional-upload semantics; control log.
 

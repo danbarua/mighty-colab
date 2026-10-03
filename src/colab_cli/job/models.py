@@ -423,6 +423,26 @@ class Plan(BaseModel):
 # --------------------------------------------------------------------------
 
 
+class TransferError(BaseModel):
+    """Why one artifact upload failed, as the runner observed it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    exception: str
+    reason: str
+    http_status: Optional[int] = None
+    # First 300 bytes of the response body, query strings removed.
+    body: Optional[str] = None
+
+    @property
+    def summary(self) -> str:
+        """One line: the HTTP status line when there was a response,
+        otherwise the exception type and message."""
+        if self.http_status is not None:
+            return self.reason
+        return f"{self.exception}: {self.reason}"
+
+
 class ArtifactResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -433,6 +453,7 @@ class ArtifactResult(BaseModel):
     status: Literal["ok", "failed", "missing"]
     sha256: Optional[str] = None
     bytes: Optional[int] = None
+    error: Optional[TransferError] = None
 
 
 class JobEnvelope(BaseModel):

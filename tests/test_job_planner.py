@@ -627,3 +627,11 @@ def test_nondefault_retry_class_is_rejected_until_retry_is_implemented(tmp_path)
     )
     assert plan.has_errors
     assert RETRY_NOT_IMPLEMENTED in diagnostic_codes(plan)
+
+
+def test_install_log_is_a_reserved_path(tmp_path):
+    spec = make_spec(
+        tmp_path,
+        data=[DataItem(url=PUBLIC_URL, dest="/content/jobs/planner-test/install.log", size_bytes=1)],
+    )
+    assert RESERVED_PATH in diagnostic_codes(build_plan(spec, JOB_ID, probe=False))
