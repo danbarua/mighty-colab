@@ -216,18 +216,20 @@ def test_kernel_code_runs_pip_after_a_uv_timeout(tmp_path, monkeypatch):
     assert '"timed_out": true' in log
 
 
-def test_kernel_code_redacts_index_credentials_in_the_log_header(tmp_path, monkeypatch):
+def test_kernel_code_redacts_credentials_in_the_log_header(tmp_path, monkeypatch):
+    """A direct-reference dep can carry a token as userinfo, and pip.conf
+    can name an index with one."""
     attempts, log, _fake = _run_kernel_code(
         tmp_path,
         monkeypatch,
         {"uv": 1, "pip": 1},
-        deps=["--extra-index-url", "https://bot:TOKEN1@pkgs.example/simple", "torch==2.4.1"],
+        deps=["pkg @ https://bot:TOKEN1@pkgs.example/pkg-1.0-py3-none-any.whl"],
     )
 
     assert "TOKEN1" not in log and "TOKEN2" not in log
-    assert "https://***@pkgs.example/simple" in log
-    assert attempts[0]["index"]["deps --extra-index-url"] == "https://***@pkgs.example/simple"
-    assert "pip.conf global.index-url" in attempts[1]["index"]
+    assert "https://***@pkgs.example/pkg-1.0-py3-none-any.whl" in log
+    assert attempts[0]["command"][-1] == "pkg @ https://***@pkgs.example/pkg-1.0-py3-none-any.whl"
+    assert attempts[1]["index"]["pip.conf global.index-url"] == "https://***@mirror.example/simple"
     assert "pip.conf global.index-url" not in attempts[0]["index"], "uv does not read pip.conf"
 
 
@@ -308,8 +310,8 @@ def test_recorded_attempts_never_keep_index_credentials(tmp_path):
     from colab_cli.job.orchestrator import PhaseError
 
     attempt = _fixture_attempt("missing_package", "pip")
-    attempt["command"] = attempt["command"] + ["--index-url", "https://bot:TOKEN@pkgs.example/simple"]
-    attempt["index"] = {"deps --index-url": "https://bot:TOKEN@pkgs.example/simple"}
+    attempt["command"] = attempt["command"] + ["pkg @ https://bot:TOKEN@pkgs.example/pkg.whl"]
+    attempt["index"] = {"PIP_INDEX_URL": "https://bot:TOKEN@pkgs.example/simple"}
     attempt["output_tail"] += "\nLooking in indexes: https://bot:TOKEN@pkgs.example/simple\n"
     orch = _orch_with_install_result(tmp_path, [attempt])
 

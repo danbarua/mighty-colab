@@ -260,23 +260,6 @@ def _first_line(cmd):
     return lines[0] if lines else "unknown (exit %s)" % out.returncode
 
 
-_INDEX_FLAGS = (
-    "--index-url", "-i", "--extra-index-url", "--default-index", "--index",
-    "--find-links", "-f",
-)
-
-
-def _index_flags_in_deps():
-    found = {}
-    for position, arg in enumerate(PKGS):
-        for flag in _INDEX_FLAGS:
-            if arg == flag and position + 1 < len(PKGS):
-                found.setdefault("deps " + flag, []).append(PKGS[position + 1])
-            elif flag.startswith("--") and arg.startswith(flag + "="):
-                found.setdefault("deps " + flag, []).append(arg.split("=", 1)[1])
-    return {key: " ".join(values) for key, values in found.items()}
-
-
 _UV_ENV = (
     "UV_DEFAULT_INDEX", "UV_INDEX", "UV_INDEX_URL", "UV_EXTRA_INDEX_URL",
     "UV_FIND_LINKS", "UV_INDEX_STRATEGY", "UV_KEYRING_PROVIDER", "UV_OFFLINE",
@@ -289,9 +272,7 @@ _PIP_ENV = (
 
 
 def _uv_index():
-    found = {name: os.environ[name] for name in _UV_ENV if os.environ.get(name)}
-    found.update(_index_flags_in_deps())
-    return found
+    return {name: os.environ[name] for name in _UV_ENV if os.environ.get(name)}
 
 
 def _pip_index():
@@ -309,7 +290,6 @@ def _pip_index():
         key, _, value = line.partition("=")
         if any(word in key for word in ("index-url", "find-links", "constraint", "no-index")):
             found["pip.conf " + key.strip()] = value.strip().strip("'\"")
-    found.update(_index_flags_in_deps())
     return found
 
 

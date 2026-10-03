@@ -472,7 +472,8 @@ class InstallAttempt(BaseModel):
     version: str
     command: List[str]
     # The index configuration this installer reads (its own environment
-    # variables, pip.conf for pip, index flags inside `deps`), redacted.
+    # variables, and pip.conf for pip), redacted. `deps` cannot carry index
+    # flags: the planner accepts only PEP 508 requirements.
     index: Dict[str, str] = Field(default_factory=dict)
     exit_code: Optional[int] = None
     timed_out: bool = False
