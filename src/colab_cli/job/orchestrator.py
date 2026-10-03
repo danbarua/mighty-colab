@@ -53,7 +53,7 @@ from colab_cli.job.models import (
 )
 from colab_cli.job.store import RUNNER_LOG_FILE, JobStore
 from colab_cli.job.runtime_payload import RUNTIME_PAYLOAD_VERSION
-from colab_cli.job.runtime_payload.redact import describe_error, redact_queries
+from colab_cli.job.runtime_payload.redact import describe_error, redact_credentials
 
 _logger = logging.getLogger(__name__)
 
@@ -1212,7 +1212,7 @@ def release_assignment(client, endpoint: str) -> Tuple[Cleanup, Optional[str]]:
             detail = f"HTTP {status}; {detail}"
         body = response_body_if_json(error, limit=300)
         if body:
-            detail += f"; body: {redact_queries(body)}"
+            detail += f"; body: {redact_credentials(body)}"
         return Cleanup.FAILED, detail
 
 

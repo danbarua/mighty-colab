@@ -22,7 +22,7 @@ from urllib.parse import urlsplit
 from . import RESULT_SCHEMA_VERSION, RUNTIME_PAYLOAD_VERSION, SCHEMA_VERSION
 from . import ident
 from .netpolicy import HTTPStatusError, put_public, urlopen_public
-from .redact import redact_queries
+from .redact import redact_credentials
 
 GRACE_SECONDS = 5
 HTTP_TIMEOUT_SECONDS = 30
@@ -344,7 +344,7 @@ def _transfer_error(error, url):
                 query = ""
             if query:
                 text = text.replace(query, "<redacted>")
-        return redact_queries(text)
+        return redact_credentials(text)
 
     http_status = None
     body = None
