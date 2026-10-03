@@ -1772,6 +1772,7 @@ def test_poll_classifies_a_dead_runner_without_waiting_for_the_deadline(tmp_path
     assert "runner is dead" in orch.env.reason
     assert "95s" in orch.env.reason
     assert orch.env.offload is Offload.NOT_REQUIRED
+    assert orch.env.finished_at is not None
 
 
 def test_poll_rereads_the_result_before_declaring_the_runner_dead(tmp_path):

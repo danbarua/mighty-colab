@@ -863,6 +863,7 @@ class Orchestrator:
         self.env.supervisor = Supervisor.FINISHED
         self.env.reason = reason
         self.env.retry_class = RetryClass.RETRY_SAME
+        self.env.finished_at = _now()
         self._pull_runner_log(transport)
         self._persist()
 
