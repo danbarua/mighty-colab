@@ -417,12 +417,20 @@ def test_unconfirmed_credential_cleanup_overrides_leave_up(
     monkeypatch.setattr(Orchestrator, "launch", launch)
     monkeypatch.setattr(Orchestrator, "cleanup_secret_channel", lambda _self: False)
     monkeypatch.setattr(Orchestrator, "cleanup", cleanup)
+    _json_mode(mock_common_state)
 
     result = runner.invoke(app, ["job", "apply", str(out), "--leave-up"])
 
     assert result.exit_code == 1
     assert forced == {"leave_up": False}
-    assert "transfer credential deletion could not be confirmed" in _clean(result.output)
+    job = json.loads(result.output)["job"]
+    # The forced teardown is a cleanup event: the workload's own reason and
+    # retry advice still explain why the job failed.
+    assert job["reason"] == "launch failed"
+    assert job["retry_class"] == "retry_same"
+    assert any(
+        "transfer credential deletion could not be confirmed" in h for h in job["hints"]
+    )
 
 def test_apply_refuses_a_plan_whose_spec_hash_no_longer_matches(
     tmp_path, mock_common_state
@@ -2868,3 +2876,67 @@ def test_status_output_shows_why_an_artifact_failed(mock_common_state):
     assert result.exit_code == 0, result.output
     assert "/content/out/adapter.tar -> failed: HTTP 413 Payload Too Large" in result.output
     assert "413 Request Entity Too Large" in result.output
+
+
+def _unassign_error(status, body=None):
+    from colab_cli.client import ColabRequestError
+
+    response = MagicMock()
+    response.status_code = status
+    response.headers = {"Content-Type": "application/json"}
+    return ColabRequestError("Failed to issue request POST", MagicMock(), response, body)
+
+
+def test_destroy_treats_a_404_status_as_already_absent(monkeypatch, mock_common_state):
+    from colab_cli.job.models import Cleanup
+
+    store = _persist_running_job(mock_common_state)
+    events = []
+    vm = _RunningVM(events, results=[None])
+    _use_vm(monkeypatch, mock_common_state, vm, events)
+    mock_common_state.client.unassign.side_effect = _unassign_error(404)
+
+    result = runner.invoke(app, ["job", "destroy", "destroy-me", "--wait", "0"])
+
+    assert result.exit_code == 0, result.output
+    assert store.read_envelope("destroy-me").cleanup is Cleanup.ALREADY_ABSENT
+
+
+def test_destroy_unassign_failure_keeps_status_and_body(monkeypatch, mock_common_state):
+    from colab_cli.job.models import Cleanup
+
+    store = _persist_running_job(mock_common_state)
+    events = []
+    vm = _RunningVM(events, results=[None])
+    _use_vm(monkeypatch, mock_common_state, vm, events)
+    mock_common_state.client.unassign.side_effect = _unassign_error(
+        500, '{"error": "backend unavailable"}'
+    )
+
+    result = runner.invoke(app, ["job", "destroy", "destroy-me", "--wait", "0"])
+
+    assert result.exit_code == 1
+    env = store.read_envelope("destroy-me")
+    assert env.cleanup is Cleanup.FAILED
+    assert any("HTTP 500" in h and "backend unavailable" in h for h in env.hints)
+
+
+def test_forced_release_is_not_failed_by_a_local_session_removal_error(
+    monkeypatch, mock_common_state
+):
+    from colab_cli.job.models import Cleanup
+    from colab_cli.job.transport import ReadStatus
+
+    store = _persist_running_job(mock_common_state)
+    events = []
+    vm = _RunningVM(events, results=[None])
+    vm.remove = lambda _path: ReadStatus.DEGRADED
+    _use_vm(monkeypatch, mock_common_state, vm, events)
+    mock_common_state.store.remove.side_effect = OSError("disk full")
+
+    result = runner.invoke(app, ["job", "destroy", "destroy-me", "--cancel-only"])
+
+    assert result.exit_code == 1  # cancel-only retention was overridden
+    env = store.read_envelope("destroy-me")
+    assert env.cleanup is Cleanup.RELEASED
+    assert any("disk full" in h for h in env.hints)

@@ -1269,3 +1269,28 @@ def test_transfer_error_redacts_queries_of_urls_it_was_not_given():
     )
     assert "SECRET" not in error["reason"]
     assert "https://other.example/x?<redacted>" in error["reason"]
+
+
+
+def test_runner_argument_error_names_the_option_and_value(tmp_path):
+    _package, entry, job_dir = _prepare(tmp_path, "print('never runs')\n")
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "mighty_runtime.runner",
+            "--job-dir",
+            str(job_dir),
+            "--deadline",
+            "soon",
+            str(entry),
+        ],
+        cwd=tmp_path,
+        env=_runtime_env(tmp_path),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert proc.returncode == 2
+    assert "--deadline" in proc.stderr
+    assert "'soon'" in proc.stderr

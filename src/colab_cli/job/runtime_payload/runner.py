@@ -95,6 +95,14 @@ def _option_value(argv, index, option):
     return argv[index + 1]
 
 
+def _option_number(argv, index, option, kind):
+    value = _option_value(argv, index, option)
+    try:
+        return kind(value)
+    except ValueError:
+        raise ValueError(f"{option} expects a number, got {value!r}") from None
+
+
 def _split_consumer_args(argv):
     """Split runner options from consumer argv at the first bare separator."""
     try:
@@ -121,13 +129,13 @@ def _parse_args(argv):
             job_dir = _option_value(argv, i, "--job-dir")
             i += 2
         elif argv[i] == "--deadline":
-            deadline_secs = float(_option_value(argv, i, "--deadline"))
+            deadline_secs = _option_number(argv, i, "--deadline", float)
             i += 2
         elif argv[i] == "--cli-version":
             cli_version = _option_value(argv, i, "--cli-version")
             i += 2
         elif argv[i] == "--secrets-fd":
-            secrets_fd = int(_option_value(argv, i, "--secrets-fd"))
+            secrets_fd = _option_number(argv, i, "--secrets-fd", int)
             i += 2
         elif argv[i] == "--secrets-required":
             secrets_required = True
@@ -142,8 +150,8 @@ def _parse_args(argv):
             offload_manifest = _option_value(argv, i, "--offload-manifest")
             i += 2
         elif argv[i] == "--artifact-sync-interval":
-            artifact_sync_interval = float(
-                _option_value(argv, i, "--artifact-sync-interval")
+            artifact_sync_interval = _option_number(
+                argv, i, "--artifact-sync-interval", float
             )
             i += 2
         else:
@@ -685,8 +693,8 @@ def main(argv):
             artifact_sync_interval,
             rest,
         ) = _parse_args(runner_argv)
-    except (TypeError, ValueError):
-        print("runner: invalid private transfer configuration", file=sys.stderr)
+    except (TypeError, ValueError) as error:
+        print(f"runner: invalid arguments: {error}", file=sys.stderr, flush=True)
         return 2
     if not job_dir or not rest:
         print(
