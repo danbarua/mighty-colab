@@ -21,7 +21,7 @@ from urllib.parse import urlsplit
 
 from . import RESULT_SCHEMA_VERSION, RUNTIME_PAYLOAD_VERSION, SCHEMA_VERSION
 from . import ident
-from .netpolicy import urlopen_public
+from .netpolicy import HTTPStatusError, put_public, urlopen_public
 
 GRACE_SECONDS = 5
 HTTP_TIMEOUT_SECONDS = 30
@@ -300,18 +300,64 @@ def _http_put_file(url, path):
     file_size = os.path.getsize(path)
     with open(path, "rb") as raw:
         body = _HashingReader(raw)
-        req = request.Request(
+        put_public(
             url,
-            data=body,
-            method="PUT",
-            headers={
-                "Content-Type": "application/octet-stream",
-                "Content-Length": str(file_size),
-            },
+            body,
+            file_size,
+            {"Content-Type": "application/octet-stream"},
+            timeout=HTTP_TIMEOUT_SECONDS,
         )
-        with urlopen_public(req, timeout=HTTP_TIMEOUT_SECONDS) as response:
-            response.read(1)
     return body.size, body.hasher.hexdigest()
+
+
+def _log(message):
+    """One line to runner.log, flushed at once: the supervisor copies
+    runner.log off the VM as soon as result.json appears, and anything
+    still buffered then never reaches the local job record."""
+    print(f"[runner] {message}", flush=True)
+
+
+def _transfer_error(error, url):
+    """Persistable account of a failed transfer: exception type, its
+    message, and for an HTTP response the status and first body bytes.
+
+    The URL is replaced by its identity and its query string removed from
+    every text field: a signed URL's query is the credential, and an error
+    body or message can echo the request target.
+    """
+
+    def redact(text):
+        if not url:
+            return text
+        text = text.replace(url, _url_id(url))
+        try:
+            query = urlsplit(url).query
+        except ValueError:
+            query = ""
+        return text.replace(query, "<redacted>") if query else text
+
+    http_status = None
+    body = None
+    if isinstance(error, HTTPStatusError):
+        http_status = error.status
+        body = redact(error.body.decode("utf-8", "replace"))
+    elif isinstance(error, urllib_error.HTTPError):
+        http_status = error.code
+    return {
+        "exception": type(error).__name__,
+        "reason": redact(str(error)),
+        "http_status": http_status,
+        "body": body,
+    }
+
+
+def _log_artifact_failure(record):
+    error = record.get("error") or {}
+    _log(
+        f"artifact upload failed path={record['path']} "
+        f"http_status={error.get('http_status')} "
+        f"exception={error.get('exception')} reason={error.get('reason')}"
+    )
 
 
 def _resolve_job_path(job_dir, path):
@@ -406,12 +452,14 @@ def _artifact_record(job_dir, item, urls):
         size, digest = _http_put_file(url, local_path)
     except FileNotFoundError:
         return record
-    except Exception:  # noqa: BLE001 - artifact failure belongs in the verdict
+    except Exception as error:  # noqa: BLE001 - artifact failure belongs in the verdict
         record["status"] = "failed"
+        record["error"] = _transfer_error(error, url)
         try:
             record["bytes"] = os.path.getsize(local_path)
         except OSError:
             pass
+        _log_artifact_failure(record)
         return record
     record["sha256"] = digest
     record["bytes"] = size
@@ -425,12 +473,13 @@ def _offload(job_dir, manifest_path, urls):
     failed = False
     try:
         manifest = _load_manifest(manifest_path)
-    except Exception:  # noqa: BLE001 - malformed manifest is an offload error
+    except Exception as error:  # noqa: BLE001 - malformed manifest is an offload error
+        _log(f"offload manifest unreadable: {type(error).__name__}: {error}")
         return records, True
     for item in manifest:
         try:
             record = _artifact_record(job_dir, item, urls)
-        except Exception:  # noqa: BLE001 - preserve remaining artifact attempts
+        except Exception as error:  # noqa: BLE001 - preserve remaining artifact attempts
             path = item.get("path", "") if isinstance(item, dict) else ""
             declared_id = item.get("url_id", "") if isinstance(item, dict) else ""
             record = {
@@ -439,7 +488,9 @@ def _offload(job_dir, manifest_path, urls):
                 "status": "failed",
                 "sha256": None,
                 "bytes": None,
+                "error": _transfer_error(error, None),
             }
+            _log_artifact_failure(record)
         records.append(record)
         required = bool(item.get("required", True)) if isinstance(item, dict) else True
         if record["status"] == "failed" or (
@@ -504,8 +555,8 @@ def _sync_artifacts_once(job_dir, manifest, urls, last_uploaded):
             # timing info an agent can already read without any new
             # instrumentation -- when each checkpoint/log revision was
             # actually captured, not just that syncing is configured.
-            print(
-                f"[runner] artifact synced path={path} "
+            _log(
+                f"artifact synced path={path} "
                 f"bytes={signature2[0]} at={time.time():.0f}"
             )
         except Exception:  # noqa: BLE001 - one bad artifact must not skip the rest
@@ -713,6 +764,9 @@ def main(argv):
     job_id = os.path.basename(os.path.normpath(job_dir))
     child_env = dict(os.environ)
     child_env[ident.JOB_ENV_VAR] = job_id
+    # The consumer's stdout is runner.log. Unbuffered, its last lines
+    # survive a kill and each mid-run pull sees output as it is printed.
+    child_env["PYTHONUNBUFFERED"] = "1"
     # Signed control URLs belong only to the runner. Remove all supported
     # spellings from the consumer environment, even when inherited externally.
     for name in _URL_ENV_NAMES:
@@ -905,13 +959,15 @@ def main(argv):
         artifacts=artifacts,
         offload_status=offload_status,
     )
+    # Logged before result.json exists: the supervisor copies runner.log
+    # off the VM once it sees the result, and may release the VM next.
+    _log(
+        f"{workload} exit={exit_code} signal={term_signal} "
+        f"survivors={survivors} err={runner_error}"
+    )
     _atomic_write_json(result_path, result)
     _stop_watchdog(watchdog_proc)
     _put_result(result_path, result_put_url)
-    print(
-        f"[runner] {workload} exit={exit_code} signal={term_signal} "
-        f"survivors={survivors} err={runner_error}"
-    )
     return 0
 
 

@@ -423,6 +423,18 @@ class Plan(BaseModel):
 # --------------------------------------------------------------------------
 
 
+class TransferError(BaseModel):
+    """Why one artifact upload failed, as the runner observed it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    exception: str
+    reason: str
+    http_status: Optional[int] = None
+    # First 300 bytes of the response body, query strings removed.
+    body: Optional[str] = None
+
+
 class ArtifactResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -433,6 +445,7 @@ class ArtifactResult(BaseModel):
     status: Literal["ok", "failed", "missing"]
     sha256: Optional[str] = None
     bytes: Optional[int] = None
+    error: Optional[TransferError] = None
 
 
 class JobEnvelope(BaseModel):
