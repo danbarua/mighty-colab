@@ -490,6 +490,10 @@ class JobEnvelope(BaseModel):
     runtime_payload_version: str = ""
     job_id: str
     phase: Phase = Phase.PLAN
+    # The phase whose failure decided the outcome, set once at the first
+    # failure; None when nothing failed. `phase` is the last phase reached,
+    # which is `cleanup` once the VM has been released.
+    failed_phase: Optional[Phase] = None
 
     workload: Workload = Workload.PENDING
     offload: Offload = Offload.PENDING
@@ -522,6 +526,12 @@ class JobEnvelope(BaseModel):
 
     started_at: Optional[str] = None
     finished_at: Optional[str] = None
+
+    def record_failure(self, phase: Phase) -> None:
+        """Record where the job failed. The first failure decides the
+        outcome; later ones (a failed release after a failed run) keep it."""
+        if self.failed_phase is None:
+            self.failed_phase = phase
 
     @property
     def done(self) -> bool:

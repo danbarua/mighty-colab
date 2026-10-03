@@ -3079,3 +3079,77 @@ def test_apply_checks_the_credential_file_when_the_launch_reply_was_lost(
     )
 
     assert "cleanup_secret_channel" in calls
+
+
+def test_apply_records_the_phase_that_failed_not_cleanup(
+    tmp_path, monkeypatch, mock_common_state
+):
+    from colab_cli.job.models import Phase, RetryClass
+    from colab_cli.job.orchestrator import PhaseError
+
+    def install(self):
+        self._set_phase(Phase.INSTALL)
+        raise PhaseError(Phase.INSTALL, "dependency install failed (resolution)", RetryClass.FIX_CODE)
+
+    result, _calls = _apply_with(monkeypatch, tmp_path, mock_common_state, install=install)
+
+    job = _envelope(result.output)["job"]
+    assert job["failed_phase"] == "install"
+
+
+def test_apply_catch_all_records_the_phase_it_was_in(tmp_path, monkeypatch, mock_common_state):
+    def verify(self):
+        from colab_cli.job.models import Phase
+
+        self._set_phase(Phase.VERIFY)
+        raise KeyError("missing_field")
+
+    result, _calls = _apply_with(monkeypatch, tmp_path, mock_common_state, verify=verify)
+
+    assert _envelope(result.output)["job"]["failed_phase"] == "verify"
+
+
+def test_status_records_run_for_a_dead_runner(monkeypatch, mock_common_state):
+    store = _persist_running_job(mock_common_state, job_id="dead-runner")
+    events = []
+    vm = _RunningVM(events, results=[None], runner_alive=False)
+    _use_vm(monkeypatch, mock_common_state, vm, events)
+
+    result = runner.invoke(app, ["job", "status", "dead-runner", "--poll"])
+
+    assert result.exit_code == 0, result.output
+    assert store.read_envelope("dead-runner").failed_phase.value == "run"
+
+
+def test_destroy_of_a_running_job_is_not_a_failure(monkeypatch, mock_common_state):
+    store = _persist_running_job(mock_common_state)
+    events = []
+    vm = _RunningVM(events, results=[None])
+    _use_vm(monkeypatch, mock_common_state, vm, events)
+
+    result = runner.invoke(app, ["job", "destroy", "destroy-me", "--wait", "0"])
+
+    assert result.exit_code == 0, result.output
+    assert store.read_envelope("destroy-me").failed_phase is None
+
+
+def test_status_output_names_the_failed_phase(mock_common_state):
+    from colab_cli.commands.job import _store
+    from colab_cli.job.models import Cleanup, JobEnvelope, Phase, Supervisor
+
+    _store().write_envelope(
+        JobEnvelope(
+            job_id="failed-install",
+            phase=Phase.CLEANUP,
+            failed_phase=Phase.INSTALL,
+            workload=Workload.FAILED,
+            offload=Offload.NOT_REQUIRED,
+            cleanup=Cleanup.RELEASED,
+            supervisor=Supervisor.FINISHED,
+        )
+    )
+
+    result = runner.invoke(app, ["job", "status", "failed-install"])
+
+    assert result.exit_code == 0, result.output
+    assert "failed in:  install" in result.output

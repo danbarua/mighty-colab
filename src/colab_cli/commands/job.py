@@ -225,6 +225,7 @@ def _human(env: JobEnvelope) -> str:
     lines = [
         f"[job] {env.job_id}",
         f"  phase:      {env.phase.value}",
+        *([f"  failed in:  {env.failed_phase.value}"] if env.failed_phase else []),
         f"  workload:   {env.workload.value}"
         + (f" (exit {env.exit_code})" if env.exit_code is not None else "")
         + (f" (signal {env.signal})" if env.signal else ""),
@@ -671,6 +672,7 @@ def apply(
         transport = orch.job_transport()
         orch.poll(transport, deadline=deadline)
     except PhaseError as e:
+        orch.env.record_failure(e.phase)
         orch.env.finished_at = orch.env.finished_at or _now()
         orch.env.workload = Workload.FAILED
         orch.env.offload = (
@@ -691,6 +693,7 @@ def apply(
     except Exception as e:  # noqa: BLE001 - every non-debug path needs a verdict
         if state.debug:
             raise
+        orch.env.record_failure(orch.env.phase)
         orch.env.finished_at = orch.env.finished_at or _now()
         if not orch.env.workload.terminal:
             before_run = orch.env.phase in {
@@ -917,6 +920,8 @@ def _release(env, state, failure: str) -> None:
         env.cleanup = Cleanup.ALREADY_ABSENT
         return
     env.cleanup, detail = release_assignment(state.client, env.endpoint)
+    if env.cleanup is Cleanup.FAILED:
+        env.record_failure(Phase.CLEANUP)
     if detail:
         env.hints.append(
             f"{failure} ({detail}); endpoint {env.endpoint} may still be billing"
@@ -943,6 +948,7 @@ def _force_release_unconfirmed_secret(
     _forget_session(env, state)
     if not env.workload.terminal:
         env.workload = Workload.UNKNOWN
+        env.record_failure(Phase.CLEANUP)
         env.reason = "forced teardown because transfer credential deletion could not be confirmed"
         env.retry_class = RetryClass.DO_NOT_RETRY
     else:
@@ -1214,11 +1220,13 @@ def status(
                             break
                     if kind == "session_lost":
                         env.workload = Workload.UNKNOWN
+                        env.record_failure(Phase.RUN)
                         env.reason = "the assignment is gone from the server"
                         env.supervisor = Supervisor.FINISHED
                         break
                     if kind == "runner_dead":
                         env.workload = Workload.UNKNOWN
+                        env.record_failure(Phase.RUN)
                         env.reason = (
                             "runner identity is dead and no result.json was written"
                         )
@@ -1227,6 +1235,7 @@ def status(
                         break
                     if kind == "never_started" and orphaned:
                         env.workload = Workload.UNKNOWN
+                        env.record_failure(Phase.RUN)
                         env.reason = (
                             "supervisor is gone and no runner identity was recorded"
                         )
@@ -1331,6 +1340,7 @@ def destroy(
         _forget_session(env, state)
         if not env.workload.terminal:
             env.workload = Workload.UNKNOWN
+            env.record_failure(Phase.CLEANUP)
             env.reason = (
                 "cancel-only retention overridden because transfer credential "
                 "deletion could not be confirmed"

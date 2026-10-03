@@ -2037,3 +2037,95 @@ def test_an_interrupted_launch_cell_leaves_the_job_to_poll(tmp_path):
 
     assert orch.launch("/content/jobs/unit-job/src") is None
     assert orch.env.workload is Workload.RUNNING
+
+
+# --------------------------------------------------------------------------
+# failed_phase: which phase's failure decided the outcome
+# --------------------------------------------------------------------------
+
+
+def test_record_failure_keeps_the_first_phase():
+    from colab_cli.job.models import JobEnvelope
+
+    env = JobEnvelope(job_id="x")
+    env.record_failure(Phase.RUN)
+    env.record_failure(Phase.CLEANUP)
+    assert env.failed_phase is Phase.RUN
+
+
+@pytest.mark.parametrize(
+    "result,artifacts,expected",
+    [
+        (_stage_failure_result(), True, Phase.STAGE),
+        ({"workload": "failed", "exit_code": 1}, False, Phase.RUN),
+        ({"workload": "unknown", "runner_error": "escapee detection unavailable"}, False, Phase.RUN),
+        ({"workload": "cancelled", "signal": 15}, False, None),
+        ({"workload": "succeeded", "exit_code": 0}, False, None),
+        (
+            {
+                "workload": "succeeded",
+                "exit_code": 0,
+                "artifacts": [{"path": "/content/out/model.pt", "url_id": "https://x/m.pt#1", "status": "failed"}],
+            },
+            True,
+            Phase.OFFLOAD,
+        ),
+        (
+            {
+                "workload": "failed",
+                "exit_code": 1,
+                "artifacts": [{"path": "/content/out/model.pt", "url_id": "https://x/m.pt#1", "status": "failed"}],
+            },
+            True,
+            Phase.RUN,
+        ),
+    ],
+)
+def test_absorbed_result_records_the_failed_phase(tmp_path, result, artifacts, expected):
+    spec = _spec(
+        artifacts=[ArtifactItem(path="/content/out/model.pt", url="https://x/m.pt", required=False)]
+    ) if artifacts else _spec()
+    orch = _orch(tmp_path, spec=spec)
+
+    orch._absorb_result(result)
+
+    assert orch.env.failed_phase is expected
+
+
+def test_poll_without_a_result_records_run_as_the_failed_phase(tmp_path):
+    orch = _orch(tmp_path)
+    transport = _poll_transport(
+        {
+            "launch.json": [{"pid": 7, "starttime": "1", "boot_id": "b"}],
+            "watchdog.json": [{"runner_alive": False, "elapsed": 95}],
+        }
+    )
+
+    orch.poll(transport, deadline=time.time() + 2, interval=0)
+
+    assert orch.env.failed_phase is Phase.RUN
+
+
+def test_a_failed_release_after_success_records_cleanup(tmp_path):
+    client = MagicMock()
+    client.unassign.side_effect = _colab_error(500, '{"error": "backend unavailable"}')
+    orch = _orch(tmp_path, client=client)
+    orch.env.endpoint = "m-s-abc"
+    orch.env.workload = Workload.SUCCEEDED
+
+    orch.cleanup()
+
+    assert orch.env.phase is Phase.CLEANUP
+    assert orch.env.failed_phase is Phase.CLEANUP
+
+
+def test_a_failed_release_after_a_failed_run_keeps_run(tmp_path):
+    client = MagicMock()
+    client.unassign.side_effect = _colab_error(500, '{"error": "backend unavailable"}')
+    orch = _orch(tmp_path, client=client)
+    orch.env.endpoint = "m-s-abc"
+    orch._absorb_result({"workload": "failed", "exit_code": 1})
+
+    orch.cleanup()
+
+    assert orch.env.failed_phase is Phase.RUN

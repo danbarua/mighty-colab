@@ -1069,6 +1069,7 @@ class Orchestrator:
         self.env.reason = reason
         self.env.retry_class = RetryClass.RETRY_SAME
         self.env.finished_at = _now()
+        self.env.record_failure(Phase.RUN)
         self._pull_runner_log(transport)
         self._persist()
 
@@ -1208,6 +1209,12 @@ class Orchestrator:
             )
         elif env.workload is Workload.FAILED and env.retry_class is None:
             env.retry_class = RetryClass.FIX_CODE
+        if stage_failed:
+            env.record_failure(Phase.STAGE)
+        elif env.workload in (Workload.FAILED, Workload.UNKNOWN):
+            env.record_failure(Phase.RUN)
+        elif env.offload is Offload.FAILED:
+            env.record_failure(Phase.OFFLOAD)
         if env.surviving_descendants:
             hint = (
                 f"{len(env.surviving_descendants)} descendant(s) outlived the "
@@ -1245,6 +1252,7 @@ class Orchestrator:
             # `ok` false; a hint an agent can skip past is not a guard.
             if self.env.surviving_descendants:
                 self.env.cleanup = Cleanup.FAILED
+                self.env.record_failure(Phase.CLEANUP)
                 # `cleanup = FAILED` is on its own enough to make `ok`
                 # false, so the escapee never needs to overwrite the
                 # workload's verdict to be actionable. Writing `reason` or
@@ -1287,6 +1295,8 @@ class Orchestrator:
         self._stop_keep_alive()
         try:
             self.env.cleanup, detail = release_assignment(self.client, self.env.endpoint)
+            if self.env.cleanup is Cleanup.FAILED:
+                self.env.record_failure(Phase.CLEANUP)
             if detail:
                 self.env.hints.append(
                     f"teardown failed ({detail}); endpoint "
