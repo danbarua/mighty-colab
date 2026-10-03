@@ -1,6 +1,6 @@
 ---
 log:
-2026-10-03: Documented the copy of VM records before every release, `destroy --wait`, artifact failure detail, and unbuffered consumer output.
+2026-10-03: Documented the copy of VM records before every release, `destroy --wait`, artifact failure detail, and unbuffered consumer output; `apply` releases the VM when the runner is dead or never started.
 2026-09-16: Added `docs/job/mcp.md`: the MCP notification layer that lets an agent driving `job apply --async` learn a job finished without polling.
 2026-09-15: Split `jobs list`/`jobs prune` out of `job` into a new sibling group. Moved this guide into `docs/job/usage.md`.
 2026-09-13: Pointed spec authors to `docs/job/spec.md` for the field list, signed-URL prerequisites, and everyday examples.
@@ -294,7 +294,7 @@ After an interrupted apply, run `status --poll`; it uses the control-result GET 
 
 ## Cost discipline
 
-Normal apply paths attempt cleanup in a `finally` block, including unexpected exceptions before and during run. Before any release, by `apply`, `destroy` or `status --poll`, the VM's `runner.log`, `install.log`, `result.json`, `watchdog.json`, `launch.json`, `exception.json`, `cancel.json` and manifests are copied into `~/.config/colab-cli/jobs/<id>/`. The envelope's `hints` name what was copied. Read those files after a failure; the VM is gone. `--leave-up`, an interrupted local supervisor, and `on_offload_fail: leave_up` can leave an allocation. Hard process death can also leave a non-terminal record; local state is not proof of release.
+Normal apply paths attempt cleanup in a `finally` block, including unexpected exceptions before and during run. Before any release, by `apply`, `destroy` or `status --poll`, the VM's `runner.log`, `install.log`, `result.json`, `watchdog.json`, `launch.json`, `exception.json`, `cancel.json` and manifests are copied into `~/.config/colab-cli/jobs/<id>/`. The envelope's `hints` name what was copied. Read those files after a failure; the VM is gone. `apply` does not wait out its deadline for a runner that cannot finish: when the watchdog reports the runner dead with no result, or no `launch.json` appears within 120 seconds of launch, it records `workload: unknown` with the reason and releases the VM. `--leave-up`, an interrupted local supervisor, and `on_offload_fail: leave_up` can leave an allocation. Hard process death can also leave a non-terminal record; local state is not proof of release.
 
 When in doubt:
 
