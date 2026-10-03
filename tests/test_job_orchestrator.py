@@ -1578,3 +1578,324 @@ def test_offload_reason_names_each_failed_artifacts_cause(tmp_path):
         "/content/out/meta.json (ConnectionResetError: [Errno 104] Connection reset by peer)"
         in orch.env.reason
     )
+
+
+# --------------------------------------------------------------------------
+# Outcomes: no VM is left billing without a handle or a reason
+# --------------------------------------------------------------------------
+
+
+def _colab_error(status, body=None, content_type="application/json"):
+    from colab_cli.client import ColabRequestError
+
+    response = MagicMock()
+    response.status_code = status
+    response.headers = {"Content-Type": content_type}
+    return ColabRequestError(
+        f"Failed to issue request POST https://colab.example/tun/m/unassign/m-s-abc"
+        f"?authuser=0&token=SECRET: HTTP {status}",
+        MagicMock(),
+        response,
+        response_body=body,
+    )
+
+
+def test_release_assignment_outcomes():
+    from colab_cli.job.orchestrator import release_assignment
+
+    client = MagicMock()
+    assert release_assignment(client, "m-s-abc") == (Cleanup.RELEASED, None)
+
+    client.unassign.side_effect = _colab_error(404)
+    client.list_assignments.return_value = []
+    assert release_assignment(client, "m-s-abc") == (Cleanup.ALREADY_ABSENT, None)
+
+    client.unassign.side_effect = _colab_error(500, '{"error": "backend unavailable"}')
+    cleanup, detail = release_assignment(client, "m-s-abc")
+    assert cleanup is Cleanup.FAILED
+    assert "HTTP 500" in detail
+    assert "ColabRequestError" in detail
+    assert "backend unavailable" in detail
+    assert "SECRET" not in detail
+
+
+def test_cleanup_records_a_404_unassign_as_already_absent(tmp_path):
+    client = MagicMock()
+    client.unassign.side_effect = _colab_error(404)
+    orch = _orch(tmp_path, client=client)
+    orch.env.endpoint = "m-s-abc"
+
+    orch.cleanup()
+
+    assert orch.env.cleanup is Cleanup.ALREADY_ABSENT
+
+
+def test_cleanup_failure_keeps_the_http_status_and_body(tmp_path):
+    client = MagicMock()
+    client.unassign.side_effect = _colab_error(500, '{"error": "backend unavailable"}')
+    orch = _orch(tmp_path, client=client)
+    orch.env.endpoint = "m-s-abc"
+
+    orch.cleanup()
+
+    assert orch.env.cleanup is Cleanup.FAILED
+    hint = next(h for h in orch.env.hints if "teardown failed" in h)
+    assert "HTTP 500" in hint
+    assert "backend unavailable" in hint
+    assert "m-s-abc" in hint
+
+
+def test_keep_alive_scope_error_keeps_the_endpoint_when_unassign_fails(
+    tmp_path, keep_alive_spawn
+):
+    """Clearing the endpoint after a failed unassign leaves a VM billing
+    with no handle: cleanup then reports it already absent."""
+    from colab_cli.client import ColabRequestError
+
+    client = MagicMock()
+    client.assign.return_value = _cpu_assignment("m-s-job")
+    response = MagicMock()
+    response.status_code = 403
+    client.keep_alive_assignment.side_effect = ColabRequestError(
+        "Forbidden",
+        MagicMock(),
+        response,
+        response_body='[7,"Request had insufficient authentication scopes."]',
+    )
+    client.unassign.side_effect = _colab_error(500, '{"error": "backend unavailable"}')
+    orch = _orch(
+        tmp_path,
+        spec=_spec(accelerator=Accelerator(prefer=[], accept_cpu=True)),
+        client=client,
+    )
+
+    with pytest.raises(PhaseError):
+        orch.provision()
+
+    assert orch.env.endpoint == "m-s-job"
+    assert any("HTTP 500" in h and "m-s-job" in h for h in orch.env.hints)
+
+
+def test_provision_stops_when_a_refused_cpu_vm_cannot_be_released(tmp_path):
+    """Moving on to the next accelerator would overwrite the endpoint of a
+    CPU VM that is still assigned."""
+    client = MagicMock()
+    client.assign.return_value = _cpu_assignment("m-s-cpu")
+    client.unassign.side_effect = _colab_error(500, '{"error": "backend unavailable"}')
+    orch = _orch(
+        tmp_path,
+        spec=_spec(accelerator=Accelerator(prefer=["T4", "L4"], accept_cpu=False)),
+        client=client,
+    )
+
+    with pytest.raises(PhaseError) as exc:
+        orch.provision()
+
+    assert client.assign.call_count == 1
+    assert orch.env.endpoint == "m-s-cpu"
+    assert "HTTP 500" in exc.value.reason
+
+
+def _stage_failure_result():
+    return {
+        "workload": "failed",
+        "exit_code": 1,
+        "phase": "stage",
+        "artifacts": [],
+        "offload": "pending",
+        "exception": {
+            "type": "StageItemError",
+            "message": "inputs/x.npy: http_error (403)",
+            "traceback": "",
+        },
+        "runner_error": "inputs/x.npy: http_error (403)",
+    }
+
+
+def test_stage_failure_skips_offload_and_releases_the_vm(tmp_path):
+    """The consumer never ran, so nothing was offloaded. Recording that as
+    an offload failure left the VM up under the default leave_up policy."""
+    client = MagicMock()
+    spec = _spec(
+        artifacts=[ArtifactItem(path="/content/out/model.pt", url="https://x/m.pt")]
+    )
+    orch = _orch(tmp_path, spec=spec, client=client)
+    orch.env.endpoint = "m-s-abc"
+
+    orch._absorb_result(_stage_failure_result())
+    orch.cleanup()
+
+    assert orch.env.offload is Offload.SKIPPED
+    assert "staging failed (inputs/x.npy: http_error (403))" in orch.env.reason
+    assert "required artifact" not in orch.env.reason
+    client.unassign.assert_called_once_with("m-s-abc")
+    assert orch.env.cleanup is Cleanup.RELEASED
+
+
+def test_stage_failure_without_artifacts_is_not_required(tmp_path):
+    orch = _orch(tmp_path)
+    orch._absorb_result(_stage_failure_result())
+    assert orch.env.offload is Offload.NOT_REQUIRED
+
+
+def _poll_transport(files):
+    """read_json double: `files` maps a remote file name to a list of
+    responses, consumed in order; the last one repeats."""
+
+    def read_json(path):
+        name = path.rsplit("/", 1)[-1]
+        queue = files.get(name)
+        if not queue:
+            return None, FakeStatus.NOT_FOUND
+        value = queue.pop(0) if len(queue) > 1 else queue[0]
+        return (value, FakeStatus.OK) if value is not None else (None, FakeStatus.NOT_FOUND)
+
+    transport = MagicMock()
+    transport.read_json.side_effect = read_json
+    transport.read_text.return_value = (None, FakeStatus.NOT_FOUND)
+    return transport
+
+
+def test_poll_classifies_a_dead_runner_without_waiting_for_the_deadline(tmp_path):
+    orch = _orch(tmp_path)
+    transport = _poll_transport(
+        {
+            "launch.json": [{"pid": 7, "starttime": "1", "boot_id": "b"}],
+            "watchdog.json": [{"runner_alive": False, "elapsed": 95, "remaining": 505}],
+        }
+    )
+
+    orch.poll(transport, deadline=time.time() + 2, interval=0)
+
+    assert orch.env.workload is Workload.UNKNOWN
+    assert orch.env.supervisor is Supervisor.FINISHED
+    assert orch.env.retry_class is RetryClass.RETRY_SAME
+    assert "runner is dead" in orch.env.reason
+    assert "95s" in orch.env.reason
+    assert orch.env.offload is Offload.NOT_REQUIRED
+    assert orch.env.finished_at is not None
+
+
+def test_poll_rereads_the_result_before_declaring_the_runner_dead(tmp_path):
+    """The runner writes result.json, then exits; the watchdog can report
+    it dead between the poll's two reads."""
+    orch = _orch(tmp_path)
+    transport = _poll_transport(
+        {
+            "result.json": [None, {"workload": "succeeded", "exit_code": 0}],
+            "launch.json": [{"pid": 7, "starttime": "1", "boot_id": "b"}],
+            "watchdog.json": [{"runner_alive": False, "elapsed": 95}],
+        }
+    )
+
+    orch.poll(transport, deadline=time.time() + 2, interval=0)
+
+    assert orch.env.workload is Workload.SUCCEEDED
+
+
+def test_poll_classifies_a_runner_that_never_started(tmp_path, monkeypatch):
+    import datetime as dt
+
+    from colab_cli.job import orchestrator as orchestrator_module
+
+    monkeypatch.setattr(orchestrator_module, "LAUNCH_ABSENCE_CONFIRM_SECONDS", 0.0)
+    orch = _orch(tmp_path)
+    orch.env.started_at = (
+        dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=600)
+    ).isoformat()
+    transport = _poll_transport({})
+
+    orch.poll(transport, deadline=time.time() + 2, interval=0)
+
+    assert orch.env.workload is Workload.UNKNOWN
+    assert orch.env.supervisor is Supervisor.FINISHED
+    assert "never started" in orch.env.reason
+    assert "runner.log" in orch.env.reason
+
+
+def test_poll_waits_for_a_runner_that_was_just_launched(tmp_path):
+    import datetime as dt
+
+    orch = _orch(tmp_path)
+    orch.env.started_at = dt.datetime.now(dt.timezone.utc).isoformat()
+    transport = _poll_transport({})
+
+    orch.poll(transport, deadline=time.time() + 0.2, interval=0)
+
+    assert orch.env.supervisor is Supervisor.INTERRUPTED
+
+
+
+def test_poll_finishes_offload_when_the_assignment_is_gone(tmp_path):
+    spec = _spec(
+        artifacts=[ArtifactItem(path="/content/out/model.pt", url="https://x/m.pt")]
+    )
+    orch = _orch(tmp_path, spec=spec)
+    transport = MagicMock()
+    transport.read_json.return_value = (None, FakeStatus.SESSION_LOST)
+
+    orch.poll(transport, deadline=time.time() + 2, interval=0)
+
+    assert orch.env.workload is Workload.UNKNOWN
+    assert orch.env.offload is Offload.SKIPPED
+
+
+
+def test_a_404_unassign_counts_as_absent_only_when_the_listing_agrees():
+    """`jobs prune` deletes already_absent records. A 404 that does not
+    mean the VM is gone must not delete the only handle to it."""
+    from colab_cli.job.orchestrator import release_assignment
+
+    client = MagicMock()
+    client.unassign.side_effect = _colab_error(404)
+
+    client.list_assignments.return_value = [SimpleNamespace(endpoint="m-s-abc")]
+    cleanup, detail = release_assignment(client, "m-s-abc")
+    assert cleanup is Cleanup.FAILED
+    assert "still listed" in detail
+    assert "HTTP 404" in detail
+
+    client.list_assignments.side_effect = RuntimeError("listing unavailable")
+    cleanup, detail = release_assignment(client, "m-s-abc")
+    assert cleanup is Cleanup.FAILED
+    assert "listing unavailable" in detail
+    assert "HTTP 404" in detail
+
+
+def test_poll_never_declares_never_started_once_the_runner_was_seen(tmp_path, monkeypatch):
+    """Near the proxy-token boundary a read of an existing file can return
+    NOT_FOUND. Once the runner's records have been read, later absence is
+    a transport question, not a verdict."""
+    import datetime as dt
+
+    from colab_cli.job import orchestrator as orchestrator_module
+
+    monkeypatch.setattr(orchestrator_module, "LAUNCH_ABSENCE_CONFIRM_SECONDS", 0.0)
+    orch = _orch(tmp_path)
+    orch.env.started_at = (
+        dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=3600)
+    ).isoformat()
+    transport = _poll_transport(
+        {"watchdog.json": [{"runner_alive": True, "elapsed": 3590}, None]}
+    )
+
+    orch.poll(transport, deadline=time.time() + 1, interval=0)
+
+    assert orch.env.workload is not Workload.UNKNOWN
+    assert orch.env.supervisor is Supervisor.INTERRUPTED
+
+
+def test_poll_needs_launch_json_absent_across_a_token_refresh_window(tmp_path):
+    """One poll's NOT_FOUND can be an expired token the transport has not
+    refreshed yet; absence must persist past its 404 refresh interval."""
+    import datetime as dt
+
+    orch = _orch(tmp_path)
+    orch.env.started_at = (
+        dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=600)
+    ).isoformat()
+    transport = _poll_transport({})
+
+    orch.poll(transport, deadline=time.time() + 1, interval=0)
+
+    assert orch.env.supervisor is Supervisor.INTERRUPTED

@@ -35,32 +35,52 @@ def boot_id() -> str:
         return "unknown"
 
 
+def _parse_stat(data: str) -> tuple:
+    """`(state, starttime)` from the text of /proc/<pid>/stat."""
+    # comm (field 2) can contain spaces and parens: split after the LAST ')'
+    fields = data[data.rindex(")") + 2 :].split()
+    return fields[0], fields[19]
+
+
+def _is_gone(state: str) -> bool:
+    """Z: exited, waiting for its parent to reap it. X: dead. A process
+    the launch kernel started is never reaped while the job runs, so a
+    killed runner stays Z, with its original start time, until the VM
+    goes away."""
+    return state[:1] in ("Z", "X", "x")
+
+
+def _linux_state(pid: int):
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            return _parse_stat(f.read())
+    except (OSError, ValueError, IndexError):
+        return None
+
+
 def starttime(pid: int) -> str:
-    """A value that changes when a PID is reused. "" if the pid is gone."""
+    """A value that changes when a PID is reused. "" if the pid is gone,
+    including a zombie that has exited but not been reaped."""
     if pid <= 0:
         return ""
     if _LINUX:
-        try:
-            with open(f"/proc/{pid}/stat") as f:
-                data = f.read()
-        except OSError:
+        parsed = _linux_state(pid)
+        if parsed is None or _is_gone(parsed[0]):
             return ""
-        # comm (field 2) can contain spaces and parens: split after the LAST ')'
-        try:
-            after_comm = data[data.rindex(")") + 2 :]
-            return after_comm.split()[19]
-        except (ValueError, IndexError):
-            return ""
+        return parsed[1]
     try:
         out = subprocess.run(
-            ["ps", "-p", str(pid), "-o", "lstart="],
+            ["ps", "-p", str(pid), "-o", "stat=", "-o", "lstart="],
             capture_output=True,
             text=True,
             timeout=5,
         )
-        return out.stdout.strip()
     except (OSError, subprocess.SubprocessError):
         return ""
+    state, _, started = out.stdout.strip().partition(" ")
+    if not state or _is_gone(state):
+        return ""
+    return started.strip()
 
 
 def alive(pid: int, expect_starttime: str, expect_boot_id: str) -> bool:
@@ -89,10 +109,13 @@ def descendants(pgid: int) -> list:
             if pid == me:
                 continue
             try:
-                if os.getpgid(pid) == pgid:
-                    out.append(pid)
+                if os.getpgid(pid) != pgid:
+                    continue
             except OSError:
                 continue
+            parsed = _linux_state(pid)
+            if parsed is not None and not _is_gone(parsed[0]):
+                out.append(pid)
         return out
     try:
         res = subprocess.run(

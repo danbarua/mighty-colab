@@ -53,7 +53,7 @@ from colab_cli.job.models import (
 )
 from colab_cli.job.store import RUNNER_LOG_FILE, JobStore
 from colab_cli.job.runtime_payload import RUNTIME_PAYLOAD_VERSION
-from colab_cli.job.runtime_payload.redact import describe_error
+from colab_cli.job.runtime_payload.redact import describe_error, redact_queries
 
 _logger = logging.getLogger(__name__)
 
@@ -80,6 +80,14 @@ VM_RECORD_FILES = (
 # A reachable VM serves these in seconds. The budget bounds how long an
 # unreachable one can delay a release.
 VM_RECORD_COPY_BUDGET_SECONDS = 120.0
+# The runner writes launch.json within seconds of starting. A job whose
+# launch.json is still absent this long after the launch RPC returned never
+# started (an argument error, an import error in the runtime payload).
+LAUNCH_RECORD_GRACE_SECONDS = 120.0
+# One NOT_FOUND can be an expired proxy token: JobTransport refreshes the
+# token on a 404 at most once per minute. launch.json must stay absent for
+# longer than that before the runner is declared never started.
+LAUNCH_ABSENCE_CONFIRM_SECONDS = 90.0
 
 # The launch RPC must not inherit the 10s default: `execute_code`'s timeout
 # is a wall-clock budget, and a cold import of the runtime package on a
@@ -168,6 +176,10 @@ class Orchestrator:
         self._job_transport = None
 
         self._secret_channel_prepared = False
+        # poll(): whether the runner's own records have ever been read, and
+        # since when launch.json has been continuously absent.
+        self._runner_seen = False
+        self._launch_absent_since: Optional[float] = None
 
     # -- envelope bookkeeping -------------------------------------------
 
@@ -269,7 +281,17 @@ class Orchestrator:
             # A GPU request satisfied by a CPU box is the silent failure that
             # publishes chance-level science. Refuse it unless asked.
             if granted in ("NONE", "UNRECOGNIZED") and want != "NONE":
-                self.client.unassign(res.endpoint)
+                released, detail = release_assignment(self.client, res.endpoint)
+                if released is Cleanup.FAILED:
+                    # The endpoint stays in the envelope so cleanup retries
+                    # the release; assigning the next preference would
+                    # overwrite it while this VM still bills.
+                    raise PhaseError(
+                        Phase.PROVISION,
+                        f"{want} was granted as {granted} and releasing it "
+                        f"({res.endpoint}) failed: {detail}",
+                        RetryClass.RETRY_SAME,
+                    )
                 self.env.endpoint = None
                 attempts.append((want, f"granted {granted}"))
                 continue
@@ -326,13 +348,18 @@ class Orchestrator:
             self.client.keep_alive_assignment(session.endpoint)
         except ColabRequestError as exc:
             if get_status_code(exc) == 403 and _is_scope_error(exc):
-                try:
-                    self.client.unassign(session.endpoint)
-                except Exception:  # noqa: BLE001
-                    pass
-                self.env.endpoint = None
-                self.env.session = None
-                self.session_state = None
+                released, detail = release_assignment(self.client, session.endpoint)
+                if released is Cleanup.FAILED:
+                    # Keep the endpoint: cleanup retries the release, and
+                    # the envelope keeps the handle to a VM that may bill.
+                    self.env.hints.append(
+                        f"releasing {session.endpoint} after the keep-alive scope "
+                        f"error failed ({detail}); it may still be billing"
+                    )
+                else:
+                    self.env.endpoint = None
+                    self.env.session = None
+                    self.session_state = None
                 raise PhaseError(
                     Phase.PROVISION,
                     "keep-alive pre-flight failed: credentials are missing "
@@ -738,11 +765,9 @@ class Orchestrator:
                 self._persist()
                 return
             if status.name == "SESSION_LOST":
-                self.env.workload = Workload.UNKNOWN
-                self.env.supervisor = Supervisor.FINISHED
-                self.env.reason = "the assignment is gone from the server"
-                self.env.retry_class = RetryClass.RETRY_SAME
-                self._persist()
+                self._finish_without_result(
+                    "the assignment is gone from the server", transport
+                )
                 return
             if status.name == "DEGRADED":
                 consecutive_degraded += 1
@@ -757,6 +782,7 @@ class Orchestrator:
                 self.env.reason = None
                 wd, wd_status = transport.read_json(f"{self.remote_dir}/watchdog.json")
                 if wd_status.name == "OK" and wd:
+                    self._runner_seen = True
                     self.env.hints = [
                         f"t={wd.get('elapsed')}s "
                         f"remaining={wd.get('remaining')}s "
@@ -764,6 +790,49 @@ class Orchestrator:
                         f"disk_free={wd.get('disk_free_bytes')} "
                         f"runner_alive={wd.get('runner_alive')}"
                     ]
+                    if wd.get("runner_alive") is False:
+                        if self._absorb_late_result(transport):
+                            return
+                        self._finish_without_result(
+                            "the runner is dead and wrote no result.json "
+                            f"(watchdog: elapsed={wd.get('elapsed')}s, "
+                            f"remaining={wd.get('remaining')}s); its last output "
+                            "is in runner.log",
+                            transport,
+                        )
+                        return
+                elif wd_status.name == "NOT_FOUND" and not self._runner_seen:
+                    # Only a runner never observed can be "never started";
+                    # once seen, a later NOT_FOUND is a transport question.
+                    since_launch = self._seconds_since_launch()
+                    if (
+                        since_launch is not None
+                        and since_launch > LAUNCH_RECORD_GRACE_SECONDS
+                    ):
+                        _launch, launch_status = transport.read_json(
+                            f"{self.remote_dir}/launch.json"
+                        )
+                        if launch_status.name == "OK":
+                            self._runner_seen = True
+                            self._launch_absent_since = None
+                        elif self._launch_absent_since is None:
+                            if launch_status.name == "NOT_FOUND":
+                                self._launch_absent_since = time.monotonic()
+                        if (
+                            launch_status.name == "NOT_FOUND"
+                            and self._launch_absent_since is not None
+                            and time.monotonic() - self._launch_absent_since
+                            >= LAUNCH_ABSENCE_CONFIRM_SECONDS
+                        ):
+                            if self._absorb_late_result(transport):
+                                return
+                            self._finish_without_result(
+                                "the runner never started: no launch.json "
+                                f"{since_launch:.0f}s after launch; its error "
+                                "output is in runner.log",
+                                transport,
+                            )
+                            return
                 # Every poll, not just at the end: runner.log is on VM disk
                 # the whole run (orchestrator.launch() redirects the
                 # runner's stdout/stderr there) and nothing ever reads it
@@ -781,6 +850,43 @@ class Orchestrator:
         self.env.supervisor = Supervisor.INTERRUPTED
         self.env.reason = "local supervisor deadline reached before a verdict"
         self.env.retry_class = RetryClass.RETRY_SAME
+        self._persist()
+
+    def _absorb_late_result(self, transport) -> bool:
+        """Read result.json once more before declaring the runner gone: it
+        writes the result, then exits, and the watchdog can see it dead
+        in between."""
+        result, status = transport.read_json(f"{self.remote_dir}/result.json")
+        if status.name == "OK" and result:
+            self._absorb_result(result)
+            self.env.supervisor = Supervisor.FINISHED
+            self._persist()
+            return True
+        return False
+
+    def _seconds_since_launch(self) -> Optional[float]:
+        if not self.env.started_at:
+            return None
+        try:
+            started = datetime.datetime.fromisoformat(self.env.started_at)
+        except ValueError:
+            return None
+        return (datetime.datetime.now(datetime.timezone.utc) - started).total_seconds()
+
+    def _finish_without_result(self, reason: str, transport) -> None:
+        """No result.json will arrive. The verdict is unknown; nothing was
+        offloaded by the runner, so offload is terminal too, and cleanup
+        can release the VM."""
+        self.env.workload = Workload.UNKNOWN
+        if not self.env.offload.terminal:
+            self.env.offload = (
+                Offload.SKIPPED if self.spec.artifacts else Offload.NOT_REQUIRED
+            )
+        self.env.supervisor = Supervisor.FINISHED
+        self.env.reason = reason
+        self.env.retry_class = RetryClass.RETRY_SAME
+        self.env.finished_at = _now()
+        self._pull_runner_log(transport)
         self._persist()
 
     @staticmethod
@@ -832,6 +938,9 @@ class Orchestrator:
             for artifact in (result.get("artifacts", []) or [])
         ]
 
+        # A stage failure means the consumer never ran and the runner never
+        # reached offload: nothing was uploaded because nothing was tried.
+        stage_failed = env.phase is Phase.STAGE and env.workload is Workload.FAILED
         result_paths = {artifact.path for artifact in env.artifacts}
         missing_required = any(
             declared.required
@@ -846,6 +955,8 @@ class Orchestrator:
         )
         if not spec.artifacts:
             env.offload = Offload.NOT_REQUIRED
+        elif stage_failed:
+            env.offload = Offload.SKIPPED
         elif missing_required:
             missing_paths = sorted(
                 declared.path
@@ -894,7 +1005,7 @@ class Orchestrator:
         # detail when the runner supplied it; fall back to the generic
         # explanation for older runtime payloads or non-item failures
         # (e.g. a malformed manifest) that never got that far.
-        if env.phase is Phase.STAGE and env.workload is Workload.FAILED:
+        if stage_failed:
             env.retry_class = RetryClass.FIX_HUMAN
             detail = None
             if isinstance(env.exception, dict):
@@ -992,15 +1103,13 @@ class Orchestrator:
             self.env.hints.append(copy_vm_records(transport, self.store, self.job_id))
         self._stop_keep_alive()
         try:
-            self.client.unassign(self.env.endpoint)
-            self.env.cleanup = Cleanup.RELEASED
-        except Exception as e:  # noqa: BLE001 - teardown must not raise
-            self.env.cleanup = Cleanup.FAILED
-            self.env.hints.append(
-                f"teardown failed ({type(e).__name__}); endpoint "
-                f"{self.env.endpoint} may still be billing -- retry with "
-                f"`mighty-colab job destroy {self.job_id}`"
-            )
+            self.env.cleanup, detail = release_assignment(self.client, self.env.endpoint)
+            if detail:
+                self.env.hints.append(
+                    f"teardown failed ({detail}); endpoint "
+                    f"{self.env.endpoint} may still be billing -- retry with "
+                    f"`mighty-colab job destroy {self.job_id}`"
+                )
         finally:
             self._drop_session()
             self._persist()
@@ -1059,6 +1168,58 @@ def _extract_tagged(text: str, tag: str, raw: bool = False):
             except json.JSONDecodeError:
                 return None
     return None
+
+
+def release_assignment(client, endpoint: str) -> Tuple[Cleanup, Optional[str]]:
+    """Unassign `endpoint`.
+
+    Returns `RELEASED`, `ALREADY_ABSENT` when the server answers 404, or
+    `FAILED` with a description of the error: HTTP status, exception type
+    and message, and the start of a JSON response body, query strings
+    redacted. Never raises.
+    """
+    from colab_cli.client import response_body_if_json
+    from colab_cli.utils import get_status_code
+
+    try:
+        client.unassign(endpoint)
+        return Cleanup.RELEASED, None
+    except Exception as error:  # noqa: BLE001 - every caller records the outcome
+        status = get_status_code(error)
+        if status == 404:
+            # A 404 can come from a changed control-plane path as well as
+            # from a VM that is gone, and already_absent records get pruned.
+            # Only the assignment listing confirms the VM is gone.
+            try:
+                listed = any(
+                    _listed_endpoint(assignment) == endpoint
+                    for assignment in client.list_assignments()
+                )
+            except Exception as listing_error:  # noqa: BLE001
+                return Cleanup.FAILED, (
+                    f"HTTP 404 from unassign ({describe_error(error)}), and the "
+                    f"assignment listing that would confirm it failed "
+                    f"({describe_error(listing_error)})"
+                )
+            if not listed:
+                return Cleanup.ALREADY_ABSENT, None
+            return Cleanup.FAILED, (
+                f"HTTP 404 from unassign, but {endpoint} is still listed; "
+                f"{describe_error(error)}"
+            )
+        detail = describe_error(error)
+        if status is not None:
+            detail = f"HTTP {status}; {detail}"
+        body = response_body_if_json(error, limit=300)
+        if body:
+            detail += f"; body: {redact_queries(body)}"
+        return Cleanup.FAILED, detail
+
+
+def _listed_endpoint(assignment) -> Optional[str]:
+    if isinstance(assignment, dict):
+        return assignment.get("endpoint")
+    return getattr(assignment, "endpoint", None)
 
 
 def copy_vm_records(

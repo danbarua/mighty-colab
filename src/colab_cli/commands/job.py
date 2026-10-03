@@ -61,6 +61,7 @@ from colab_cli.job.orchestrator import (
     Orchestrator,
     PhaseError,
     copy_vm_records,
+    release_assignment,
     stop_session_keep_alive,
 )
 from colab_cli.job.runtime_payload import ident
@@ -729,11 +730,17 @@ def apply(
             orch.env.offload is Offload.FAILED
         )
         if not secret_removed:
+            # A cleanup event, not the job's verdict: the workload's own
+            # reason and retry advice stay. The release removes the secret
+            # with the VM.
             keep = False
-            orch.env.reason = "transfer credential deletion could not be confirmed"
-            orch.env.retry_class = RetryClass.DO_NOT_RETRY
+            if orch.env.reason is None:
+                orch.env.reason = "transfer credential deletion could not be confirmed"
+            if orch.env.retry_class is None:
+                orch.env.retry_class = RetryClass.DO_NOT_RETRY
             orch.env.hints.append(
-                "credential cleanup failed; forced VM teardown to remove the secret"
+                "transfer credential deletion could not be confirmed; forced VM "
+                "teardown to remove the secret"
             )
         if orch.env.supervisor is Supervisor.INTERRUPTED and secret_removed:
             # Deliberately not torn down: the run is still going on the VM
@@ -887,24 +894,37 @@ def _raw_verdict(result) -> str:
     return " ".join(f"{name}={result.get(name)!r}" for name in fields if name in result)
 
 
+def _release(env, state, failure: str) -> None:
+    """Unassign the job's VM and record the outcome in `env.cleanup`; on
+    failure, a hint starting with `failure` keeps the error detail."""
+    if not env.endpoint:
+        env.cleanup = Cleanup.ALREADY_ABSENT
+        return
+    env.cleanup, detail = release_assignment(state.client, env.endpoint)
+    if detail:
+        env.hints.append(
+            f"{failure} ({detail}); endpoint {env.endpoint} may still be billing"
+        )
+
+
+def _forget_session(env, state) -> None:
+    """Drop the local session record once the VM is confirmed gone."""
+    if not env.session or env.cleanup is Cleanup.FAILED:
+        return
+    try:
+        state.store.remove(env.session)
+    except Exception as error:  # noqa: BLE001 - the release itself succeeded
+        env.hints.append(
+            f"local session record {env.session} not removed ({describe_error(error)})"
+        )
+
+
 def _force_release_unconfirmed_secret(
     env, state, store, action: str, transport=None
 ) -> None:
     _copy_before_release(env, transport, store)
-    if env.endpoint:
-        try:
-            state.client.unassign(env.endpoint)
-            env.cleanup = Cleanup.RELEASED
-        except Exception as error:  # noqa: BLE001
-            env.cleanup = Cleanup.FAILED
-            env.hints.append(f"forced unassign failed: {type(error).__name__}")
-    else:
-        env.cleanup = Cleanup.ALREADY_ABSENT
-    if env.session and env.cleanup is not Cleanup.FAILED:
-        try:
-            state.store.remove(env.session)
-        except Exception:  # noqa: BLE001
-            pass
+    _release(env, state, "forced unassign failed")
+    _forget_session(env, state)
     if not env.workload.terminal:
         env.workload = Workload.UNKNOWN
         env.reason = "forced teardown because transfer credential deletion could not be confirmed"
@@ -1038,26 +1058,8 @@ def _finalize_hints(env) -> None:
 def _release_orphaned_job(env, session, state, store, transport) -> None:
     _copy_before_release(env, transport, store)
     stop_session_keep_alive(session)
-    if env.endpoint:
-        try:
-            state.client.unassign(env.endpoint)
-            env.cleanup = Cleanup.RELEASED
-        except Exception as error:  # noqa: BLE001
-            if "404" in str(error) or "not found" in str(error).lower():
-                env.cleanup = Cleanup.ALREADY_ABSENT
-            else:
-                env.cleanup = Cleanup.FAILED
-                env.hints.append(
-                    f"recovery teardown failed ({type(error).__name__}); "
-                    f"endpoint {env.endpoint} may still be billing"
-                )
-    else:
-        env.cleanup = Cleanup.ALREADY_ABSENT
-    if env.session and env.cleanup is not Cleanup.FAILED:
-        try:
-            state.store.remove(env.session)
-        except Exception:  # noqa: BLE001
-            pass
+    _release(env, state, "recovery teardown failed")
+    _forget_session(env, state)
     env.supervisor = Supervisor.FINISHED
     if not env.offload.terminal:
         env.offload = Offload.SKIPPED
@@ -1308,15 +1310,9 @@ def destroy(
     )
     if cancel_only and not secret_removed:
         _copy_before_release(env, transport, store)
-        try:
-            stop_session_keep_alive(session)
-            state.client.unassign(env.endpoint)
-            env.cleanup = Cleanup.RELEASED
-            if env.session:
-                state.store.remove(env.session)
-        except Exception as error:  # noqa: BLE001
-            env.cleanup = Cleanup.FAILED
-            env.hints.append(f"forced unassign failed: {type(error).__name__}")
+        stop_session_keep_alive(session)
+        _release(env, state, "forced unassign failed")
+        _forget_session(env, state)
         if not env.workload.terminal:
             env.workload = Workload.UNKNOWN
             env.reason = (
@@ -1428,24 +1424,8 @@ def destroy(
                 env.hints.append(outcome)
     _copy_before_release(env, transport, store)
     stop_session_keep_alive(session)
-    if env.endpoint:
-        try:
-            state.client.unassign(env.endpoint)
-            env.cleanup = Cleanup.RELEASED
-        except Exception as e:  # noqa: BLE001
-            if "404" in str(e) or "not found" in str(e).lower():
-                env.cleanup = Cleanup.ALREADY_ABSENT
-            else:
-                env.cleanup = Cleanup.FAILED
-                env.hints.append(f"unassign failed: {type(e).__name__}")
-    else:
-        env.cleanup = Cleanup.ALREADY_ABSENT
-
-    if env.session and env.cleanup is not Cleanup.FAILED:
-        try:
-            state.store.remove(env.session)
-        except Exception:  # noqa: BLE001
-            pass
+    _release(env, state, "unassign failed")
+    _forget_session(env, state)
     if not env.workload.terminal:
         env.workload = Workload.UNKNOWN
         if not env.offload.terminal:

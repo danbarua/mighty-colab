@@ -1269,3 +1269,71 @@ def test_transfer_error_redacts_queries_of_urls_it_was_not_given():
     )
     assert "SECRET" not in error["reason"]
     assert "https://other.example/x?<redacted>" in error["reason"]
+
+
+
+def test_runner_argument_error_names_the_option_and_value(tmp_path):
+    _package, entry, job_dir = _prepare(tmp_path, "print('never runs')\n")
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "mighty_runtime.runner",
+            "--job-dir",
+            str(job_dir),
+            "--deadline",
+            "soon",
+            str(entry),
+        ],
+        cwd=tmp_path,
+        env=_runtime_env(tmp_path),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert proc.returncode == 2
+    assert "--deadline" in proc.stderr
+    assert "'soon'" in proc.stderr
+
+
+def test_proc_stat_parsing_treats_a_zombie_as_gone():
+    """A killed process its parent has not reaped keeps its /proc entry,
+    with state Z and its original start time, until it is reaped. The
+    runner's parent is the launch kernel, which never reaps it."""
+    from colab_cli.job.runtime_payload import ident
+
+    # Fields after comm: state, then 18 fields, then starttime (field 22).
+    running = "3962 (python3) S 1 3962 3962 0 -1 4194560 " + " ".join(["0"] * 12) + " 98988 0 0"
+    zombie = running.replace(") S ", ") Z ", 1)
+    odd_comm = running.replace("(python3)", "(py) (x)")
+
+    assert ident._parse_stat(running) == ("S", "98988")
+    assert ident._parse_stat(zombie) == ("Z", "98988")
+    assert ident._parse_stat(odd_comm) == ("S", "98988")
+    assert ident._is_gone("Z") and ident._is_gone("X")
+    assert not ident._is_gone("S") and not ident._is_gone("R")
+
+
+@pytest.mark.skipif(
+    not (sys.platform.startswith("linux") and Path("/proc").is_dir()),
+    reason="needs Linux /proc",
+)
+def test_an_unreaped_killed_process_is_not_alive():
+    from colab_cli.job.runtime_payload import ident
+
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(600)"],
+        start_new_session=True,
+    )
+    try:
+        time.sleep(0.3)
+        started, boot = ident.starttime(child.pid), ident.boot_id()
+        assert ident.alive(child.pid, started, boot)
+        os.kill(child.pid, signal.SIGKILL)
+        time.sleep(0.3)
+        # Not reaped yet: the process is a zombie.
+        assert not ident.alive(child.pid, started, boot)
+        assert child.pid not in ident.descendants(child.pid)
+    finally:
+        child.kill()
+        child.wait()
