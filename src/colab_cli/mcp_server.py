@@ -337,8 +337,10 @@ def list_job_resources(store) -> List[types.Resource]:
         ),
     ]
     for job_id in store.list_jobs():
-        env = store.read_envelope(job_id)
-        if env is None:
+        env, problem = store.read_envelope_or_problem(job_id)
+        if problem is not None:
+            status = problem
+        elif env is None:
             status = "planned, not applied"
         elif env.done:
             status = "done"

@@ -886,3 +886,21 @@ def test_subscribing_to_jobs_list_resource_is_a_silent_no_op(tmp_path):
     session.send_resource_updated.assert_not_called()
 
 
+
+
+def test_list_job_resources_survives_an_unreadable_envelope(tmp_path):
+    """One envelope written by a newer CLI (or truncated) must not hide
+    every other job."""
+    from colab_cli.job.models import JobEnvelope, Workload
+    from colab_cli.mcp_server import list_job_resources
+
+    store = _job_store(tmp_path)
+    store.write_envelope(JobEnvelope(job_id="readable", workload=Workload.RUNNING))
+    bad = store.job_dir("from-a-newer-cli")
+    bad.mkdir(parents=True)
+    (bad / "envelope.json").write_text('{"job_id": "from-a-newer-cli", "future_field": 1}')
+
+    resources = {r.name: r for r in list_job_resources(store)}
+
+    assert "readable" in resources
+    assert "unreadable" in resources["from-a-newer-cli"].description

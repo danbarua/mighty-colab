@@ -33,7 +33,7 @@ import shutil
 import stat
 import tempfile
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from colab_cli.job.models import JobEnvelope, JobSpec, Plan
 from colab_cli.job.spec_io import has_url_query, is_redacted_url, redacted_url
@@ -275,6 +275,21 @@ class JobStore:
         if not path.exists():
             return None
         return JobEnvelope.model_validate_json(path.read_text())
+
+    def read_envelope_or_problem(
+        self, job_id: str
+    ) -> Tuple[Optional[JobEnvelope], Optional[str]]:
+        """`(envelope, None)`, `(None, None)` for a job never applied, or
+        `(None, problem)` when the envelope exists but cannot be read: a
+        truncated write, or fields from a newer CLI sharing this store.
+        For listings, where one bad record must not hide the others."""
+        from colab_cli.job.runtime_payload.redact import describe_error
+
+        try:
+            return self.read_envelope(job_id), None
+        except Exception as error:  # noqa: BLE001 - reported to the caller
+            detail = " ".join(describe_error(error).split())
+            return None, f"envelope unreadable ({detail[:500]})"
 
     # -- supervisor liveness ---------------------------------------------
 

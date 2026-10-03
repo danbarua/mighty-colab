@@ -1461,7 +1461,7 @@ def _job_list_rows(store) -> List[Dict[str, Any]]:
     """
     rows = []
     for jid in store.list_jobs():
-        e = store.read_envelope(jid)
+        e, problem = store.read_envelope_or_problem(jid)
         if e is None:
             rows.append(
                 {
@@ -1472,7 +1472,7 @@ def _job_list_rows(store) -> List[Dict[str, Any]]:
                     "cleanup": None,
                     "done": False,
                     "endpoint": None,
-                    "reason": "planned, not applied",
+                    "reason": problem or "planned, not applied",
                 }
             )
             continue
@@ -1560,7 +1560,10 @@ def prune(
     removed: list[tuple[str, str]] = []
     skipped: list[tuple[str, str]] = []
     for jid in ids:
-        e = store.read_envelope(jid)
+        e, problem = store.read_envelope_or_problem(jid)
+        if problem is not None:
+            skipped.append((jid, f"{problem} -- state unknown, will not prune"))
+            continue
         if e is None:
             removed.append((jid, "planned, not applied"))
             continue

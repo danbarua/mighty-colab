@@ -2940,3 +2940,37 @@ def test_forced_release_is_not_failed_by_a_local_session_removal_error(
     env = store.read_envelope("destroy-me")
     assert env.cleanup is Cleanup.RELEASED
     assert any("disk full" in h for h in env.hints)
+
+
+def test_jobs_list_and_prune_survive_an_unreadable_envelope(mock_common_state):
+    from colab_cli.commands.job import _store
+    from colab_cli.job.models import Cleanup, JobEnvelope, Offload, Supervisor
+
+    store = _store()
+    store.write_envelope(
+        JobEnvelope(
+            job_id="readable",
+            workload=Workload.SUCCEEDED,
+            offload=Offload.NOT_REQUIRED,
+            cleanup=Cleanup.RELEASED,
+            supervisor=Supervisor.FINISHED,
+        )
+    )
+    bad = store.job_dir("from-a-newer-cli")
+    bad.mkdir(parents=True)
+    (bad / "envelope.json").write_text('{"job_id": "from-a-newer-cli", "future_field": 1}')
+    _json_mode(mock_common_state)
+
+    listed = runner.invoke(app, ["jobs", "list"])
+    assert listed.exit_code == 0, listed.output
+    rows = {r["job_id"]: r for r in json.loads(listed.output)["jobs"]}
+    assert rows["readable"]["workload"] == "succeeded"
+    assert "unreadable" in rows["from-a-newer-cli"]["reason"]
+    assert "future_field" in rows["from-a-newer-cli"]["reason"]
+
+    pruned = runner.invoke(app, ["jobs", "prune", "--dry-run"])
+    assert pruned.exit_code == 0, pruned.output
+    payload = json.loads(pruned.output)
+    assert {r["job_id"] for r in payload["removed"]} == {"readable"}
+    skipped = {r["job_id"]: r["reason"] for r in payload["skipped"]}
+    assert "unreadable" in skipped["from-a-newer-cli"]
