@@ -106,7 +106,7 @@ ENDPOINT=$(APPLY_JSON="$APPLY_JSON" uv run python -c \
     "import json, os; print(json.load(open(os.environ['APPLY_JSON']))['job']['endpoint'])")
 JOB_ID=""
 
-if mc sessions | grep -q "$ENDPOINT"; then
+if grep -q -- "$ENDPOINT" <<<"$(mc sessions)"; then
     mc sessions
     echo "the released endpoint $ENDPOINT is still listed" >&2
     exit 1

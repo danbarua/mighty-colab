@@ -146,7 +146,7 @@ assert payload.get("done") is True, payload
 PY
 JOB_ID=""
 
-if ! mc sessions | grep -q "No active sessions"; then
+if ! grep -q -- "No active sessions" <<<"$(mc sessions)"; then
     mc sessions
     echo "crash recovery left an active session" >&2
     exit 1

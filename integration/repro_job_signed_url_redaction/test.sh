@@ -157,7 +157,7 @@ assert payload["job"]["cleanup"] in {"released", "already_absent"}, payload
 PY
 JOB_ID=""
 
-if ! mc sessions | grep -q "No active sessions"; then
+if ! grep -q -- "No active sessions" <<<"$(mc sessions)"; then
     mc sessions
     echo "job integration left an active session" >&2
     exit 1

@@ -146,7 +146,7 @@ echo "second release of $ENDPOINT: $SECOND"
 [ "$SECOND" = "already_absent" ] || { echo "a second release should be already_absent, got: $SECOND" >&2; exit 1; }
 JOB_ID=""
 
-if mc sessions | grep -q "$ENDPOINT"; then
+if grep -q -- "$ENDPOINT" <<<"$(mc sessions)"; then
     mc sessions
     echo "the released endpoint $ENDPOINT is still listed" >&2
     exit 1

@@ -142,7 +142,7 @@ PY
 JOB_ID=""
 KEEP_PID=""
 
-if ! mc sessions | grep -q "No active sessions"; then
+if ! grep -q -- "No active sessions" <<<"$(mc sessions)"; then
     mc sessions
     echo "job keep-alive integration left an active session" >&2
     exit 1

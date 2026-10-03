@@ -77,7 +77,7 @@ check() {
     ENDPOINT=$(uv run python -c \
         "import json; print(json.load(open('$TMP_DIR/$1.json'))['job']['endpoint'])")
     JOB_ID=""
-    if mc sessions | grep -q "$ENDPOINT"; then
+    if grep -q -- "$ENDPOINT" <<<"$(mc sessions)"; then
         mc sessions
         echo "case $1 left $ENDPOINT listed" >&2
         exit 1
