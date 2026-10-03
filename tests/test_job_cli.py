@@ -2697,6 +2697,9 @@ def _supervisor_finishes_on_sleep(store, job_id, n, sleeps, **fields):
     writing its envelope with `fields` and clearing its identity."""
 
     def sleep(seconds):
+        if seconds < 1:
+            # subprocess's own wait loop: ident.alive runs `ps` on macOS.
+            return
         sleeps.append(seconds)
         if len(sleeps) == n:
             env = store.read_envelope(job_id)
