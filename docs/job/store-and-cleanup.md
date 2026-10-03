@@ -1,5 +1,6 @@
 ---
 log:
+2026-10-03: Added the records copied from the VM before every release.
 2026-09-15: First version, then `jobs list`/`jobs prune` implemented the same day (`mighty-colab jobs`, a sibling command group to `job`). This doc's manual-cleanup section is now the safety rationale `jobs prune` itself implements, not a workaround for a missing command.
 ---
 
@@ -37,6 +38,8 @@ Each job gets one directory, one record per file inside it:
 | `supervisor.json` | `job apply`, while running | Live supervisor identity (pid/starttime/boot_id), used to tell a dead supervisor from a live one across processes. Cleared (`clear_supervisor_identity`) once apply finishes. |
 | `apply.lock` | `job apply`, while running | `flock`-held exclusive lock — a second `apply` on the same job ID fails fast (`ApplyInProgress`) while this is held by a live process, and is taken over if the holder is dead. Removed when the lock releases. |
 | `events.jsonl` | `job apply` | Append-only phase-transition log for that one job (distinct from `HistoryLogger`'s per-*session* CLI-invocation log). |
+| `runner.log` | `job apply` / `job status`, every poll; every release | The VM's runner log: the consumer's stdout/stderr and `[runner]` lines. |
+| `install.log`, `result.json`, `exception.json`, `watchdog.json`, `launch.json`, `cancel.json`, `offload.manifest.json`, `stage.manifest.json` | whichever of `job apply` / `job destroy` / `job status --poll` releases the VM, immediately before release | Copies of the VM's job records, for any the VM had. The envelope's `hints` name what was copied. Nothing in the local store reads them; they are for the person or agent diagnosing the run. |
 
 Separately, a plan file passed with `job plan --out <path>` (e.g.
 `/tmp/plans/job.json`, anywhere the caller points it — not inside the
