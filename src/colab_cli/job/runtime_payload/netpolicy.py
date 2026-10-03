@@ -32,11 +32,21 @@ class HTTPStatusError(Exception):
     def __init__(self, status, reason, body, send_error=None):
         message = f"HTTP {status} {reason}".rstrip()
         if send_error is not None:
-            message += f" (upload cut short: {type(send_error).__name__})"
+            message += f" (upload cut short: {type(send_error).__name__}: {send_error})"
         super().__init__(message)
         self.status = status
         self.reason = reason
         self.body = body
+        self.send_error = send_error
+
+
+class UploadCutShort(Exception):
+    """The request body could not be fully sent, and the server's response
+    does not explain why. The message names the send error and what
+    happened when the response was read."""
+
+    def __init__(self, send_error, after):
+        super().__init__(f"{type(send_error).__name__}: {send_error}; {after}")
         self.send_error = send_error
 
 
@@ -216,14 +226,21 @@ def put_public(url, body, length, headers, timeout, body_limit=300):
             send_error = error
         try:
             response = connection.getresponse()
-        except (OSError, http.client.HTTPException):
-            if send_error is not None:
-                raise send_error from None
-            raise
+        except (OSError, http.client.HTTPException) as response_error:
+            if send_error is None:
+                raise
+            raise UploadCutShort(
+                send_error,
+                "then reading the response failed: "
+                f"{type(response_error).__name__}: {response_error}",
+            ) from response_error
         excerpt = response.read(body_limit)
         if 200 <= response.status < 300:
             if send_error is not None:
-                raise send_error
+                raise UploadCutShort(
+                    send_error,
+                    f"the server answered HTTP {response.status} {response.reason}",
+                )
             return response.status
         raise HTTPStatusError(response.status, response.reason, excerpt, send_error)
     finally:

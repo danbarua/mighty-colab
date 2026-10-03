@@ -22,6 +22,7 @@ from urllib.parse import urlsplit
 from . import RESULT_SCHEMA_VERSION, RUNTIME_PAYLOAD_VERSION, SCHEMA_VERSION
 from . import ident
 from .netpolicy import HTTPStatusError, put_public, urlopen_public
+from .redact import redact_queries
 
 GRACE_SECONDS = 5
 HTTP_TIMEOUT_SECONDS = 30
@@ -321,20 +322,21 @@ def _transfer_error(error, url):
     """Persistable account of a failed transfer: exception type, its
     message, and for an HTTP response the status and first body bytes.
 
-    The URL is replaced by its identity and its query string removed from
-    every text field: a signed URL's query is the credential, and an error
-    body or message can echo the request target.
+    The URL is replaced by its identity and every query string is removed
+    from every text field: a signed URL's query is the credential, and an
+    error body or message can echo the request target or a redirect.
     """
 
     def redact(text):
-        if not url:
-            return text
-        text = text.replace(url, _url_id(url))
-        try:
-            query = urlsplit(url).query
-        except ValueError:
-            query = ""
-        return text.replace(query, "<redacted>") if query else text
+        if url:
+            text = text.replace(url, _url_id(url))
+            try:
+                query = urlsplit(url).query
+            except ValueError:
+                query = ""
+            if query:
+                text = text.replace(query, "<redacted>")
+        return redact_queries(text)
 
     http_status = None
     body = None

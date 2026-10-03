@@ -434,6 +434,14 @@ class TransferError(BaseModel):
     # First 300 bytes of the response body, query strings removed.
     body: Optional[str] = None
 
+    @property
+    def summary(self) -> str:
+        """One line: the HTTP status line when there was a response,
+        otherwise the exception type and message."""
+        if self.http_status is not None:
+            return self.reason
+        return f"{self.exception}: {self.reason}"
+
 
 class ArtifactResult(BaseModel):
     model_config = ConfigDict(extra="forbid")

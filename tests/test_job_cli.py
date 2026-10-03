@@ -2591,11 +2591,13 @@ def test_destroy_stops_waiting_after_the_bound_and_still_copies_records(
     assert sum(sleeps) >= 12
     assert sum(sleeps) < 12 + max(sleeps)
     assert events[-2:] == ["copy runner.log", "unassign"]
-    assert store.read_envelope("destroy-me").workload is Workload.UNKNOWN
+    env = store.read_envelope("destroy-me")
+    assert env.workload is Workload.UNKNOWN
+    assert any("no result.json within 12s" in h for h in env.hints)
 
 
 def test_destroy_stops_waiting_when_the_runner_is_dead(monkeypatch, mock_common_state):
-    _persist_running_job(mock_common_state)
+    store = _persist_running_job(mock_common_state)
     events = []
     vm = _RunningVM(events, results=[None], runner_alive=False)
     _use_vm(monkeypatch, mock_common_state, vm, events)
@@ -2607,6 +2609,8 @@ def test_destroy_stops_waiting_when_the_runner_is_dead(monkeypatch, mock_common_
     assert result.exit_code == 0, result.output
     assert len(sleeps) == 1
     assert events[-1] == "unassign"
+    env = store.read_envelope("destroy-me")
+    assert any("runner is dead" in h for h in env.hints)
 
 
 def test_destroy_wait_zero_releases_without_polling(monkeypatch, mock_common_state):
@@ -2770,3 +2774,97 @@ def test_destroy_releases_a_vm_the_apply_supervisor_left_up(
     assert env.workload is Workload.SUCCEEDED
     assert env.offload is Offload.FAILED
     assert env.cleanup is Cleanup.RELEASED
+    assert any("job apply` ended with cleanup=left_up" in h for h in env.hints)
+
+
+
+def test_destroy_releases_when_the_apply_supervisor_does_not_finish(
+    monkeypatch, mock_common_state
+):
+    store = _persist_running_job(mock_common_state)
+    _live_supervisor(store, "destroy-me")
+    events = []
+    vm = _RunningVM(events, results=[None], files={"runner.log": "x\n"})
+    _use_vm(monkeypatch, mock_common_state, vm, events)
+
+    result = runner.invoke(app, ["job", "destroy", "destroy-me", "--wait", "10"])
+
+    assert result.exit_code == 0, result.output
+    assert events[-1] == "unassign"
+    env = store.read_envelope("destroy-me")
+    assert any("did not release the VM within 10s" in h for h in env.hints)
+
+
+def test_destroy_still_releases_when_the_runner_result_cannot_be_absorbed(
+    monkeypatch, mock_common_state
+):
+    """A result destroy cannot parse must not stop the release: the VM
+    would keep billing. The raw verdict and the parse error are kept."""
+    store = _persist_running_job(mock_common_state)
+    events = []
+    unreadable = {"schema_version": "99", "workload": "cancelled", "exit_code": None}
+    vm = _RunningVM(events, results=[None, unreadable], files={"runner.log": "x\n"})
+    _use_vm(monkeypatch, mock_common_state, vm, events)
+
+    result = runner.invoke(app, ["job", "destroy", "destroy-me"])
+
+    assert result.exit_code == 0, result.output
+    assert events[-2:] == ["copy runner.log", "unassign"]
+    env = store.read_envelope("destroy-me")
+    hint = next(h for h in env.hints if "could not be absorbed" in h)
+    assert "99" in hint
+    assert "workload='cancelled'" in hint
+
+
+def test_destroy_without_a_session_says_records_were_not_copied(mock_common_state):
+    store = _persist_running_job(mock_common_state)
+    mock_common_state.store.get.return_value = None
+
+    result = runner.invoke(app, ["job", "destroy", "destroy-me"])
+
+    assert result.exit_code == 0, result.output
+    env = store.read_envelope("destroy-me")
+    assert any(
+        "VM records not copied" in h and "no local session" in h for h in env.hints
+    )
+
+
+def test_status_output_shows_why_an_artifact_failed(mock_common_state):
+    from colab_cli.commands.job import _store
+    from colab_cli.job.models import (
+        ArtifactResult,
+        Cleanup,
+        JobEnvelope,
+        Supervisor,
+        TransferError,
+    )
+
+    _store().write_envelope(
+        JobEnvelope(
+            job_id="shown",
+            workload=Workload.SUCCEEDED,
+            offload=Offload.FAILED,
+            cleanup=Cleanup.RELEASED,
+            supervisor=Supervisor.FINISHED,
+            artifacts=[
+                ArtifactResult(
+                    path="/content/out/adapter.tar",
+                    url_id="https://x/a.tar#1",
+                    status="failed",
+                    bytes=173199360,
+                    error=TransferError(
+                        exception="HTTPStatusError",
+                        reason="HTTP 413 Payload Too Large",
+                        http_status=413,
+                        body="<html>413 Request Entity Too Large</html>",
+                    ),
+                )
+            ],
+        )
+    )
+
+    result = runner.invoke(app, ["job", "status", "shown"])
+
+    assert result.exit_code == 0, result.output
+    assert "/content/out/adapter.tar -> failed: HTTP 413 Payload Too Large" in result.output
+    assert "413 Request Entity Too Large" in result.output

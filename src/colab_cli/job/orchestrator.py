@@ -53,6 +53,7 @@ from colab_cli.job.models import (
 )
 from colab_cli.job.store import RUNNER_LOG_FILE, JobStore
 from colab_cli.job.runtime_payload import RUNTIME_PAYLOAD_VERSION
+from colab_cli.job.runtime_payload.redact import describe_error
 
 _logger = logging.getLogger(__name__)
 
@@ -868,13 +869,18 @@ class Orchestrator:
         elif result.get("offload") == "failed" or any(
             artifact.status == "failed" for artifact in env.artifacts
         ):
-            failed_paths = sorted(
-                artifact.path for artifact in env.artifacts if artifact.status == "failed"
+            failed = sorted(
+                (a for a in env.artifacts if a.status == "failed"),
+                key=lambda a: a.path,
             )
             env.offload = Offload.FAILED
             env.reason = (
-                f"artifact offload failed: {', '.join(failed_paths)}"
-                if failed_paths
+                "artifact offload failed: "
+                + "; ".join(
+                    f"{a.path} ({a.error.summary})" if a.error else a.path
+                    for a in failed
+                )
+                if failed
                 else "artifact offload failed"
             )
             env.retry_class = RetryClass.RETRY_SAME
@@ -980,7 +986,7 @@ class Orchestrator:
             transport = self.job_transport()
         except Exception as e:  # noqa: BLE001 - teardown must not raise
             self.env.hints.append(
-                f"VM records not copied before release ({type(e).__name__})"
+                f"VM records not copied before release ({describe_error(e)})"
             )
         else:
             self.env.hints.append(copy_vm_records(transport, self.store, self.job_id))
@@ -1096,7 +1102,7 @@ def copy_vm_records(
             (local_dir / name).write_text(text)
             copied.append(name)
         except Exception as e:  # noqa: BLE001 - must never block a release
-            stopped = type(e).__name__
+            stopped = describe_error(e)
             break
     hint = (
         f"VM records copied before release to {local_dir}: "

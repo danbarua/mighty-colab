@@ -241,12 +241,12 @@ A failed artifact says why. Its record in the envelope's `artifacts[]` carries `
 
 ```json
 {"exception": "HTTPStatusError",
- "reason": "HTTP 413 Payload Too Large (upload cut short: BrokenPipeError)",
+ "reason": "HTTP 413 Payload Too Large (upload cut short: BrokenPipeError: [Errno 32] Broken pipe)",
  "http_status": 413,
  "body": "<html><head><title>413 Request Entity Too Large</title>..."}
 ```
 
-`body` is the first 300 bytes of the response. When the server closes the connection before its response can be read, `exception` is the send error (`BrokenPipeError`, `ConnectionResetError`) and `http_status` is `null`. `runner.log` gets one `[runner] artifact upload failed` line per failure. A destination behind Cloudflare rejects any request body over 100 MB with 413.
+`body` is the first 300 bytes of the response. When the server closes the connection before its response can be read, `exception` is `UploadCutShort`, `http_status` is `null`, and `reason` names the send error and the error from reading the response. The envelope's `reason` names each failed artifact with its cause, and `job status` prints each artifact's error and response body. `runner.log` gets one `[runner] artifact upload failed` line per failure. A destination behind Cloudflare rejects any request body over 100 MB with 413.
 
 `sha256` must be exactly 64 hexadecimal characters. It is worth the trouble: it is the only thing that distinguishes your dataset from a truncated copy, and a silently truncated input produces a result that looks plausible and is wrong.
 

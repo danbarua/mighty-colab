@@ -1502,3 +1502,79 @@ def test_install_writes_pip_output_to_a_file_on_the_vm(tmp_path, monkeypatch):
     assert install_log.read_text() == "Collecting torch==2.4.1\n"
     assert "Collecting torch==2.4.1" in printed.getvalue()
     assert "PIP_RC=0" in printed.getvalue()
+
+
+
+def test_copy_vm_records_keeps_the_redacted_error_message(tmp_path):
+    from colab_cli.job.orchestrator import copy_vm_records
+
+    transport = MagicMock()
+    transport.read_text.side_effect = requests.ConnectionError(
+        "HTTPSConnectionPool(host='colab.example', port=443): Max retries exceeded "
+        "with url: /api/contents/content/jobs/unit-job/runner.log"
+        "?colab-runtime-proxy-token=SECRET"
+    )
+
+    hint = copy_vm_records(transport, JobStore(tmp_path / "jobs"), "unit-job")
+
+    assert "ConnectionError" in hint
+    assert "Max retries exceeded" in hint
+    assert "SECRET" not in hint
+
+
+def test_cleanup_keeps_why_the_transport_could_not_be_built(tmp_path):
+    def no_transport(_session):
+        raise RuntimeError("no proxy for https://colab.example/x?token=SECRET")
+
+    orch = _orch(tmp_path, transport_factory=no_transport)
+    orch.env.endpoint = "m-s-abc"
+
+    orch.cleanup()
+
+    hint = next(h for h in orch.env.hints if "not copied" in h)
+    assert "RuntimeError: no proxy for https://colab.example/x?<redacted>" in hint
+    assert "SECRET" not in hint
+
+
+def test_offload_reason_names_each_failed_artifacts_cause(tmp_path):
+    spec = _spec(
+        artifacts=[
+            ArtifactItem(path="/content/out/adapter.tar", url="https://x/a.tar"),
+            ArtifactItem(path="/content/out/meta.json", url="https://x/m.json"),
+        ]
+    )
+    orch = _orch(tmp_path, spec=spec)
+    orch._absorb_result(
+        {
+            "workload": "succeeded",
+            "exit_code": 0,
+            "artifacts": [
+                {
+                    "path": "/content/out/adapter.tar",
+                    "url_id": "https://x/a.tar#1",
+                    "status": "failed",
+                    "error": {
+                        "exception": "HTTPStatusError",
+                        "reason": "HTTP 413 Payload Too Large",
+                        "http_status": 413,
+                        "body": "too large",
+                    },
+                },
+                {
+                    "path": "/content/out/meta.json",
+                    "url_id": "https://x/m.json#2",
+                    "status": "failed",
+                    "error": {
+                        "exception": "ConnectionResetError",
+                        "reason": "[Errno 104] Connection reset by peer",
+                    },
+                },
+            ],
+        }
+    )
+
+    assert "/content/out/adapter.tar (HTTP 413 Payload Too Large)" in orch.env.reason
+    assert (
+        "/content/out/meta.json (ConnectionResetError: [Errno 104] Connection reset by peer)"
+        in orch.env.reason
+    )

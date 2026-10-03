@@ -1022,6 +1022,8 @@ def test_artifact_record_keeps_a_413_sent_before_the_body_was_read(
     assert error["exception"] == "HTTPStatusError"
     assert error["http_status"] == 413
     assert "413" in error["reason"]
+    assert "upload cut short" in error["reason"]
+    assert "Errno" in error["reason"]
     assert error["body"] == body.decode()
 
 
@@ -1202,3 +1204,68 @@ def test_artifact_put_sends_the_headers_urllib_sent(tmp_path, monkeypatch):
     assert "Accept-Encoding: identity" in lines
     assert "Content-Type: application/octet-stream" in lines
     assert "Content-Length: 3" in lines
+
+
+
+def test_artifact_record_keeps_why_the_response_could_not_be_read(
+    tmp_path, monkeypatch
+):
+    """The send fails and no response arrives: both failures belong in the
+    record, not only the broken pipe."""
+    import socket
+
+    from colab_cli.job.runtime_payload import runner
+
+    _loopback_put(monkeypatch)
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    sock.listen(5)
+
+    def close_after_headers():
+        conn, _ = sock.accept()
+        head = b""
+        while b"\r\n\r\n" not in head:
+            head += conn.recv(4096)
+        conn.close()
+
+    threading.Thread(target=close_after_headers, daemon=True).start()
+    (tmp_path / "out.bin").write_bytes(os.urandom(4 * 1024 * 1024))
+    url = f"http://127.0.0.1:{sock.getsockname()[1]}/out.bin"
+    try:
+        record = runner._artifact_record(
+            str(tmp_path), {"path": "out.bin", "url": url}, {}
+        )
+    finally:
+        sock.close()
+
+    error = record["error"]
+    assert error["http_status"] is None
+    assert error["exception"] == "UploadCutShort"
+    assert error["reason"].split(":")[0] in {"BrokenPipeError", "ConnectionResetError"}
+    assert "then reading the response failed" in error["reason"]
+
+
+def test_redact_queries_removes_every_query_string():
+    from colab_cli.job.runtime_payload.redact import redact_queries
+
+    text = (
+        "HTTPSConnectionPool(host='x', port=443): Max retries exceeded with url: "
+        "/api/contents/content/jobs/j/runner.log?colab-runtime-proxy-token=SECRET1 "
+        "and https://storage.example/o?X-Goog-Signature=SECRET2&x=1, no query: https://a/b"
+    )
+    redacted = redact_queries(text)
+    assert "SECRET1" not in redacted
+    assert "SECRET2" not in redacted
+    assert "/api/contents/content/jobs/j/runner.log?<redacted>" in redacted
+    assert "https://storage.example/o?<redacted>" in redacted
+    assert "no query: https://a/b" in redacted
+
+
+def test_transfer_error_redacts_queries_of_urls_it_was_not_given():
+    from colab_cli.job.runtime_payload import runner
+
+    error = runner._transfer_error(
+        ValueError("redirected to https://other.example/x?sig=SECRET"), None
+    )
+    assert "SECRET" not in error["reason"]
+    assert "https://other.example/x?<redacted>" in error["reason"]
