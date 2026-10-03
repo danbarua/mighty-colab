@@ -30,6 +30,7 @@ import json
 import logging
 import math
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -60,8 +61,12 @@ from colab_cli.job.models import (
 from colab_cli.job.orchestrator import (
     Orchestrator,
     PhaseError,
+    RUNNER_RESULT_POLL_SECONDS,
+    RUNNER_STOP_WAIT_SECONDS,
     _now,
+    await_runner_result,
     copy_vm_records,
+    observe_remote,
     raw_verdict,
     release_assignment,
     stop_session_keep_alive,
@@ -86,6 +91,23 @@ jobs_app = typer.Typer(
     help="Manage local job records as a collection: list, prune.",
     no_args_is_help=True,
 )
+
+class SupervisorStopped(BaseException):
+    """apply was asked to stop by SIGTERM or SIGHUP: how an agent harness
+    ends a tool call that ran too long, and what a closed terminal sends.
+    Python's default for both exits at once with no cleanup; apply handles
+    them like Ctrl-C."""
+
+    def __init__(self, signal_name: str):
+        super().__init__(signal_name)
+        self.signal_name = signal_name
+
+
+def _stop_supervisor(signum, _frame):
+    # A second signal must not abort the cleanup the first one started.
+    signal.signal(signum, signal.SIG_IGN)
+    raise SupervisorStopped(signal.Signals(signum).name)
+
 
 def _store() -> JobStore:
     """Job records live beside the session store, and follow `--config`.
@@ -413,8 +435,14 @@ def apply(
     ] = None,
     timeout: Annotated[
         Optional[int],
-        typer.Option("--timeout", help="Local supervisor budget (s); the VM's "
-                                       "wall_clock still owns the kill"),
+        typer.Option(
+            "--timeout",
+            help=(
+                "Local supervisor budget (s), default wall_clock + 600. When it "
+                "passes with no verdict, the job is cancelled, its result "
+                "collected if it arrives, and the VM released."
+            ),
+        ),
     ] = None,
     leave_up: Annotated[
         bool, typer.Option("--leave-up", help="Do not unassign the VM when finished")
@@ -658,6 +686,17 @@ def apply(
     budget = timeout or (p.spec.budgets.wall_clock + 600)
     deadline = time.time() + budget
     secret_handoff = False
+    previous_handlers = {}
+    for stop_signal in (signal.SIGTERM, signal.SIGHUP):
+        try:
+            previous_handlers[stop_signal] = signal.signal(stop_signal, _stop_supervisor)
+        except ValueError as error:  # only the main thread can install handlers
+            _logger.warning(
+                "job apply %s: %s not handled (%s); it would exit without cleanup",
+                p.job_id,
+                stop_signal.name,
+                error,
+            )
     try:
         orch.provision()
         orch.install()
@@ -671,6 +710,9 @@ def apply(
         secret_handoff = launched_pid is not None
         transport = orch.job_transport()
         orch.poll(transport, deadline=deadline)
+        if orch.env.supervisor is Supervisor.INTERRUPTED:
+            # poll's deadline passed with no verdict.
+            orch.cancel_after_deadline(transport, budget)
     except PhaseError as e:
         orch.env.record_failure(e.phase)
         orch.env.finished_at = orch.env.finished_at or _now()
@@ -683,13 +725,44 @@ def apply(
         orch.env.retry_class = e.retry_class
         orch.env.hints.extend(e.hints)
         orch.env.phase = e.phase
-    except KeyboardInterrupt:
-        orch.env.supervisor = Supervisor.INTERRUPTED
-        orch.env.reason = "interrupted locally; the VM job is unaffected"
-        orch.env.retry_class = RetryClass.RETRY_SAME
-        orch.env.hints.append(
-            f"reattach with `mighty-colab job status {p.job_id}`"
+    except (KeyboardInterrupt, SupervisorStopped) as stop:
+        how = (
+            "Ctrl-C (SIGINT)"
+            if isinstance(stop, KeyboardInterrupt)
+            else stop.signal_name
         )
+        if orch.env.workload is Workload.PENDING:
+            # Nothing runs on the VM before launch: release it.
+            orch.env.workload = Workload.CANCELLED
+            orch.env.offload = (
+                Offload.NOT_REQUIRED if not p.spec.artifacts else Offload.SKIPPED
+            )
+            orch.env.supervisor = Supervisor.FINISHED
+            orch.env.finished_at = _now()
+            orch.env.reason = (
+                f"interrupted locally by {how} during {orch.env.phase.value}, "
+                "before the runner was launched; the VM is released"
+            )
+            orch.env.retry_class = RetryClass.RETRY_SAME
+        else:
+            # The detached runner keeps going. Cleanup stays pending, so
+            # `job status --poll` collects the result and releases the VM.
+            orch.env.supervisor = Supervisor.INTERRUPTED
+            orch.env.reason = (
+                f"interrupted locally by {how} after the runner was launched; the "
+                "job keeps running on the VM, which bills until the job is released"
+            )
+            orch.env.retry_class = None
+            # "still billing" lets _finalize_hints drop these once the VM
+            # has been released.
+            orch.env.hints.extend(
+                [
+                    f"the VM is still billing: `mighty-colab job status {p.job_id} "
+                    "--poll` collects the result and releases the VM when the job ends",
+                    f"the VM is still billing: `mighty-colab job destroy {p.job_id}` "
+                    "stops the job and releases the VM now",
+                ]
+            )
     except Exception as e:  # noqa: BLE001 - every non-debug path needs a verdict
         if state.debug:
             raise
@@ -754,18 +827,17 @@ def apply(
                 "teardown to remove the secret"
             )
         if orch.env.supervisor is Supervisor.INTERRUPTED and secret_removed:
-            # Deliberately not torn down: the run is still going on the VM
-            # and the caller can reattach. Recorded as left_up so the
-            # envelope still says it is billing.
-            orch.env.cleanup = Cleanup.LEFT_UP
-            orch.env.hints.append(
-                f"VM still running and billing: mighty-colab job destroy {p.job_id}"
-            )
+            # Interrupted after launch: the run is still going on the VM.
+            # Cleanup stays pending (not left_up), so `job status --poll`
+            # treats the job as orphaned, absorbs its result and releases.
+            orch.detach()
             store.write_envelope(orch.env)
         else:
             orch.cleanup(force_leave_up=keep)
         store.clear_supervisor_identity(p.job_id)
         claim.release()
+        for stop_signal, handler in previous_handlers.items():
+            signal.signal(stop_signal, handler)
 
     _emit(orch.env, "apply", exit_code=0 if orch.env.ok else 1)
     if not orch.env.ok:
@@ -836,11 +908,6 @@ def _read_off_vm_result(store: JobStore, job_id: str):
         return None
 
 
-# `job destroy` on a running job waits this long, by default, for the
-# runner to act on the cancel intent: stop the workload, upload artifacts
-# and write result.json.
-DESTROY_WAIT_SECONDS = 300
-RUNNER_RESULT_POLL_SECONDS = 5
 
 
 def _supervisor_alive(store, job_id: str) -> bool:
@@ -888,31 +955,6 @@ def _copy_before_release(env, transport, store) -> None:
     env.hints.append(copy_vm_records(transport, store, env.job_id))
 
 
-def _await_runner_result(transport, job_id: str, wait: int):
-    """Poll for the runner's result.json for up to `wait` seconds.
-
-    Returns `("result", result)`, or `(None, why)` with a sentence saying
-    why no result arrived: the wait ran out, the runner is dead or never
-    started, the assignment is gone, or reading the VM failed.
-    """
-    polls = math.ceil(wait / RUNNER_RESULT_POLL_SECONDS) if wait > 0 else 0
-    for _ in range(polls):
-        time.sleep(RUNNER_RESULT_POLL_SECONDS)
-        try:
-            kind, payload = _observe_remote(transport, job_id)
-        except Exception as error:  # noqa: BLE001 - waiting must not block teardown
-            return None, f"reading the runner's records failed ({describe_error(error)})"
-        if kind == "result":
-            return "result", payload
-        if kind == "runner_dead":
-            return None, "the runner is dead and wrote no result.json"
-        if kind == "never_started":
-            return None, "the runner never started (no launch.json)"
-        if kind == "session_lost":
-            return None, "the assignment disappeared while waiting for the runner"
-    return None, f"the runner wrote no result.json within {wait}s of the cancel request"
-
-
 def _release(env, state, failure: str) -> None:
     """Unassign the job's VM and record the outcome in `env.cleanup`; on
     failure, a hint starting with `failure` keeps the error detail."""
@@ -957,46 +999,6 @@ def _force_release_unconfirmed_secret(
     store.write_envelope(env)
     _emit(env, action, exit_code=1)
     raise typer.Exit(1)
-
-
-def _observe_remote(transport, job_id: str):
-    result, status = transport.read_json(f"/content/jobs/{job_id}/result.json")
-    if status.name == "SESSION_LOST":
-        return "session_lost", None
-    if status.name == "OK" and result:
-        return "result", result
-    if status.name == "DEGRADED":
-        return "degraded", None
-    launch, launch_status = transport.read_json(
-        f"/content/jobs/{job_id}/launch.json"
-    )
-    if launch_status.name == "SESSION_LOST":
-        return "session_lost", None
-    if launch_status.name == "DEGRADED":
-        return "degraded", None
-    if launch_status.name != "OK" or not launch:
-        return "never_started", None
-    pid = launch.get("pid")
-    starttime = launch.get("starttime")
-    boot_id = launch.get("boot_id")
-    if (
-        not isinstance(pid, int)
-        or not isinstance(starttime, str)
-        or not isinstance(boot_id, str)
-    ):
-        return "degraded", None
-    watchdog, watchdog_status = transport.read_json(
-        f"/content/jobs/{job_id}/watchdog.json"
-    )
-    if watchdog_status.name == "SESSION_LOST":
-        return "session_lost", None
-    if (
-        watchdog_status.name == "OK"
-        and watchdog is not None
-        and watchdog.get("runner_alive") is False
-    ):
-        return "runner_dead", launch
-    return "runner_alive", launch
 
 
 def _absorb_remote_result(env, store, job_id, result) -> None:
@@ -1204,7 +1206,7 @@ def status(
                             )
                     except Exception:  # noqa: BLE001 - best-effort, never fatal
                         pass
-                    kind, payload = _observe_remote(transport, job_id)
+                    kind, payload = observe_remote(transport, job_id)
                     if kind == "result":
                         _absorb_remote_result(env, store, job_id, payload)
                         if orphaned:
@@ -1284,7 +1286,7 @@ def destroy(
                 "VM is released. 0 releases at once."
             ),
         ),
-    ] = DESTROY_WAIT_SECONDS,
+    ] = RUNNER_STOP_WAIT_SECONDS,
 ):
     """Unconditional teardown. Safe to run twice; exits 0 if already gone.
 
@@ -1436,7 +1438,7 @@ def destroy(
                 "and write its result before release.",
                 err=True,
             )
-            kind, outcome = _await_runner_result(transport, job_id, wait)
+            kind, outcome = await_runner_result(transport, job_id, wait)
             if kind == "result":
                 try:
                     _absorb_remote_result(env, store, job_id, outcome)

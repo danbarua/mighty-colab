@@ -32,6 +32,7 @@ which is the exact wound this command exists to close.
 import datetime
 import json
 import logging
+import math
 import re
 import time
 import uuid
@@ -94,6 +95,11 @@ LAUNCH_RECORD_GRACE_SECONDS = 120.0
 # token on a 404 at most once per minute. launch.json must stay absent for
 # longer than that before the runner is declared never started.
 LAUNCH_ABSENCE_CONFIRM_SECONDS = 90.0
+# A cancelled runner gets this long, by default, to stop the workload,
+# upload artifacts and write result.json, before `job destroy` or apply's
+# --timeout releases the VM anyway.
+RUNNER_STOP_WAIT_SECONDS = 300
+RUNNER_RESULT_POLL_SECONDS = 5
 
 # The launch RPC must not inherit the 10s default: `execute_code`'s timeout
 # is a wall-clock budget, and a cold import of the runtime package on a
@@ -529,6 +535,12 @@ class Orchestrator:
                 hints,
             )
         return outputs
+
+    def detach(self) -> None:
+        """Stop supervising without touching the VM: close the local kernel
+        client, whose websocket threads would otherwise keep this process
+        from exiting. The runner, the VM and the keep-alive daemon go on."""
+        self._close_runtime()
 
     def _close_runtime(self) -> None:
         runtime, self._runtime = self._runtime, None
@@ -1031,6 +1043,42 @@ class Orchestrator:
             return True
         return False
 
+    def cancel_after_deadline(
+        self, transport, budget: float, wait: float = RUNNER_STOP_WAIT_SECONDS
+    ) -> None:
+        """apply's --timeout passed with no verdict: cancel the runner, wait
+        up to `wait` seconds for its result, and end the job so cleanup
+        releases the VM. Reaching the deadline is a failure of the run to
+        produce a verdict in time, whatever the runner reports after."""
+        timed_out = f"apply's --timeout of {budget:.0f}s passed before a verdict"
+        try:
+            intent = transport.write_json(
+                f"{self.remote_dir}/cancel.json",
+                {"intent": "cancelled", "by": "job apply --timeout", "at": _now()},
+            )
+            intent_note = (
+                "cancel requested"
+                if getattr(intent, "name", "") == "OK"
+                else f"cancel intent not confirmed ({getattr(intent, 'name', intent)})"
+            )
+        except Exception as error:  # noqa: BLE001 - release must still happen
+            intent_note = f"cancel intent not written ({describe_error(error)})"
+        kind, outcome = await_runner_result(transport, self.job_id, wait)
+        if kind == "result":
+            self._absorb_or_keep(outcome, transport)
+            self.env.record_failure(Phase.RUN)
+            self.env.reason = f"{timed_out}; {intent_note}" + (
+                f"; {self.env.reason}" if self.env.reason else ""
+            )
+            if self.env.retry_class is None:
+                self.env.retry_class = RetryClass.RETRY_SAME
+        else:
+            self._finish_without_result(f"{timed_out}; {intent_note}; {outcome}", transport)
+        self.env.hints.append(
+            "if the work needs longer, raise apply's --timeout or budgets.wall_clock"
+        )
+        self._persist()
+
     def _absorb_or_keep(self, result: dict, transport) -> None:
         """Absorb the runner's result. One this CLI cannot parse (a newer
         schema, an invalid field) still ends the poll, with the parse
@@ -1111,6 +1159,11 @@ class Orchestrator:
 
         Orchestrator.absorb_provenance(env, result)
 
+        # The runner's verdict supersedes reasons written while it was
+        # unknown (an interruption, a degraded transport); the branches
+        # below set them again from the result.
+        env.reason = None
+        env.retry_class = None
         env.workload = Workload(result.get("workload", "unknown"))
         env.exit_code = result.get("exit_code")
         env.signal = result.get("signal")
@@ -1414,6 +1467,71 @@ def release_assignment(client, endpoint: str) -> Tuple[Cleanup, Optional[str]]:
         if body:
             detail += f"; body: {redact_credentials(body)}"
         return Cleanup.FAILED, detail
+
+
+def observe_remote(transport, job_id: str):
+    result, status = transport.read_json(f"/content/jobs/{job_id}/result.json")
+    if status.name == "SESSION_LOST":
+        return "session_lost", None
+    if status.name == "OK" and result:
+        return "result", result
+    if status.name == "DEGRADED":
+        return "degraded", None
+    launch, launch_status = transport.read_json(
+        f"/content/jobs/{job_id}/launch.json"
+    )
+    if launch_status.name == "SESSION_LOST":
+        return "session_lost", None
+    if launch_status.name == "DEGRADED":
+        return "degraded", None
+    if launch_status.name != "OK" or not launch:
+        return "never_started", None
+    pid = launch.get("pid")
+    starttime = launch.get("starttime")
+    boot_id = launch.get("boot_id")
+    if (
+        not isinstance(pid, int)
+        or not isinstance(starttime, str)
+        or not isinstance(boot_id, str)
+    ):
+        return "degraded", None
+    watchdog, watchdog_status = transport.read_json(
+        f"/content/jobs/{job_id}/watchdog.json"
+    )
+    if watchdog_status.name == "SESSION_LOST":
+        return "session_lost", None
+    if (
+        watchdog_status.name == "OK"
+        and watchdog is not None
+        and watchdog.get("runner_alive") is False
+    ):
+        return "runner_dead", launch
+    return "runner_alive", launch
+
+
+def await_runner_result(transport, job_id: str, wait: int):
+    """Poll for the runner's result.json for up to `wait` seconds.
+
+    Returns `("result", result)`, or `(None, why)` with a sentence saying
+    why no result arrived: the wait ran out, the runner is dead or never
+    started, the assignment is gone, or reading the VM failed.
+    """
+    polls = math.ceil(wait / RUNNER_RESULT_POLL_SECONDS) if wait > 0 else 0
+    for _ in range(polls):
+        time.sleep(RUNNER_RESULT_POLL_SECONDS)
+        try:
+            kind, payload = observe_remote(transport, job_id)
+        except Exception as error:  # noqa: BLE001 - waiting must not block teardown
+            return None, f"reading the runner's records failed ({describe_error(error)})"
+        if kind == "result":
+            return "result", payload
+        if kind == "runner_dead":
+            return None, "the runner is dead and wrote no result.json"
+        if kind == "never_started":
+            return None, "the runner never started (no launch.json)"
+        if kind == "session_lost":
+            return None, "the assignment disappeared while waiting for the runner"
+    return None, f"the runner wrote no result.json within {wait}s of the cancel request"
 
 
 def raw_verdict(result: dict) -> str:

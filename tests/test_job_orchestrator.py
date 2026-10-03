@@ -2129,3 +2129,81 @@ def test_a_failed_release_after_a_failed_run_keeps_run(tmp_path):
     orch.cleanup()
 
     assert orch.env.failed_phase is Phase.RUN
+
+
+# --------------------------------------------------------------------------
+# apply --timeout: cancel the runner and release, never leave the VM billing
+# --------------------------------------------------------------------------
+
+
+def _cancel_transport(results):
+    """result.json answers from `results` in order (last repeats); the
+    runner identity and watchdog say it is alive. Records cancel writes."""
+    transport = _poll_transport(
+        {
+            "result.json": list(results),
+            "launch.json": [{"pid": 7, "starttime": "1", "boot_id": "b"}],
+            "watchdog.json": [{"runner_alive": True, "elapsed": 1000}],
+        }
+    )
+    transport.written = []
+    transport.write_json.side_effect = lambda path, value: transport.written.append((path, value)) or FakeStatus.OK
+    return transport
+
+
+def test_a_passed_deadline_cancels_the_runner_and_keeps_its_result(tmp_path, monkeypatch):
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+    orch = _orch(tmp_path)
+    orch.env.supervisor = Supervisor.INTERRUPTED
+    transport = _cancel_transport([None, {"workload": "cancelled", "signal": 15, "cancel_intent": "cancelled"}])
+
+    orch.cancel_after_deadline(transport, budget=900)
+
+    path, intent = transport.written[0]
+    assert path.endswith("/cancel.json") and intent["by"] == "job apply --timeout"
+    assert orch.env.workload is Workload.CANCELLED
+    assert orch.env.supervisor is Supervisor.FINISHED
+    assert orch.env.failed_phase is Phase.RUN
+    assert "--timeout of 900s" in orch.env.reason
+    assert orch.env.retry_class is RetryClass.RETRY_SAME
+
+
+def test_a_passed_deadline_without_a_result_still_ends_the_job(tmp_path, monkeypatch):
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+    orch = _orch(tmp_path)
+    orch.env.supervisor = Supervisor.INTERRUPTED
+    transport = _cancel_transport([None])
+
+    orch.cancel_after_deadline(transport, budget=900, wait=10)
+
+    assert orch.env.workload is Workload.UNKNOWN
+    assert orch.env.supervisor is Supervisor.FINISHED
+    assert orch.env.offload.terminal
+    assert "--timeout of 900s" in orch.env.reason
+    assert "no result.json within 10s" in orch.env.reason
+
+
+def test_an_absorbed_result_replaces_earlier_local_reasons(tmp_path):
+    """A reason written while the verdict was unknown (an interruption, a
+    degraded transport) is stale once the runner's result arrives."""
+    orch = _orch(tmp_path)
+    orch.env.reason = "interrupted locally after the runner was launched"
+    orch.env.retry_class = RetryClass.RETRY_SAME
+
+    orch._absorb_result({"workload": "succeeded", "exit_code": 0})
+
+    assert orch.env.reason is None
+    assert orch.env.retry_class is None
+
+
+def test_detach_closes_the_local_kernel_client(tmp_path):
+    """Its websocket threads are not daemons: left open, they keep the
+    interrupted apply process from exiting."""
+    rt = MagicMock()
+    orch = _orch(tmp_path, runtime=rt)
+    orch.session_state = SimpleNamespace(url="https://u", token="t")
+    orch._runtime_handle()
+
+    orch.detach()
+
+    rt.stop.assert_called_once()
