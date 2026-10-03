@@ -1899,3 +1899,170 @@ def test_poll_needs_launch_json_absent_across_a_token_refresh_window(tmp_path):
     orch.poll(transport, deadline=time.time() + 1, interval=0)
 
     assert orch.env.supervisor is Supervisor.INTERRUPTED
+
+
+# --------------------------------------------------------------------------
+# Kernel calls fail per phase, with the cause and the right retry class
+# --------------------------------------------------------------------------
+
+
+def test_outputs_text_keeps_the_error_name_and_value_and_strips_ansi():
+    from colab_cli.job.orchestrator import _outputs_text
+
+    text = _outputs_text(
+        [
+            {"output_type": "stream", "text": "\x1b[1mcollecting\x1b[0m\n"},
+            {
+                "output_type": "error",
+                "ename": "ModuleNotFoundError",
+                "evalue": "No module named 'torch'",
+                "traceback": ["\x1b[0;31mTraceback (most recent call last)\x1b[0m"],
+            },
+            {"output_type": "error", "ename": "RuntimeError", "evalue": "boom", "traceback": []},
+        ]
+    )
+
+    assert "\x1b" not in text
+    assert "collecting" in text
+    assert "ModuleNotFoundError: No module named 'torch'" in text
+    assert "Traceback (most recent call last)" in text
+    assert "RuntimeError: boom" in text
+
+
+def _install_orch(tmp_path, side_effect):
+    rt = MagicMock()
+    rt.execute_code.side_effect = side_effect
+    orch = _orch(tmp_path, spec=_spec(deps=["torch==2.4.1"]), runtime=rt)
+    orch.session_state = SimpleNamespace(url="https://u", token="t")
+    return orch
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        RuntimeError("Connection was lost."),
+        RuntimeError("You must first start a kernel before requesting a client."),
+        TimeoutError("Timeout waiting for reply"),
+        ConnectionResetError(104, "Connection reset by peer"),
+    ],
+)
+def test_a_lost_kernel_connection_during_install_is_retry_same(tmp_path, error):
+    """Run 3: the websocket dropped 41 s into install and the job was
+    reported as an internal supervisor failure with do_not_retry."""
+    orch = _install_orch(tmp_path, error)
+
+    with pytest.raises(PhaseError) as exc:
+        orch.install()
+
+    assert exc.value.phase is Phase.INSTALL
+    assert exc.value.retry_class is RetryClass.RETRY_SAME
+    assert type(error).__name__ in exc.value.reason
+    assert str(error) in exc.value.reason
+    assert any("install.log" in h for h in exc.value.hints)
+
+
+def test_an_unexpected_kernel_call_error_keeps_its_type_and_message(tmp_path):
+    orch = _orch(tmp_path, runtime=MagicMock(**{"execute_code.side_effect": KeyError("ename")}))
+    orch.session_state = SimpleNamespace(url="https://u", token="t")
+    orch.env.actual_accelerator = "NONE"
+
+    with pytest.raises(PhaseError) as exc:
+        orch.verify()
+
+    assert exc.value.phase is Phase.VERIFY
+    assert exc.value.retry_class is RetryClass.DO_NOT_RETRY
+    assert "KeyError: 'ename'" in exc.value.reason
+
+
+def test_a_lost_launch_reply_leaves_the_job_to_poll(tmp_path):
+    """The runner is detached: once the launch code ran, the kernel
+    connection no longer matters. A lost reply must not release a VM whose
+    runner may be running; poll decides from the runner's own files."""
+    rt = MagicMock()
+    rt.execute_code.side_effect = RuntimeError("Connection was lost.")
+    orch = _orch(tmp_path, runtime=rt)
+    orch.session_state = SimpleNamespace(url="https://u", token="t")
+
+    pid = orch.launch("/content/jobs/unit-job/src")
+
+    assert pid is None
+    assert orch.env.workload is Workload.RUNNING
+    assert orch.env.started_at is not None
+    assert any("launch" in h and "Connection was lost" in h for h in orch.env.hints)
+
+
+def test_restart_failure_names_its_error_instead_of_claiming_a_timeout(tmp_path):
+    rt = MagicMock()
+    response = MagicMock()
+    response.status_code = 403
+    error = requests.HTTPError("403 Client Error: Forbidden", response=response)
+    rt.restart.side_effect = error
+    orch = _orch(tmp_path, spec=_spec(deps=["torch==2.4.1"]), runtime=rt)
+    orch.session_state = SimpleNamespace(url="https://u", token="t")
+
+    with pytest.raises(PhaseError) as exc:
+        orch.restart()
+
+    assert "did not complete within" not in exc.value.reason
+    assert "HTTPError: 403 Client Error: Forbidden" in exc.value.reason
+
+
+def test_poll_keeps_a_result_it_cannot_absorb(tmp_path):
+    orch = _orch(tmp_path)
+    transport = _poll_transport(
+        {"result.json": [{"schema_version": "99", "workload": "succeeded", "exit_code": 0}]}
+    )
+
+    orch.poll(transport, deadline=time.time() + 2, interval=0)
+
+    assert orch.env.workload is Workload.UNKNOWN
+    assert orch.env.supervisor is Supervisor.FINISHED
+    assert "could not be absorbed" in orch.env.reason
+    assert "unsupported result schema" in orch.env.reason
+    assert "workload='succeeded'" in orch.env.reason
+
+
+def test_a_keep_alive_preflight_network_error_is_recorded_and_tolerated(
+    tmp_path, keep_alive_spawn
+):
+    client = MagicMock()
+    client.assign.return_value = _cpu_assignment("m-s-job")
+    client.keep_alive_assignment.side_effect = requests.ConnectionError(
+        "HTTPSConnectionPool(host='colab.research.google.com'): Max retries exceeded"
+    )
+    orch = _orch(
+        tmp_path,
+        spec=_spec(accelerator=Accelerator(prefer=[], accept_cpu=True)),
+        client=client,
+    )
+
+    orch.provision()
+
+    keep_alive_spawn.assert_called_once()
+    assert any(
+        "keep-alive pre-flight failed" in h and "ConnectionError" in h
+        for h in orch.env.hints
+    )
+
+
+def test_a_keep_alive_daemon_that_cannot_start_fails_provisioning(
+    tmp_path, keep_alive_spawn
+):
+    """Without the daemon Colab reclaims the idle VM mid-run, with no record
+    of why. Failing at provision says so while the cause is known."""
+    client = MagicMock()
+    client.assign.return_value = _cpu_assignment("m-s-job")
+    keep_alive_spawn.side_effect = OSError(24, "Too many open files")
+    orch = _orch(
+        tmp_path,
+        spec=_spec(accelerator=Accelerator(prefer=[], accept_cpu=True)),
+        client=client,
+    )
+
+    with pytest.raises(PhaseError) as exc:
+        orch.provision()
+
+    assert exc.value.phase is Phase.PROVISION
+    assert exc.value.retry_class is RetryClass.FIX_HUMAN
+    assert "Too many open files" in exc.value.reason
+    assert orch.env.endpoint == "m-s-job"

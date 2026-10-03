@@ -32,6 +32,7 @@ which is the exact wound this command exists to close.
 import datetime
 import json
 import logging
+import re
 import time
 import uuid
 from typing import Callable, List, Optional, Tuple
@@ -104,6 +105,41 @@ def _now() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
+# Messages the vendored kernel client raises when the kernel connection,
+# not the code it ran, failed.
+_KERNEL_TRANSPORT_MESSAGES = (
+    "Connection was lost",
+    "channel must be running",
+    "must first start a kernel",
+    "didn't respond to heartbeats",
+    "Kernel died before replying",
+)
+
+
+def _kernel_transport_failure(error: BaseException) -> bool:
+    """Whether a kernel execute call failed in transport (connection lost,
+    reply timeout, websocket closed) rather than in the code it ran."""
+    if isinstance(error, OSError):  # includes TimeoutError, ConnectionError
+        return True
+    try:
+        import requests
+
+        if isinstance(error, requests.RequestException):
+            return True
+    except ImportError:
+        pass
+    try:
+        import websocket
+
+        if isinstance(error, websocket.WebSocketException):
+            return True
+    except ImportError:
+        pass
+    return isinstance(error, RuntimeError) and any(
+        message in str(error) for message in _KERNEL_TRANSPORT_MESSAGES
+    )
+
+
 class PhaseError(Exception):
     """A phase failed in a way that stops the apply.
 
@@ -124,6 +160,25 @@ class PhaseError(Exception):
         self.reason = reason
         self.retry_class = retry_class
         self.hints = hints or []
+
+
+class KernelCallError(PhaseError):
+    """A kernel execute call raised instead of returning a reply.
+
+    `transport` is true when the connection failed (lost websocket, reply
+    timeout): retry_same. Anything else keeps its type and message and is
+    do_not_retry.
+    """
+
+    def __init__(self, phase: Phase, error: BaseException, hints=None):
+        self.transport = _kernel_transport_failure(error)
+        what = "kernel connection failed" if self.transport else "kernel call failed"
+        super().__init__(
+            phase,
+            f"{what} during {phase.value}: {describe_error(error)}",
+            RetryClass.RETRY_SAME if self.transport else RetryClass.DO_NOT_RETRY,
+            hints,
+        )
 
 
 class Orchestrator:
@@ -337,7 +392,6 @@ class Orchestrator:
         from colab_cli.client import ColabRequestError
         from colab_cli.commands.session import (
             _is_scope_error,
-            _record_keep_alive_failure,
             _record_keep_alive_success,
             spawn_keep_alive,
         )
@@ -370,18 +424,43 @@ class Orchestrator:
                         "userinfo.email scopes"
                     ],
                 ) from exc
-            _record_keep_alive_failure(session)
+            self._tolerate_keep_alive_preflight(session, exc)
+        except Exception as exc:  # noqa: BLE001 - a network error, tolerated the same way
+            self._tolerate_keep_alive_preflight(session, exc)
         else:
             _record_keep_alive_success(session)
 
         self.session_store.add(session)
-        session.keep_alive_pid = spawn_keep_alive(
-            session.endpoint,
-            session.name,
-            auth_provider=self.auth_provider,
-            config_path=self.config_path,
-        )
+        try:
+            session.keep_alive_pid = spawn_keep_alive(
+                session.endpoint,
+                session.name,
+                auth_provider=self.auth_provider,
+                config_path=self.config_path,
+            )
+        except Exception as exc:  # noqa: BLE001 - reported as the provision failure
+            # The endpoint stays in the envelope, so cleanup releases the VM.
+            raise PhaseError(
+                Phase.PROVISION,
+                f"the keep-alive daemon could not be started ({describe_error(exc)}); "
+                "without it Colab reclaims the idle VM while the job runs",
+                RetryClass.FIX_HUMAN,
+            ) from exc
         self.session_store.add(session)
+
+    def _tolerate_keep_alive_preflight(self, session, error: BaseException) -> None:
+        """A failed pre-flight ping that is not a missing scope: the daemon
+        retries on its own schedule, so provisioning continues."""
+        from colab_cli.commands.session import _record_keep_alive_failure
+        from colab_cli.utils import get_status_code
+
+        _record_keep_alive_failure(session)
+        status = get_status_code(error)
+        self.env.hints.append(
+            "keep-alive pre-flight failed "
+            f"({'HTTP ' + str(status) + '; ' if status else ''}{describe_error(error)}); "
+            "the daemon was started anyway"
+        )
 
     def _stop_keep_alive(self) -> None:
         stop_session_keep_alive(self.session_state)
@@ -408,10 +487,14 @@ class Orchestrator:
         if changed:
             self.session_store.add(self.session_state)
 
-    def _execute_code(self, code: str, *, timeout: float):
+    def _execute_code(
+        self, code: str, *, timeout: float, phase: Phase, hints=None
+    ):
         runtime = self._runtime_handle()
         try:
             return runtime.execute_code(code, timeout=timeout)
+        except Exception as error:  # noqa: BLE001 - classified per phase
+            raise KernelCallError(phase, error, hints) from error
         finally:
             self._sync_runtime_identity()
 
@@ -448,7 +531,15 @@ class Orchestrator:
             "    print(log.read()[-40000:])\n"
             "print('PIP_RC=%d' % r.returncode)\n"
         )
-        outputs = self._execute_code(code, timeout=INSTALL_TIMEOUT)
+        outputs = self._execute_code(
+            code,
+            timeout=INSTALL_TIMEOUT,
+            phase=Phase.INSTALL,
+            hints=[
+                "installer output written before the failure is in install.log on "
+                "the VM; it is copied to the local job directory before release"
+            ],
+        )
         text = _outputs_text(outputs)
         if "PIP_RC=0" not in text:
             raise PhaseError(
@@ -477,9 +568,19 @@ class Orchestrator:
         try:
             runtime.restart(timeout=RESTART_TIMEOUT)
         except Exception as error:
+            timed_out = isinstance(error, TimeoutError) or type(error).__name__ in (
+                "Timeout",
+                "ReadTimeout",
+                "ConnectTimeout",
+            )
+            what = (
+                f"kernel restart did not complete within {RESTART_TIMEOUT:.0f}s"
+                if timed_out
+                else "kernel restart failed"
+            )
             raise PhaseError(
                 Phase.RESTART,
-                f"kernel restart did not complete within {RESTART_TIMEOUT:.0f}s ({error})",
+                f"{what}: {describe_error(error)}",
                 RetryClass.RETRY_SAME,
             ) from error
         finally:
@@ -517,7 +618,7 @@ class Orchestrator:
             "free = shutil.disk_usage('/content').free\n"
             "print('VERIFY=' + json.dumps({'deps': got, 'device': dev, 'free': free}))\n"
         )
-        outputs = self._execute_code(code, timeout=VERIFY_TIMEOUT)
+        outputs = self._execute_code(code, timeout=VERIFY_TIMEOUT, phase=Phase.VERIFY)
         payload = _extract_tagged(_outputs_text(outputs), "VERIFY=")
         if payload is None:
             raise PhaseError(
@@ -587,7 +688,7 @@ class Orchestrator:
             "os.chmod(p, 0o700)\n"
             "print('SECRET_CHANNEL_READY=1')\n"
         )
-        outputs = self._execute_code(code, timeout=LAUNCH_TIMEOUT)
+        outputs = self._execute_code(code, timeout=LAUNCH_TIMEOUT, phase=Phase.STAGE)
         if "SECRET_CHANNEL_READY=1" not in _outputs_text(outputs):
             raise PhaseError(
                 Phase.STAGE,
@@ -620,7 +721,7 @@ class Orchestrator:
             "        os.close(fd)\n"
             "print('SECRET_CHANNEL_SEALED=1')\n"
         )
-        outputs = self._execute_code(code, timeout=LAUNCH_TIMEOUT)
+        outputs = self._execute_code(code, timeout=LAUNCH_TIMEOUT, phase=Phase.STAGE)
         if "SECRET_CHANNEL_SEALED=1" not in _outputs_text(outputs):
             raise PhaseError(
                 Phase.STAGE,
@@ -649,7 +750,7 @@ class Orchestrator:
             "print('SECRET_CHANNEL_ABSENT=%d' % (not os.path.lexists(p)))\n"
         )
         try:
-            outputs = self._execute_code(code, timeout=LAUNCH_TIMEOUT)
+            outputs = self._execute_code(code, timeout=LAUNCH_TIMEOUT, phase=Phase.CLEANUP)
             kernel_absent = "SECRET_CHANNEL_ABSENT=1" in _outputs_text(outputs)
         except Exception:  # noqa: BLE001 - use the independent Contents path
             pass
@@ -669,7 +770,7 @@ class Orchestrator:
             self._secret_channel_prepared = False
         return removed
 
-    def launch(self, payload_remote_path: str) -> int:
+    def launch(self, payload_remote_path: str) -> Optional[int]:
         """Start the runner after unlinking its owner-only credential file."""
         del payload_remote_path
         self._set_phase(Phase.RUN)
@@ -733,7 +834,23 @@ class Orchestrator:
             "del _launch_job\n"
             "print('LAUNCHED_PID=%d' % pid)\n"
         )
-        outputs = self._execute_code(code, timeout=LAUNCH_TIMEOUT)
+        try:
+            outputs = self._execute_code(code, timeout=LAUNCH_TIMEOUT, phase=Phase.RUN)
+        except KernelCallError as error:
+            if not error.transport:
+                raise
+            # The runner is detached; the kernel connection only carried the
+            # launch request. Whether the runner started is decided from its
+            # own files by poll(): no launch.json within the grace and
+            # confirmation windows means it never started.
+            self.env.workload = Workload.RUNNING
+            self.env.started_at = _now()
+            self.env.hints.append(
+                f"the launch call's reply was lost ({error.reason}); the runner "
+                "is observed through its files instead"
+            )
+            self._persist()
+            return None
         text = _outputs_text(outputs)
         pid = _extract_tagged(text, "LAUNCHED_PID=", raw=True)
         if pid is None:
@@ -760,9 +877,7 @@ class Orchestrator:
         while time.time() < deadline:
             result, status = transport.read_json(f"{self.remote_dir}/result.json")
             if status.name == "OK" and result:
-                self._absorb_result(result)
-                self.env.supervisor = Supervisor.FINISHED
-                self._persist()
+                self._absorb_or_keep(result, transport)
                 return
             if status.name == "SESSION_LOST":
                 self._finish_without_result(
@@ -858,11 +973,25 @@ class Orchestrator:
         in between."""
         result, status = transport.read_json(f"{self.remote_dir}/result.json")
         if status.name == "OK" and result:
-            self._absorb_result(result)
-            self.env.supervisor = Supervisor.FINISHED
-            self._persist()
+            self._absorb_or_keep(result, transport)
             return True
         return False
+
+    def _absorb_or_keep(self, result: dict, transport) -> None:
+        """Absorb the runner's result. One this CLI cannot parse (a newer
+        schema, an invalid field) still ends the poll, with the parse
+        error and the raw verdict fields in the reason."""
+        try:
+            self._absorb_result(result)
+        except Exception as error:  # noqa: BLE001 - kept in the reason
+            self._finish_without_result(
+                f"runner result could not be absorbed ({describe_error(error)}); "
+                f"raw result: {raw_verdict(result)}",
+                transport,
+            )
+            return
+        self.env.supervisor = Supervisor.FINISHED
+        self._persist()
 
     def _seconds_since_launch(self) -> Optional[float]:
         if not self.env.started_at:
@@ -1143,7 +1272,13 @@ def _dep_name(dep: str) -> str:
     return dep.strip()
 
 
+_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+
+
 def _outputs_text(outputs) -> str:
+    """Kernel outputs as plain text: streams, results, and errors with
+    their name and value even when the traceback is empty. ANSI colour
+    codes are removed, so they do not use up `_tail`'s budget."""
     parts = []
     for o in outputs or []:
         if isinstance(o, dict):
@@ -1153,7 +1288,8 @@ def _outputs_text(outputs) -> str:
                 parts.append(str(o["data"].get("text/plain", "")))
             elif o.get("output_type") == "error":
                 parts.append("\n".join(o.get("traceback", [])))
-    return "\n".join(parts)
+                parts.append(f"{o.get('ename', 'Error')}: {o.get('evalue', '')}")
+    return _ANSI_ESCAPE.sub("", "\n".join(parts))
 
 
 def _extract_tagged(text: str, tag: str, raw: bool = False):
@@ -1214,6 +1350,13 @@ def release_assignment(client, endpoint: str) -> Tuple[Cleanup, Optional[str]]:
         if body:
             detail += f"; body: {redact_credentials(body)}"
         return Cleanup.FAILED, detail
+
+
+def raw_verdict(result: dict) -> str:
+    """The verdict fields of a result.json, for a reason when the result
+    itself cannot be absorbed."""
+    fields = ("schema_version", "workload", "exit_code", "signal", "offload", "phase")
+    return " ".join(f"{name}={result.get(name)!r}" for name in fields if name in result)
 
 
 def _listed_endpoint(assignment) -> Optional[str]:
