@@ -1,0 +1,383 @@
+{
+ "captured_at": "2026-10-03T16:52:05Z",
+ "python": "3.13.15 (main, Aug  6 2026, 11:06:22) [GCC 13.3.0]",
+ "uv_path": "/usr/local/bin/uv",
+ "uv_version": "uv 0.12.15 (x86_64-unknown-linux-gnu)",
+ "pip_version": "pip 24.1.2 from /usr/local/lib/python3.13/dist-packages/pip (python 3.13)",
+ "pip_config": "global.disable-pip-version-check='True'\nglobal.log='/var/log/pip.log'\nglobal.root-user-action='ignore'\nlist.format='columns'\n",
+ "installer_env": {
+  "UV_BUILD_CONSTRAINT": "",
+  "UV_SYSTEM_PYTHON": "true",
+  "UV_INSTALL_DIR": "/usr/local/bin",
+  "UV_BREAK_SYSTEM_PACKAGES": "false",
+  "UV_CONSTRAINT": ""
+ },
+ "cases": {
+  "missing_package": {
+   "uv": {
+    "command": [
+     "/usr/local/bin/uv",
+     "pip",
+     "install",
+     "--system",
+     "mighty-colab-no-such-package==0.0.1"
+    ],
+    "exit_code": 1,
+    "seconds": 0.5,
+    "output_head": "Using Python 3.13.15 environment at: /usr\nerror: No solution found when resolving dependencies\n  cause: Because mighty-colab-no-such-package was not found in the package registry and you require mighty-colab-no-such-package==0.0.1, we can conclude that your requirements are unsatisfiable.\n",
+    "output_tail": "Using Python 3.13.15 environment at: /usr\nerror: No solution found when resolving dependencies\n  cause: Because mighty-colab-no-such-package was not found in the package registry and you require mighty-colab-no-such-package==0.0.1, we can conclude that your requirements are unsatisfiable.\n",
+    "output_chars": 290
+   },
+   "pip": {
+    "command": [
+     "/usr/bin/python3",
+     "-m",
+     "pip",
+     "install",
+     "-v",
+     "--upgrade-strategy",
+     "only-if-needed",
+     "mighty-colab-no-such-package==0.0.1"
+    ],
+    "exit_code": 1,
+    "seconds": 1.2,
+    "output_head": "Using pip 24.1.2 from /usr/local/lib/python3.13/dist-packages/pip (python 3.13)\nERROR: Could not find a version that satisfies the requirement mighty-colab-no-such-package==0.0.1 (from versions: none)\nERROR: No matching distribution found for mighty-colab-no-such-package==0.0.1\n",
+    "output_tail": "Using pip 24.1.2 from /usr/local/lib/python3.13/dist-packages/pip (python 3.13)\nERROR: Could not find a version that satisfies the requirement mighty-colab-no-such-package==0.0.1 (from versions: none)\nERROR: No matching distribution found for mighty-colab-no-such-package==0.0.1\n",
+    "output_chars": 279
+   }
+  },
+  "missing_version": {
+   "uv": {
+    "command": [
+     "/usr/local/bin/uv",
+     "pip",
+     "install",
+     "--system",
+     "requests==0.0.999"
+    ],
+    "exit_code": 1,
+    "seconds": 0.2,
+    "output_head": "Using Python 3.13.15 environment at: /usr\nerror: No solution found when resolving dependencies\n  cause: Because there is no version of requests==0.0.999 and you require requests==0.0.999, we can conclude that your requirements are unsatisfiable.\n",
+    "output_tail": "Using Python 3.13.15 environment at: /usr\nerror: No solution found when resolving dependencies\n  cause: Because there is no version of requests==0.0.999 and you require requests==0.0.999, we can conclude that your requirements are unsatisfiable.\n",
+    "output_chars": 246
+   },
+   "pip": {
+    "command": [
+     "/usr/bin/python3",
+     "-m",
+     "pip",
+     "install",
+     "-v",
+     "--upgrade-strategy",
+     "only-if-needed",
+     "requests==0.0.999"
+    ],
+    "exit_code": 1,
+    "seconds": 1.2,
+    "output_head": "Using pip 24.1.2 from /usr/local/lib/python3.13/dist-packages/pip (python 3.13)\nERROR: Ignored the following yanked versions: 2.32.0, 2.32.1\nERROR: Could not find a version that satisfies the requirement requests==0.0.999 (from versions: 0.2.0, 0.2.1, 0.2.2, 0.2.3, 0.2.4, 0.3.0, 0.3.1, 0.3.2, 0.3.3, 0.3.4, 0.4.0, 0.4.1, 0.5.0, 0.5.1, 0.6.0, 0.6.1, 0.6.2, 0.6.3, 0.6.4, 0.6.5, 0.6.6, 0.7.0, 0.7.1, 0.7.2, 0.7.3, 0.7.4, 0.7.5, 0.7.6, 0.8.0, 0.8.1, 0.8.2, 0.8.3, 0.8.4, 0.8.5, 0.8.6, 0.8.7, 0.8.8, 0.8.9, 0.9.0, 0.9.1, 0.9.2, 0.9.3, 0.10.0, 0.10.1, 0.10.2, 0.10.3, 0.10.4, 0.10.6, 0.10.7, 0.10.8, 0.11.1, 0.11.2, 0.12.0, 0.12.1, 0.13.0, 0.13.1, 0.13.2, 0.13.3, 0.13.4, 0.13.5, 0.13.6, 0.13.7, 0.13.8, 0.13.9, 0.14.0, 0.14.1, 0.14.2, 1.0.0, 1.0.1, 1.0.2, 1.0.3, 1.0.4, 1.1.0, 1.2.0, 1.2.1, 1.2.2, 1.2.3, 2.0.0, 2.0.1, 2.1.0, 2.2.0, 2.2.1, 2.3.0, 2.4.0, 2.4.1, 2.4.2, 2.4.3, 2.5.0, 2.5.1, 2.5.2, 2.5.3, 2.6.0, 2.6.1, 2.6.2, 2.7.0, 2.8.0, 2.8.1, 2.9.0, 2.9.1, 2.9.2, 2.10.0, 2.11.0, 2.11.1, 2.12.0, 2.12.1, 2.12.2, 2.12.3, 2.12.4, 2.12.5, 2.13.0, 2.14.0, 2.14.1, 2.14.2, 2.15.1, 2.16.0, 2.16.1, 2.16.2, 2.16.3, 2.16.4, 2.16.5, 2.17.0, 2.17.1, 2.17.2, 2.17.3, 2.18.0, 2.18.1, 2.18.2, 2.18.3, 2.18.4, 2.19.0, 2.19.1, 2.20.0, 2.20.1, 2.21.0, 2.22.0, 2.23.0, 2.24.0, 2.25.0, 2.25.1, 2.26.0, 2.27.0, 2.27.1, 2.28.0, 2.28.1, 2.28.2, 2.29.0, 2.30.0, 2.31.0, 2.32.2, 2.32.3, 2.32.4, 2.32.5, 2.33.0, 2.33.1, 2.34.0.dev1, 2.34.0, 2.34.1, 2.34.2)\nERROR: No matching distribution found for requests==0.0.999\n",
+    "output_tail": "Using pip 24.1.2 from /usr/local/lib/python3.13/dist-packages/pip (python 3.13)\nERROR: Ignored the following yanked versions: 2.32.0, 2.32.1\nERROR: Could not find a version that satisfies the requirement requests==0.0.999 (from versions: 0.2.0, 0.2.1, 0.2.2, 0.2.3, 0.2.4, 0.3.0, 0.3.1, 0.3.2, 0.3.3, 0.3.4, 0.4.0, 0.4.1, 0.5.0, 0.5.1, 0.6.0, 0.6.1, 0.6.2, 0.6.3, 0.6.4, 0.6.5, 0.6.6, 0.7.0, 0.7.1, 0.7.2, 0.7.3, 0.7.4, 0.7.5, 0.7.6, 0.8.0, 0.8.1, 0.8.2, 0.8.3, 0.8.4, 0.8.5, 0.8.6, 0.8.7, 0.8.8, 0.8.9, 0.9.0, 0.9.1, 0.9.2, 0.9.3, 0.10.0, 0.10.1, 0.10.2, 0.10.3, 0.10.4, 0.10.6, 0.10.7, 0.10.8, 0.11.1, 0.11.2, 0.12.0, 0.12.1, 0.13.0, 0.13.1, 0.13.2, 0.13.3, 0.13.4, 0.13.5, 0.13.6, 0.13.7, 0.13.8, 0.13.9, 0.14.0, 0.14.1, 0.14.2, 1.0.0, 1.0.1, 1.0.2, 1.0.3, 1.0.4, 1.1.0, 1.2.0, 1.2.1, 1.2.2, 1.2.3, 2.0.0, 2.0.1, 2.1.0, 2.2.0, 2.2.1, 2.3.0, 2.4.0, 2.4.1, 2.4.2, 2.4.3, 2.5.0, 2.5.1, 2.5.2, 2.5.3, 2.6.0, 2.6.1, 2.6.2, 2.7.0, 2.8.0, 2.8.1, 2.9.0, 2.9.1, 2.9.2, 2.10.0, 2.11.0, 2.11.1, 2.12.0, 2.12.1, 2.12.2, 2.12.3, 2.12.4, 2.12.5, 2.13.0, 2.14.0, 2.14.1, 2.14.2, 2.15.1, 2.16.0, 2.16.1, 2.16.2, 2.16.3, 2.16.4, 2.16.5, 2.17.0, 2.17.1, 2.17.2, 2.17.3, 2.18.0, 2.18.1, 2.18.2, 2.18.3, 2.18.4, 2.19.0, 2.19.1, 2.20.0, 2.20.1, 2.21.0, 2.22.0, 2.23.0, 2.24.0, 2.25.0, 2.25.1, 2.26.0, 2.27.0, 2.27.1, 2.28.0, 2.28.1, 2.28.2, 2.29.0, 2.30.0, 2.31.0, 2.32.2, 2.32.3, 2.32.4, 2.32.5, 2.33.0, 2.33.1, 2.34.0.dev1, 2.34.0, 2.34.1, 2.34.2)\nERROR: No matching distribution found for requests==0.0.999\n",
+    "output_chars": 1492
+   }
+  },
+  "conflict": {
+   "uv": {
+    "command": [
+     "/usr/local/bin/uv",
+     "pip",
+     "install",
+     "--system",
+     "requests==2.31.0",
+     "requests==2.32.3"
+    ],
+    "exit_code": 1,
+    "seconds": 0.1,
+    "output_head": "Using Python 3.13.15 environment at: /usr\nerror: No solution found when resolving dependencies\n  cause: Because you require requests==2.31.0 and requests==2.32.3, we can conclude that your requirements are unsatisfiable.\n",
+    "output_tail": "Using Python 3.13.15 environment at: /usr\nerror: No solution found when resolving dependencies\n  cause: Because you require requests==2.31.0 and requests==2.32.3, we can conclude that your requirements are unsatisfiable.\n",
+    "output_chars": 221
+   },
+   "pip": {
+    "command": [
+     "/usr/bin/python3",
+     "-m",
+     "pip",
+     "install",
+     "-v",
+     "--upgrade-strategy",
+     "only-if-needed",
+     "requests==2.31.0",
+     "requests==2.32.3"
+    ],
+    "exit_code": 1,
+    "seconds": 1.9,
+    "output_head": "Using pip 24.1.2 from /usr/local/lib/python3.13/dist-packages/pip (python 3.13)\nCollecting requests==2.31.0\n  Obtaining dependency information for requests==2.31.0 from https://files.pythonhosted.org/packages/70/8e/0e2d847013cb52cd35b38c009bb167a1a26b2ce6cd6965bf26b47bc0bf44/requests-2.31.0-py3-none-any.whl.metadata\n  Downloading requests-2.31.0-py3-none-any.whl.metadata (4.6 kB)\nERROR: Cannot install requests==2.31.0 and requests==2.32.3 because these package versions have conflicting dependencies.\n\nThe conflict is caused by:\n    The user requested requests==2.31.0\n    The user requested requests==2.32.3\n\nTo fix this you could try to:\n1. loosen the range of package versions you've specified\n2. remove package versions to allow pip to attempt to solve the dependency conflict\n\nERROR: ResolutionImpossible: for help visit https://pip.pypa.io/en/latest/topics/dependency-resolution/#dealing-with-dependency-conflicts\n",
+    "output_tail": "Using pip 24.1.2 from /usr/local/lib/python3.13/dist-packages/pip (python 3.13)\nCollecting requests==2.31.0\n  Obtaining dependency information for requests==2.31.0 from https://files.pythonhosted.org/packages/70/8e/0e2d847013cb52cd35b38c009bb167a1a26b2ce6cd6965bf26b47bc0bf44/requests-2.31.0-py3-none-any.whl.metadata\n  Downloading requests-2.31.0-py3-none-any.whl.metadata (4.6 kB)\nERROR: Cannot install requests==2.31.0 and requests==2.32.3 because these package versions have conflicting dependencies.\n\nThe conflict is caused by:\n    The user requested requests==2.31.0\n    The user requested requests==2.32.3\n\nTo fix this you could try to:\n1. loosen the range of package versions you've specified\n2. remove package versions to allow pip to attempt to solve the dependency conflict\n\nERROR: ResolutionImpossible: for help visit https://pip.pypa.io/en/latest/topics/dependency-resolution/#dealing-with-dependency-conflicts\n",
+    "output_chars": 924
+   }
+  },
+  "index_unresolvable": {
+   "uv": {
+    "command": [
+     "/usr/local/bin/uv",
+     "pip",
+     "install",
+     "--system",
+     "--index-url",
+     "https://no-such-host.invalid/simple",
+     "pip-install-test==0.5"
+    ],
+    "exit_code": 2,
+    "seconds": 7.1,
+    "output_head": "Using Python 3.13.15 environment at: /usr\nerror: Request failed after 3 retries in 7.0s\n  cause: Failed to fetch: `https://no-such-host.invalid/simple/pip-install-test/`\n  cause: error sending request for url (https://no-such-host.invalid/simple/pip-install-test/)\n  cause: client error (Connect)\n  cause: dns error\n  cause: failed to lookup address information: Name or service not known\n",
+    "output_tail": "Using Python 3.13.15 environment at: /usr\nerror: Request failed after 3 retries in 7.0s\n  cause: Failed to fetch: `https://no-such-host.invalid/simple/pip-install-test/`\n  cause: error sending request for url (https://no-such-host.invalid/simple/pip-install-test/)\n  cause: client error (Connect)\n  cause: dns error\n  cause: failed to lookup address information: Name or service not known\n",
+    "output_chars": 389
+   },
+   "pip": {
+    "command": [
+     "/usr/bin/python3",
+     "-m",
+     "pip",
+     "install",
+     "-v",
+     "--upgrade-strategy",
+     "only-if-needed",
+     "--index-url",
+     "https://no-such-host.invalid/simple",
+     "pip-install-test==0.5"
+    ],
+    "exit_code": 1,
+    "seconds": 8.7,
+    "output_head": "Using pip 24.1.2 from /usr/local/lib/python3.13/dist-packages/pip (python 3.13)\nLooking in indexes: https://no-such-host.invalid/simple\nWARNING: Retrying (Retry(total=4, connect=None, read=None, redirect=None, status=None)) after connection broken by 'NewConnectionError('<pip._vendor.urllib3.connection.HTTPSConnection object at 0x7848441116a0>: Failed to establish a new connection: [Errno -2] Name or service not known')': /simple/pip-install-test/\nWARNING: Retrying (Retry(total=3, connect=None, read=None, redirect=None, status=None)) after connection broken by 'NewConnectionError('<pip._vendor.urllib3.connection.HTTPSConnection object at 0x7848442ddf90>: Failed to establish a new connection: [Errno -2] Name or service not known')': /simple/pip-install-test/\nWARNING: Retrying (Retry(total=2, connect=None, read=None, redirect=None, status=None)) after connection broken by 'NewConnectionError('<pip._vendor.urllib3.connection.HTTPSConnection object at 0x7848442de210>: Failed to establish a new connection: [Errno -2] Name or service not known')': /simple/pip-install-test/\nWARNING: Retrying (Retry(total=1, connect=None, read=None, redirect=None, status=None)) after connection broken by 'NewConnectionError('<pip._vendor.urllib3.connection.HTTPSConnection object at 0x7848442de490>: Failed to establish a new connection: [Errno -2] Name or service not known')': /simple/pip-install-test/\nWARNING: Retrying (Retry(total=0, connect=None, read=None, redirect=None, status=None)) after connection broken by 'NewConnectionError('<pip._vendor.urllib3.connection.HTTPSConnection object at 0x7848442de710>: Failed to establish a new connection: [Errno -2] Name or service not known')': /simple/pip-install-test/\nERROR: Could not find a version that satisfies the requirement pip-install-test==0.5 (from versions: none)\nERROR: No matching distribution found for pip-install-test==0.5\n",
+    "output_tail": "Using pip 24.1.2 from /usr/local/lib/python3.13/dist-packages/pip (python 3.13)\nLooking in indexes: https://no-such-host.invalid/simple\nWARNING: Retrying (Retry(total=4, connect=None, read=None, redirect=None, status=None)) after connection broken by 'NewConnectionError('<pip._vendor.urllib3.connection.HTTPSConnection object at 0x7848441116a0>: Failed to establish a new connection: [Errno -2] Name or service not known')': /simple/pip-install-test/\nWARNING: Retrying (Retry(total=3, connect=None, read=None, redirect=None, status=None)) after connection broken by 'NewConnectionError('<pip._vendor.urllib3.connection.HTTPSConnection object at 0x7848442ddf90>: Failed to establish a new connection: [Errno -2] Name or service not known')': /simple/pip-install-test/\nWARNING: Retrying (Retry(total=2, connect=None, read=None, redirect=None, status=None)) after connection broken by 'NewConnectionError('<pip._vendor.urllib3.connection.HTTPSConnection object at 0x7848442de210>: Failed to establish a new connection: [Errno -2] Name or service not known')': /simple/pip-install-test/\nWARNING: Retrying (Retry(total=1, connect=None, read=None, redirect=None, status=None)) after connection broken by 'NewConnectionError('<pip._vendor.urllib3.connection.HTTPSConnection object at 0x7848442de490>: Failed to establish a new connection: [Errno -2] Name or service not known')': /simple/pip-install-test/\nWARNING: Retrying (Retry(total=0, connect=None, read=None, redirect=None, status=None)) after connection broken by 'NewConnectionError('<pip._vendor.urllib3.connection.HTTPSConnection object at 0x7848442de710>: Failed to establish a new connection: [Errno -2] Name or service not known')': /simple/pip-install-test/\nERROR: Could not find a version that satisfies the requirement pip-install-test==0.5 (from versions: none)\nERROR: No matching distribution found for pip-install-test==0.5\n",
+    "output_chars": 1887
+   }
+  },
+  "index_refused": {
+   "uv": {
+    "command": [
+     "/usr/local/bin/uv",
+     "pip",
+     "install",
+     "--system",
+     "--index-url",
+     "http://127.0.0.1:9/simple",
+     "pip-install-test==0.5"
+    ],
+    "exit_code": 2,
+    "seconds": 7.8,
+    "output_head": "Using Python 3.13.15 environment at: /usr\nerror: Request failed after 3 retries in 7.7s\n  cause: Failed to fetch: `http://127.0.0.1:9/simple/pip-install-test/`\n  cause: error sending request for url (http://127.0.0.1:9/simple/pip-install-test/)\n  cause: client error (Connect)\n  cause: tcp connect error\n  cause: Connection refused (os error 111)\n",
+    "output_tail": "Using Python 3.13.15 environment at: /usr\nerror: Request failed after 3 retries in 7.7s\n  cause: Failed to fetch: `http://127.0.0.1:9/simple/pip-install-test/`\n  cause: error sending request for url (http://127.0.0.1:9/simple/pip-install-test/)\n  cause: client error (Connect)\n  cause: tcp connect error\n  cause: Connection refused (os error 111)\n",
+    "output_chars": 347
+   },
+   "pip": {
+    "command": [
+     "/usr/bin/python3",
+     "-m",
+     "pip",
+     "install",
+     "-v",
+     "--upgrade-strategy",
+     "only-if-needed",
+     "--trusted-host",
+     "127.0.0.1",
+     "--index-url",
+     "http://127.0.0.1:9/simple",
+     "pip-install-test==0.5"
+    ],
+    "exit_code": 1,
+    "seconds": 9.1,
+    "output_head": "Using pip 24.1.2 from /usr/local/lib/python3.13/dist-packages/pip (python 3.13)\nLooking in indexes: http://127.0.0.1:9/simple\nWARNING: Retrying (Retry(total=4, connect=None, read=None, redirect=None, status=None)) after connection broken by 'NewConnectionError('<pip._vendor.urllib3.connection.HTTPConnection object at 0x7831e99e96a0>: Failed to establish a new connection: [Errno 111] Connection refused')': /simple/pip-install-test/\nWARNING: Retrying (Retry(total=3, connect=None, read=None, redirect=None, status=None)) after connection broken by 'NewConnectionError('<pip._vendor.urllib3.connection.HTTPConnection object at 0x7831e9bade50>: Failed to establish a new connection: [Errno 111] Connection refused')': /simple/pip-install-test/\nWARNING: Retrying (Retry(total=2, connect=None, read=None, redirect=None, status=None)) after connection broken by 'NewConnectionError('<pip._vendor.urllib3.connection.HTTPConnection object at 0x7831e9badf90>: Failed to establish a new connection: [Errno 111] Connection refused')': /simple/pip-install-test/\nWARNING: Retrying (Retry(total=1, connect=None, read=None, redirect=None, status=None)) after connection broken by 'NewConnectionError('<pip._vendor.urllib3.connection.HTTPConnection object at 0x7831e9b9a2c0>: Failed to establish a new connection: [Errno 111] Connection refused')': /simple/pip-install-test/\nWARNING: Retrying (Retry(total=0, connect=None, read=None, redirect=None, status=None)) after connection broken by 'NewConnectionError('<pip._vendor.urllib3.connection.HTTPConnection object at 0x7831e9b9a3f0>: Failed to establish a new connection: [Errno 111] Connection refused')': /simple/pip-install-test/\nERROR: Could not find a version that satisfies the requirement pip-install-test==0.5 (from versions: none)\nERROR: No matching distribution found for pip-install-test==0.5\n",
+    "output_tail": "Using pip 24.1.2 from /usr/local/lib/python3.13/dist-packages/pip (python 3.13)\nLooking in indexes: http://127.0.0.1:9/simple\nWARNING: Retrying (Retry(total=4, connect=None, read=None, redirect=None, status=None)) after connection broken by 'NewConnectionError('<pip._vendor.urllib3.connection.HTTPConnection object at 0x7831e99e96a0>: Failed to establish a new connection: [Errno 111] Connection refused')': /simple/pip-install-test/\nWARNING: Retrying (Retry(total=3, connect=None, read=None, redirect=None, status=None)) after connection broken by 'NewConnectionError('<pip._vendor.urllib3.connection.HTTPConnection object at 0x7831e9bade50>: Failed to establish a new connection: [Errno 111] Connection refused')': /simple/pip-install-test/\nWARNING: Retrying (Retry(total=2, connect=None, read=None, redirect=None, status=None)) after connection broken by 'NewConnectionError('<pip._vendor.urllib3.connection.HTTPConnection object at 0x7831e9badf90>: Failed to establish a new connection: [Errno 111] Connection refused')': /simple/pip-install-test/\nWARNING: Retrying (Retry(total=1, connect=None, read=None, redirect=None, status=None)) after connection broken by 'NewConnectionError('<pip._vendor.urllib3.connection.HTTPConnection object at 0x7831e9b9a2c0>: Failed to establish a new connection: [Errno 111] Connection refused')': /simple/pip-install-test/\nWARNING: Retrying (Retry(total=0, connect=None, read=None, redirect=None, status=None)) after connection broken by 'NewConnectionError('<pip._vendor.urllib3.connection.HTTPConnection object at 0x7831e9b9a3f0>: Failed to establish a new connection: [Errno 111] Connection refused')': /simple/pip-install-test/\nERROR: Could not find a version that satisfies the requirement pip-install-test==0.5 (from versions: none)\nERROR: No matching distribution found for pip-install-test==0.5\n",
+    "output_chars": 1842
+   }
+  },
+  "index_401": {
+   "uv": {
+    "command": [
+     "/usr/local/bin/uv",
+     "pip",
+     "install",
+     "--system",
+     "--index-url",
+     "http://127.0.0.1:51791/s401/simple",
+     "pip-install-test==0.5"
+    ],
+    "exit_code": 1,
+    "seconds": 0.1,
+    "output_head": "Using Python 3.13.15 environment at: /usr\nerror: No solution found when resolving dependencies\n  cause: Because pip-install-test was not found in the package registry and you require pip-install-test==0.5, we can conclude that your requirements are unsatisfiable.\n\nhint: An index URL (http://127.0.0.1:51791/s401/simple) could not be queried due to a lack of valid authentication credentials (401 Unauthorized)\n",
+    "output_tail": "Using Python 3.13.15 environment at: /usr\nerror: No solution found when resolving dependencies\n  cause: Because pip-install-test was not found in the package registry and you require pip-install-test==0.5, we can conclude that your requirements are unsatisfiable.\n\nhint: An index URL (http://127.0.0.1:51791/s401/simple) could not be queried due to a lack of valid authentication credentials (401 Unauthorized)\n",
+    "output_chars": 411
+   },
+   "pip": {
+    "command": [
+     "/usr/bin/python3",
+     "-m",
+     "pip",
+     "install",
+     "-v",
+     "--upgrade-strategy",
+     "only-if-needed",
+     "--trusted-host",
+     "127.0.0.1",
+     "--index-url",
+     "http://127.0.0.1:51791/s401/simple",
+     "pip-install-test==0.5"
+    ],
+    "exit_code": 2,
+    "seconds": 1.6,
+    "output_head": "Using pip 24.1.2 from /usr/local/lib/python3.13/dist-packages/pip (python 3.13)\nLooking in indexes: http://127.0.0.1:51791/s401/simple\nKeyring provider requested: auto\nKeyring provider set: import\nUser for 127.0.0.1:51791: ERROR: Exception:\nTraceback (most recent call last):\n  File \"/usr/local/lib/python3.13/dist-packages/pip/_internal/cli/base_command.py\", line 179, in exc_logging_wrapper\n    status = run_func(*args)\n  File \"/usr/local/lib/python3.13/dist-packages/pip/_internal/cli/req_command.py\", line 67, in wrapper\n    return func(self, options, args)\n  File \"/usr/local/lib/python3.13/dist-packages/pip/_internal/commands/install.py\", line 377, in run\n    requirement_set = resolver.resolve(\n        reqs, check_supported_wheels=not options.target_dir\n    )\n  File \"/usr/local/lib/python3.13/dist-packages/pip/_internal/resolution/resolvelib/resolver.py\", line 95, in resolve\n    result = self._result = resolver.resolve(\n                            ~~~~~~~~~~~~~~~~^\n        collected.requirements, max_rounds=limit_how_complex_resolution_can_be\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/usr/local/lib/python3.13/dist-packages/pip/_vendor/resolvelib/resolvers.py\", line 546, in resolve\n    state = resolution.resolve(requirements, max_rounds=max_rounds)\n  File \"/usr/local/lib/python3.13/dist-packages/pip/_vendor/resolvelib/resolvers.py\", line 397, in resolve\n    self._add_to_criteria(self.state.criteria, r, parent=None)\n    ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.13/dist-packages/pip/_vendor/resolvelib/resolvers.py\", line 173, in _add_to_criteria\n    if not criterion.candidates:\n           ^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.13/dist-packages/pip/_vendor/resolvelib/structs.py\", line 156, in __bool__\n    return bool(self._sequence)\n  File \"/usr/local/lib/python3.13/dist-packages/pip/_internal/resolution/resolvelib/found_candidates.py\", line 174, in __boo",
+    "output_tail": "Using pip 24.1.2 from /usr/local/lib/python3.13/dist-packages/pip (python 3.13)\nLooking in indexes: http://127.0.0.1:51791/s401/simple\nKeyring provider requested: auto\nKeyring provider set: import\nUser for 127.0.0.1:51791: ERROR: Exception:\nTraceback (most recent call last):\n  File \"/usr/local/lib/python3.13/dist-packages/pip/_internal/cli/base_command.py\", line 179, in exc_logging_wrapper\n    status = run_func(*args)\n  File \"/usr/local/lib/python3.13/dist-packages/pip/_internal/cli/req_command.py\", line 67, in wrapper\n    return func(self, options, args)\n  File \"/usr/local/lib/python3.13/dist-packages/pip/_internal/commands/install.py\", line 377, in run\n    requirement_set = resolver.resolve(\n        reqs, check_supported_wheels=not options.target_dir\n    )\n  File \"/usr/local/lib/python3.13/dist-packages/pip/_internal/resolution/resolvelib/resolver.py\", line 95, in resolve\n    result = self._result = resolver.resolve(\n                            ~~~~~~~~~~~~~~~~^\n        collected.requirements, max_rounds=limit_how_complex_resolution_can_be\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/usr/local/lib/python3.13/dist-packages/pip/_vendor/resolvelib/resolvers.py\", line 546, in resolve\n    state = resolution.resolve(requirements, max_rounds=max_rounds)\n  File \"/usr/local/lib/python3.13/dist-packages/pip/_vendor/resolvelib/resolvers.py\", line 397, in resolve\n    self._add_to_criteria(self.state.criteria, r, parent=None)\n    ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.13/dist-packages/pip/_vendor/resolvelib/resolvers.py\", line 173, in _add_to_criteria\n    if not criterion.candidates:\n           ^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.13/dist-packages/pip/_vendor/resolvelib/structs.py\", line 156, in __bool__\n    return bool(self._sequence)\n  File \"/usr/local/lib/python3.13/dist-packages/pip/_internal/resolution/resolvelib/found_candidates.py\", line 174, in __bool__\n    return any(self)\n  File \"/usr/local/lib/python3.13/dist-packages/pip/_internal/resolution/resolvelib/found_candidates.py\", line 162, in <genexpr>\n    return (c for c in iterator if id(c) not in self._incompatible_ids)\n                       ^^^^^^^^\n  File \"/usr/local/lib/python3.13/dist-packages/pip/_internal/resolution/resolvelib/found_candidates.py\", line 49, in _iter_built\n    for version, func in infos:\n                         ^^^^^\n  File \"/usr/local/lib/python3.13/dist-packages/pip/_internal/resolution/resolvelib/factory.py\", line 300, in iter_index_candidate_infos\n    result = self._finder.find_best_candidate(\n        project_name=name,\n        specifier=specifier,\n        hashes=hashes,\n    )\n  File \"/usr/local/lib/python3.13/dist-packages/pip/_internal/index/package_finder.py\", line 884, in find_best_candidate\n    candidates = self.find_all_candidates(project_name)\n  File \"/usr/local/lib/python3.13/dist-packages/pip/_internal/index/package_finder.py\", line 825, in find_all_candidates\n    page_candidates = list(page_candidates_it)\n  File \"/usr/local/lib/python3.13/dist-packages/pip/_internal/index/sources.py\", line 194, in page_candidates\n    yield from self._candidates_from_page(self._link)\n               ~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.13/dist-packages/pip/_internal/index/package_finder.py\", line 785, in process_project_url\n    index_response = self._link_collector.fetch_response(project_url)\n  File \"/usr/local/lib/python3.13/dist-packages/pip/_internal/index/collector.py\", line 448, in fetch_response\n    return _get_index_content(location, session=self.session)\n  File \"/usr/local/lib/python3.13/dist-packages/pip/_internal/index/collector.py\", line 352, in _get_index_content\n    resp = _get_simple_response(url, session=session)\n  File \"/usr/local/lib/python3.13/dist-packages/pip/_internal/index/collector.py\", line 131, in _get_simple_response\n    resp = session.get(\n        url,\n    ...<22 lines>...\n        },\n    )\n  File \"/usr/local/lib/python3.13/dist-packages/pip/_vendor/requests/sessions.py\", line 602, in get\n    return self.request(\"GET\", url, **kwargs)\n           ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.13/dist-packages/pip/_internal/network/session.py\", line 522, in request\n    return super().request(method, url, *args, **kwargs)\n           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.13/dist-packages/pip/_vendor/requests/sessions.py\", line 589, in request\n    resp = self.send(prep, **send_kwargs)\n  File \"/usr/local/lib/python3.13/dist-packages/pip/_vendor/requests/sessions.py\", line 710, in send\n    r = dispatch_hook(\"response\", hooks, r, **kwargs)\n  File \"/usr/local/lib/python3.13/dist-packages/pip/_vendor/requests/hooks.py\", line 30, in dispatch_hook\n    _hook_data = hook(hook_data, **kwargs)\n  File \"/usr/local/lib/python3.13/dist-packages/pip/_internal/network/auth.py\", line 501, in handle_401\n    username, password, save = self._prompt_for_password(parsed.netloc)\n                               ~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.13/dist-packages/pip/_internal/network/auth.py\", line 456, in _prompt_for_password\n    username = ask_input(f\"User for {netloc}: \") if self.prompting else None\n               ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.13/dist-packages/pip/_internal/utils/misc.py\", line 249, in ask_input\n    return input(message)\nEOFError: EOF when reading a line\n",
+    "output_chars": 5517
+   }
+  },
+  "index_403": {
+   "uv": {
+    "command": [
+     "/usr/local/bin/uv",
+     "pip",
+     "install",
+     "--system",
+     "--index-url",
+     "http://127.0.0.1:51791/s403/simple",
+     "pip-install-test==0.5"
+    ],
+    "exit_code": 1,
+    "seconds": 0.1,
+    "output_head": "Using Python 3.13.15 environment at: /usr\nerror: No solution found when resolving dependencies\n  cause: Because pip-install-test was not found in the package registry and you require pip-install-test==0.5, we can conclude that your requirements are unsatisfiable.\n\nhint: An index (http://127.0.0.1:51791/s403/simple) returned a 403 Forbidden error. Check that the index URL is correct and the credentials are valid.\n",
+    "output_tail": "Using Python 3.13.15 environment at: /usr\nerror: No solution found when resolving dependencies\n  cause: Because pip-install-test was not found in the package registry and you require pip-install-test==0.5, we can conclude that your requirements are unsatisfiable.\n\nhint: An index (http://127.0.0.1:51791/s403/simple) returned a 403 Forbidden error. Check that the index URL is correct and the credentials are valid.\n",
+    "output_chars": 416
+   },
+   "pip": {
+    "command": [
+     "/usr/bin/python3",
+     "-m",
+     "pip",
+     "install",
+     "-v",
+     "--upgrade-strategy",
+     "only-if-needed",
+     "--trusted-host",
+     "127.0.0.1",
+     "--index-url",
+     "http://127.0.0.1:51791/s403/simple",
+     "pip-install-test==0.5"
+    ],
+    "exit_code": 1,
+    "seconds": 1.1,
+    "output_head": "Using pip 24.1.2 from /usr/local/lib/python3.13/dist-packages/pip (python 3.13)\nLooking in indexes: http://127.0.0.1:51791/s403/simple\nERROR: Could not find a version that satisfies the requirement pip-install-test==0.5 (from versions: none)\nERROR: No matching distribution found for pip-install-test==0.5\n",
+    "output_tail": "Using pip 24.1.2 from /usr/local/lib/python3.13/dist-packages/pip (python 3.13)\nLooking in indexes: http://127.0.0.1:51791/s403/simple\nERROR: Could not find a version that satisfies the requirement pip-install-test==0.5 (from versions: none)\nERROR: No matching distribution found for pip-install-test==0.5\n",
+    "output_chars": 306
+   }
+  },
+  "index_429": {
+   "uv": {
+    "command": [
+     "/usr/local/bin/uv",
+     "pip",
+     "install",
+     "--system",
+     "--index-url",
+     "http://127.0.0.1:51791/s429/simple",
+     "pip-install-test==0.5"
+    ],
+    "exit_code": 2,
+    "seconds": 10.0,
+    "output_head": "Using Python 3.13.15 environment at: /usr\nerror: Request failed after 3 retries in 9.8s\n  cause: Failed to fetch: `http://127.0.0.1:51791/s429/simple/pip-install-test/`\n  cause: HTTP status client error (429 Too Many Requests) for url (http://127.0.0.1:51791/s429/simple/pip-install-test/)\n",
+    "output_tail": "Using Python 3.13.15 environment at: /usr\nerror: Request failed after 3 retries in 9.8s\n  cause: Failed to fetch: `http://127.0.0.1:51791/s429/simple/pip-install-test/`\n  cause: HTTP status client error (429 Too Many Requests) for url (http://127.0.0.1:51791/s429/simple/pip-install-test/)\n",
+    "output_chars": 290
+   },
+   "pip": {
+    "command": [
+     "/usr/bin/python3",
+     "-m",
+     "pip",
+     "install",
+     "-v",
+     "--upgrade-strategy",
+     "only-if-needed",
+     "--trusted-host",
+     "127.0.0.1",
+     "--index-url",
+     "http://127.0.0.1:51791/s429/simple",
+     "pip-install-test==0.5"
+    ],
+    "exit_code": 1,
+    "seconds": 6.1,
+    "output_head": "Using pip 24.1.2 from /usr/local/lib/python3.13/dist-packages/pip (python 3.13)\nLooking in indexes: http://127.0.0.1:51791/s429/simple\nERROR: Could not find a version that satisfies the requirement pip-install-test==0.5 (from versions: none)\nERROR: No matching distribution found for pip-install-test==0.5\n",
+    "output_tail": "Using pip 24.1.2 from /usr/local/lib/python3.13/dist-packages/pip (python 3.13)\nLooking in indexes: http://127.0.0.1:51791/s429/simple\nERROR: Could not find a version that satisfies the requirement pip-install-test==0.5 (from versions: none)\nERROR: No matching distribution found for pip-install-test==0.5\n",
+    "output_chars": 306
+   }
+  },
+  "index_500": {
+   "uv": {
+    "command": [
+     "/usr/local/bin/uv",
+     "pip",
+     "install",
+     "--system",
+     "--index-url",
+     "http://127.0.0.1:51791/s500/simple",
+     "pip-install-test==0.5"
+    ],
+    "exit_code": 2,
+    "seconds": 12.4,
+    "output_head": "Using Python 3.13.15 environment at: /usr\nerror: Request failed after 3 retries in 12.3s\n  cause: Failed to fetch: `http://127.0.0.1:51791/s500/simple/pip-install-test/`\n  cause: HTTP status server error (500 Internal Server Error) for url (http://127.0.0.1:51791/s500/simple/pip-install-test/)\n",
+    "output_tail": "Using Python 3.13.15 environment at: /usr\nerror: Request failed after 3 retries in 12.3s\n  cause: Failed to fetch: `http://127.0.0.1:51791/s500/simple/pip-install-test/`\n  cause: HTTP status server error (500 Internal Server Error) for url (http://127.0.0.1:51791/s500/simple/pip-install-test/)\n",
+    "output_chars": 295
+   },
+   "pip": {
+    "command": [
+     "/usr/bin/python3",
+     "-m",
+     "pip",
+     "install",
+     "-v",
+     "--upgrade-strategy",
+     "only-if-needed",
+     "--trusted-host",
+     "127.0.0.1",
+     "--index-url",
+     "http://127.0.0.1:51791/s500/simple",
+     "pip-install-test==0.5"
+    ],
+    "exit_code": 1,
+    "seconds": 8.6,
+    "output_head": "Using pip 24.1.2 from /usr/local/lib/python3.13/dist-packages/pip (python 3.13)\nLooking in indexes: http://127.0.0.1:51791/s500/simple\nERROR: Could not find a version that satisfies the requirement pip-install-test==0.5 (from versions: none)\nERROR: No matching distribution found for pip-install-test==0.5\n",
+    "output_tail": "Using pip 24.1.2 from /usr/local/lib/python3.13/dist-packages/pip (python 3.13)\nLooking in indexes: http://127.0.0.1:51791/s500/simple\nERROR: Could not find a version that satisfies the requirement pip-install-test==0.5 (from versions: none)\nERROR: No matching distribution found for pip-install-test==0.5\n",
+    "output_chars": 306
+   }
+  },
+  "build_failure": {
+   "uv": {
+    "command": [
+     "/usr/local/bin/uv",
+     "pip",
+     "install",
+     "--system",
+     "/tmp/tmpsvy4iex4/mc_build_fails"
+    ],
+    "exit_code": 1,
+    "seconds": 1.2,
+    "output_head": "Using Python 3.13.15 environment at: /usr\nerror: The build backend returned an error\n  cause: Call to `setuptools.build_meta:__legacy__.build_wheel` failed (exit status: 1)\n\n         [stderr]\n         mc_build_fails: build failed on purpose\n",
+    "output_tail": "Using Python 3.13.15 environment at: /usr\nerror: The build backend returned an error\n  cause: Call to `setuptools.build_meta:__legacy__.build_wheel` failed (exit status: 1)\n\n         [stderr]\n         mc_build_fails: build failed on purpose\n",
+    "output_chars": 241
+   },
+   "pip": {
+    "command": [
+     "/usr/bin/python3",
+     "-m",
+     "pip",
+     "install",
+     "-v",
+     "--upgrade-strategy",
+     "only-if-needed",
+     "/tmp/tmpsvy4iex4/mc_build_fails"
+    ],
+    "exit_code": 1,
+    "seconds": 1.3,
+    "output_head": "Using pip 24.1.2 from /usr/local/lib/python3.13/dist-packages/pip (python 3.13)\nProcessing /tmp/tmpsvy4iex4/mc_build_fails\n  Preparing metadata (setup.py): started\n  Running command python setup.py egg_info\n  mc_build_fails: build failed on purpose\n  error: subprocess-exited-with-error\n  \n  \u00d7 python setup.py egg_info did not run successfully.\n  \u2502 exit code: 1\n  \u2570\u2500> See above for output.\n  \n  note: This error originates from a subprocess, and is likely not a problem with pip.\n  full command: /usr/bin/python3 -c '\n  exec(compile('\"'\"''\"'\"''\"'\"'\n  # This is <pip-setuptools-caller> -- a caller that pip uses to run setup.py\n  #\n  # - It imports setuptools before invoking setup.py, to enable projects that directly\n  #   import from `distutils.core` to work with newer packaging standards.\n  # - It provides a clear error message when setuptools is not installed.\n  # - It sets `sys.argv[0]` to the underlying `setup.py`, when invoking `setup.py` so\n  #   setuptools doesn'\"'\"'t think the script is `-c`. This avoids the following warning:\n  #     manifest_maker: standard file '\"'\"'-c'\"'\"' not found\".\n  # - It generates a shim setup.py, for handling setup.cfg-only projects.\n  import os, sys, tokenize\n  \n  try:\n      import setuptools\n  except ImportError as error:\n      print(\n          \"ERROR: Can not execute `setup.py` since setuptools is not available in \"\n          \"the build environment.\",\n          file=sys.stderr,\n      )\n      sys.exit(1)\n  \n  __file__ = %r\n  sys.argv[0] = __file__\n  \n  if os.path.exists(__file__):\n      filename = __file__\n      with tokenize.open(__file__) as f:\n          setup_py_code = f.read()\n  else:\n      filename = \"<auto-generated setuptools caller>\"\n      setup_py_code = \"from setuptools import setup; setup()\"\n  \n  exec(compile(setup_py_code, filename, \"exec\"))\n  '\"'\"''\"'\"''\"'\"' % ('\"'\"'/tmp/tmpsvy4iex4/mc_build_fails/setup.py'\"'\"',), \"<pip-setuptools-caller>\", \"exec\"))' egg_info --egg-base /tmp/pip-pip-egg-info-rtxtqh0j\n  cwd: /tmp/tmpsvy4iex4",
+    "output_tail": "Using pip 24.1.2 from /usr/local/lib/python3.13/dist-packages/pip (python 3.13)\nProcessing /tmp/tmpsvy4iex4/mc_build_fails\n  Preparing metadata (setup.py): started\n  Running command python setup.py egg_info\n  mc_build_fails: build failed on purpose\n  error: subprocess-exited-with-error\n  \n  \u00d7 python setup.py egg_info did not run successfully.\n  \u2502 exit code: 1\n  \u2570\u2500> See above for output.\n  \n  note: This error originates from a subprocess, and is likely not a problem with pip.\n  full command: /usr/bin/python3 -c '\n  exec(compile('\"'\"''\"'\"''\"'\"'\n  # This is <pip-setuptools-caller> -- a caller that pip uses to run setup.py\n  #\n  # - It imports setuptools before invoking setup.py, to enable projects that directly\n  #   import from `distutils.core` to work with newer packaging standards.\n  # - It provides a clear error message when setuptools is not installed.\n  # - It sets `sys.argv[0]` to the underlying `setup.py`, when invoking `setup.py` so\n  #   setuptools doesn'\"'\"'t think the script is `-c`. This avoids the following warning:\n  #     manifest_maker: standard file '\"'\"'-c'\"'\"' not found\".\n  # - It generates a shim setup.py, for handling setup.cfg-only projects.\n  import os, sys, tokenize\n  \n  try:\n      import setuptools\n  except ImportError as error:\n      print(\n          \"ERROR: Can not execute `setup.py` since setuptools is not available in \"\n          \"the build environment.\",\n          file=sys.stderr,\n      )\n      sys.exit(1)\n  \n  __file__ = %r\n  sys.argv[0] = __file__\n  \n  if os.path.exists(__file__):\n      filename = __file__\n      with tokenize.open(__file__) as f:\n          setup_py_code = f.read()\n  else:\n      filename = \"<auto-generated setuptools caller>\"\n      setup_py_code = \"from setuptools import setup; setup()\"\n  \n  exec(compile(setup_py_code, filename, \"exec\"))\n  '\"'\"''\"'\"''\"'\"' % ('\"'\"'/tmp/tmpsvy4iex4/mc_build_fails/setup.py'\"'\"',), \"<pip-setuptools-caller>\", \"exec\"))' egg_info --egg-base /tmp/pip-pip-egg-info-rtxtqh0j\n  cwd: /tmp/tmpsvy4iex4/mc_build_fails/\n  Preparing metadata (setup.py): finished with status 'error'\nerror: metadata-generation-failed\n\n\u00d7 Encountered error while generating package metadata.\n\u2570\u2500> See above for output.\n\nnote: This is an issue with the package mentioned above, not pip.\nhint: See above for details.\n",
+    "output_chars": 2291
+   }
+  }
+ }
+}
