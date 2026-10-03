@@ -9,6 +9,42 @@ request and `issue #N` an issue in `danbarua/mighty-colab`.
 The other documents in `docs/job/` describe the current system. This one
 records what changed and what each claim rests on.
 
+### 2026-10-04: A local supervisor that stops early no longer leaves the VM billing
+
+`apply --timeout` passing with no verdict used to record `left_up` and leave
+the VM billing until `job destroy`; so did Ctrl-C, even before launch, with
+the false reason "the VM job is unaffected" and a "reattach with `job
+status`" hint for a command that skips `left_up` jobs. Now `--timeout`
+cancels the runner, keeps its result and releases the VM; Ctrl-C before
+launch releases the VM; Ctrl-C after launch leaves cleanup pending so `job
+status --poll` collects the result and releases it. SIGTERM (an agent
+harness ending a long tool call) and SIGHUP are handled the same way;
+Python's default for them exits with no cleanup.
+
+Evidence: `integration/repro_job_timeout_and_interrupt`.
+
+### 2026-10-04: Finding: the job repros' session checks could pass with a VM still listed
+
+The checks were `mc sessions | grep -q ENDPOINT` under `set -o pipefail`.
+`grep -q` exits at the first match, `mighty-colab sessions` can then die of
+SIGPIPE, and pipefail turns the match into a failure: a "still listed" check
+failed wrongly, and a "no longer listed" check could pass wrongly. The
+checks now grep the captured output. Each earlier run's release was also
+confirmed by `mighty-colab sessions` reporting no active sessions.
+
+Evidence: `integration/repro_job_timeout_and_interrupt` (the false failure).
+
+### 2026-10-04: Finding: an interrupted `apply` could not exit
+
+Interrupted after launch, `apply` wrote a correct envelope and then hung in
+interpreter shutdown: the local kernel client's websocket threads are not
+daemons and had not been closed. The run went on for 2 h 45 m with the VM
+billing before it was noticed. `apply` now closes the client (`detach`)
+before it exits, and the repro bounds every wait so a stuck process fails it.
+
+Evidence: `integration/repro_job_timeout_and_interrupt`; a `sample` of the
+stuck process showed the main thread in `wait_for_thread_shutdown`.
+
 ### 2026-10-03: The envelope records the phase that failed
 
 `JobEnvelope.failed_phase` names the phase whose failure decided the outcome,

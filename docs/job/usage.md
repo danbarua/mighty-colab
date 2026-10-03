@@ -45,7 +45,7 @@ local record collection as a whole, and doesn't touch the VM.
 
 `plan` never allocates a VM. It writes redacted `spec.json` and `plan.json` records, writes a redacted explicit `--out` path, and creates an adjacent mode-0600 `.mighty-colab-secrets.json` sidecar when query credentials exist. Keep that sidecar beside the plan: `apply` validates and hydrates it before allocation. By default planning also performs one-byte ranged GET probes of declared data URLs; `--no-probe` disables those reads. Plans are written even with warnings or errors; `apply` refuses errors and refuses warnings unless the spec sets `ignore_warnings: true`.
 
-`apply` accepts either a plan-file positional argument or `--job-id`. `--timeout` bounds the local supervisor (default: `wall_clock` + 600 seconds), not the watchdog wall clock. `--leave-up` keeps the VM after completion. `--async` starts `apply` as a detached background process and returns at once with the job ID, the process ID and the path of its log (`apply.log` in the job directory); follow it with `job status --poll`.
+`apply` accepts either a plan-file positional argument or `--job-id`. `--timeout` bounds the local supervisor (default: `wall_clock` + 600 seconds). When it passes with no verdict, apply cancels the job, waits up to 300 seconds for its result, and releases the VM; the watchdog's `wall_clock` kill still applies on the VM. `--leave-up` keeps the VM after completion. `--async` starts `apply` as a detached background process and returns at once with the job ID, the process ID and the path of its log (`apply.log` in the job directory); follow it with `job status --poll`.
 
 `destroy --cancel-only` writes cancellation intent that runner and watchdog consume, but deliberately does not unassign the VM; failure to write the intent is an error. A full `destroy` of a running job writes the same intent and waits up to `--wait` seconds (default 300) for the runner to stop the job, upload artifacts and write its result before release. If the job's `job apply` is still running, `destroy` waits for that supervisor to release the VM instead of releasing it a second time.
 
@@ -305,7 +305,7 @@ process survives the reap.
 
 ## If the supervisor dies
 
-Closing the laptop after the launch RPC normally leaves the detached consumer running, but `job` does not implement full supervisor takeover. This section covers an `apply` process that was killed or died, which leaves `cleanup` non-terminal; an `apply` stopped by Ctrl-C or `--timeout` records `cleanup: left_up` instead (see "Cost discipline").
+Closing the laptop after the launch RPC normally leaves the detached consumer running, but `job` does not implement full supervisor takeover. This section covers an `apply` process that was killed or died, or was stopped with Ctrl-C after the runner was launched: each leaves `cleanup` non-terminal, so the commands below can finish the job.
 
 ```bash
 mighty-colab job status <id> --poll
@@ -325,7 +325,7 @@ These leave a VM running and billing:
 
 - `--leave-up`.
 - `on_offload_fail: leave_up` (the default) when an artifact upload failed.
-- An interrupted local supervisor. When `--timeout` passes before a verdict, or `apply` is interrupted with Ctrl-C in any phase (before or after the runner was launched), it records `supervisor: interrupted` and `cleanup: left_up` and does not release the VM. The keep-alive daemon keeps running, so the VM stays assigned and bills until you run `job destroy`, also after the workload ends. `job status` does not read the VM of a job recorded as `left_up`. `job destroy` absorbs `result.json` when the runner has written it, and otherwise cancels a running workload, waits up to `--wait` seconds for its result, and releases the VM.
+- Ctrl-C, SIGTERM or SIGHUP after the runner was launched. The run continues and the VM stays assigned and billing until the job is released: run `job status <id> --poll` to collect the result and release it when the job ends, or `job destroy <id>` to stop it now. (`--timeout`, and any of these signals before launch, release the VM themselves.) An agent harness that ends a long tool call sends SIGTERM, which `apply` handles; a SIGKILL cannot be handled, so drive long jobs with `job apply --async` and `job status --poll`.
 - Hard process death of `apply`, which can also leave a non-terminal record; local state is not proof of release.
 
 When in doubt:

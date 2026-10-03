@@ -209,7 +209,14 @@ A kernel execute call that raises is classified by phase. A transport failure (t
 
 Unexpected exceptions are caught unless `--debug` is active, and the reason records `internal supervisor failure in <phase>: <type>: <message>`. The supervisor persists and emits a terminal envelope: pre-run failures become `workload: failed`; failures during or after run without a remote verdict become `unknown`; terminal remote verdicts are preserved. The endpoint is persisted in the envelope before keep-alive starts. Apply claims an exclusive lock on the job ID before assignment; a live second owner fails before `assign`, a dead owner is taken over, and a job that already has an endpoint is refused.
 
-A local interruption leaves the VM assigned: on Ctrl-C in any phase, whether or not the runner was launched, or when `--timeout` (default `wall_clock` + 600 s) passes before a verdict, apply records `supervisor: interrupted` and `cleanup: left_up` and skips cleanup. The keep-alive daemon is not stopped, so Colab does not reclaim the VM, and it bills until `job destroy`, including after a launched workload ends. If the credential handoff could not be confirmed deleted, apply releases the VM instead. `job status` treats `left_up` as terminal and does not read the VM for it; `job destroy` absorbs a written `result.json`, or cancels a running workload and waits for its result, and then releases the VM.
+A local supervisor that stops early never leaves the VM without someone responsible for it:
+
+- When `--timeout` (default `wall_clock` + 600 s) passes with no verdict, apply writes the cancel intent, waits up to 300 seconds for the runner's result (stopping early if the runner is dead or never started), absorbs it if it arrives, and releases the VM. `failed_phase` is `run`, `retry_class` is `retry_same` unless the result says otherwise, and the reason names the timeout and what the wait found. The run has failed to produce a verdict in time whatever the runner reports after the cancel.
+- SIGTERM and SIGHUP are handled like Ctrl-C (SIGINT): an agent harness ends a tool call that ran too long with SIGTERM, and a closed terminal sends SIGHUP, and Python's default for both exits with no cleanup at all. A second signal during the cleanup the first one started is ignored. The reason names the signal. SIGKILL cannot be handled; a job whose `apply` was killed that way is recovered by `job status --poll` (below), so an agent driving a long job should use `job apply --async`, whose detached process a tool-call limit does not reach.
+- Ctrl-C before the runner is launched releases the VM: `workload: cancelled`, `retry_class: retry_same`, and the reason names the phase apply was in.
+- Ctrl-C after launch leaves the detached run going. Apply records `supervisor: interrupted`, leaves `cleanup` pending, not `left_up`, closes its local kernel client and exits; the keep-alive daemon keeps the VM assigned. Because the supervisor is gone and cleanup is pending, `job status --poll` treats the job as orphaned: it absorbs the result when the runner writes it and releases the VM. `job destroy` stops the job and releases the VM at once. The envelope's hints give both commands; they and the interruption's reason are dropped once a later result is absorbed and the VM released.
+
+If the credential handoff could not be confirmed deleted, apply releases the VM in every case.
 
 ## Envelope, `done`, `ok`
 
@@ -232,11 +239,11 @@ ok = workload == succeeded
 
 Therefore `ok` can be true while `done` is still false; consumers must poll `done` before interpreting `ok`. `left_up` counts as `ok` but still bills. `cleanup: failed` means release was not confirmed and the endpoint may still bill.
 
-`failed_phase` names the phase whose failure decided the outcome. It is set once, at the first failure, and later failures do not change it: a failed release after a failed run keeps `run`. It is null when nothing failed: success, cancellation (including `job destroy` of a running job), a job still running, or an interrupted local supervisor. It takes these values:
+`failed_phase` names the phase whose failure decided the outcome. It is set once, at the first failure, and later failures do not change it: a failed release after a failed run keeps `run`. It is null when nothing failed: success, cancellation (including `job destroy` of a running job and Ctrl-C), or a job still running. It takes these values:
 
 - the phase of `apply`'s own step that failed: `provision`, `install`, `restart`, `verify`, `stage`, or `run` when the launch call fails; an unexpected exception records the phase apply was in;
 - `stage` when the runner's staging fails (a data GET or its sha256 check);
-- `run` when the workload fails or ends `unknown`, the runner dies or never starts, or the assignment is lost, whether `apply`'s poll or `job status` finds it;
+- `run` when the workload fails or ends `unknown`, the runner dies or never starts, the assignment is lost, or apply's `--timeout` passes with no verdict, whether `apply`'s poll or `job status` finds it;
 - `offload` when the workload succeeded and an artifact upload failed or a required artifact was not produced;
 - `cleanup` when nothing before it failed and the release failed, the VM was left up with surviving descendants, or `job status` or `job destroy` forced a teardown of a job without a verdict because the transfer credential deletion could not be confirmed.
 
