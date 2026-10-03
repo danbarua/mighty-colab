@@ -456,6 +456,32 @@ class ArtifactResult(BaseModel):
     error: Optional[TransferError] = None
 
 
+InstallFailure = Literal["resolution", "build", "auth", "transient", "timeout", "unknown"]
+
+
+class InstallAttempt(BaseModel):
+    """One installer run during `install`, as recorded on the VM.
+
+    Kept in the envelope when the install failed or fell back from uv to
+    pip; the full output is in the job directory's install.log.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    installer: Literal["uv", "pip"]
+    version: str
+    command: List[str]
+    # The index configuration this installer reads (its own environment
+    # variables, and pip.conf for pip), redacted. `deps` cannot carry index
+    # flags: the planner accepts only PEP 508 requirements.
+    index: Dict[str, str] = Field(default_factory=dict)
+    exit_code: Optional[int] = None
+    timed_out: bool = False
+    seconds: float
+    failure: Optional[InstallFailure] = None
+    key_lines: List[str] = Field(default_factory=list)
+
+
 class JobEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -483,6 +509,11 @@ class JobEnvelope(BaseModel):
     surviving_descendants: List[int] = Field(default_factory=list)
 
     artifacts: List[ArtifactResult] = Field(default_factory=list)
+    # Left out when empty, so envelopes of jobs whose install succeeded on
+    # the first try stay readable by older CLIs sharing the job store.
+    install_attempts: List[InstallAttempt] = Field(
+        default_factory=list, exclude_if=lambda attempts: not attempts
+    )
     retry_class: Optional[RetryClass] = None
     reason: Optional[str] = None
     hints: List[str] = Field(default_factory=list)

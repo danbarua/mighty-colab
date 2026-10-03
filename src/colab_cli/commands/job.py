@@ -60,7 +60,9 @@ from colab_cli.job.models import (
 from colab_cli.job.orchestrator import (
     Orchestrator,
     PhaseError,
+    _now,
     copy_vm_records,
+    raw_verdict,
     release_assignment,
     stop_session_keep_alive,
 )
@@ -662,11 +664,14 @@ def apply(
         orch.verify()
         _stage_payload(orch, p)
         orch.seal_secret_channel()
-        orch.launch(f"{orch.remote_dir}/src")
-        secret_handoff = True
+        launched_pid = orch.launch(f"{orch.remote_dir}/src")
+        # Only a pid proves the launch kernel opened and unlinked the
+        # credential handoff file; otherwise cleanup checks for it.
+        secret_handoff = launched_pid is not None
         transport = orch.job_transport()
         orch.poll(transport, deadline=deadline)
     except PhaseError as e:
+        orch.env.finished_at = orch.env.finished_at or _now()
         orch.env.workload = Workload.FAILED
         orch.env.offload = (
             Offload.NOT_REQUIRED if not p.spec.artifacts else Offload.SKIPPED
@@ -686,6 +691,7 @@ def apply(
     except Exception as e:  # noqa: BLE001 - every non-debug path needs a verdict
         if state.debug:
             raise
+        orch.env.finished_at = orch.env.finished_at or _now()
         if not orch.env.workload.terminal:
             before_run = orch.env.phase in {
                 Phase.PLAN,
@@ -704,7 +710,9 @@ def apply(
             else:
                 orch.env.offload = Offload.SKIPPED
         orch.env.supervisor = Supervisor.FINISHED
-        orch.env.reason = f"internal supervisor failure ({type(e).__name__})"
+        orch.env.reason = (
+            f"internal supervisor failure in {orch.env.phase.value}: {describe_error(e)}"
+        )
         orch.env.retry_class = RetryClass.DO_NOT_RETRY
         # `--debug` only helps while the exception is in flight (it makes
         # this except-clause re-raise instead of swallowing) -- once the
@@ -787,6 +795,19 @@ def _stage_payload(orch: Orchestrator, p) -> None:
             else RetryClass.RETRY_SAME
         )
         raise PhaseError(Phase.STAGE, str(error), retry) from error
+    except ValueError as error:
+        # payload_bundle's own refusals: a source file changed or appeared
+        # after planning, a credential-bearing URL in the code, a symlink,
+        # a file over the upload limit. Each names the file and the fix.
+        raise PhaseError(
+            Phase.STAGE, f"staging refused: {describe_error(error)}", RetryClass.FIX_CODE
+        ) from error
+    except OSError as error:
+        raise PhaseError(
+            Phase.STAGE,
+            f"a local source file could not be read: {describe_error(error)}",
+            RetryClass.FIX_HUMAN,
+        ) from error
 
 
 
@@ -887,11 +908,6 @@ def _await_runner_result(transport, job_id: str, wait: int):
         if kind == "session_lost":
             return None, "the assignment disappeared while waiting for the runner"
     return None, f"the runner wrote no result.json within {wait}s of the cancel request"
-
-
-def _raw_verdict(result) -> str:
-    fields = ("schema_version", "workload", "exit_code", "signal", "offload", "phase")
-    return " ".join(f"{name}={result.get(name)!r}" for name in fields if name in result)
 
 
 def _release(env, state, failure: str) -> None:
@@ -1418,7 +1434,7 @@ def destroy(
                 except Exception as error:  # noqa: BLE001 - release must proceed
                     env.hints.append(
                         f"runner result could not be absorbed ({describe_error(error)}); "
-                        f"raw result: {_raw_verdict(outcome)}"
+                        f"raw result: {raw_verdict(outcome)}"
                     )
             else:
                 env.hints.append(outcome)
@@ -1461,7 +1477,7 @@ def _job_list_rows(store) -> List[Dict[str, Any]]:
     """
     rows = []
     for jid in store.list_jobs():
-        e = store.read_envelope(jid)
+        e, problem = store.read_envelope_or_problem(jid)
         if e is None:
             rows.append(
                 {
@@ -1472,7 +1488,7 @@ def _job_list_rows(store) -> List[Dict[str, Any]]:
                     "cleanup": None,
                     "done": False,
                     "endpoint": None,
-                    "reason": "planned, not applied",
+                    "reason": problem or "planned, not applied",
                 }
             )
             continue
@@ -1560,7 +1576,10 @@ def prune(
     removed: list[tuple[str, str]] = []
     skipped: list[tuple[str, str]] = []
     for jid in ids:
-        e = store.read_envelope(jid)
+        e, problem = store.read_envelope_or_problem(jid)
+        if problem is not None:
+            skipped.append((jid, f"{problem} -- state unknown, will not prune"))
+            continue
         if e is None:
             removed.append((jid, "planned, not applied"))
             continue

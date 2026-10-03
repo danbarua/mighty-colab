@@ -1987,7 +1987,7 @@ def test_unexpected_apply_exception_emits_a_terminal_envelope(
     env = _store().read_envelope("unexpected")
     assert env.done
     assert env.retry_class is RetryClass.DO_NOT_RETRY
-    assert env.reason == "internal supervisor failure (RuntimeError)"
+    assert env.reason == "internal supervisor failure in plan: RuntimeError: supervisor boom"
     # Regression: the old hint ("re-run with --debug") was a dead end once
     # the job is terminal -- `job apply` on the same --job-id refuses, and
     # `job status --debug` never re-enters this except-clause. The hint
@@ -2697,6 +2697,9 @@ def _supervisor_finishes_on_sleep(store, job_id, n, sleeps, **fields):
     writing its envelope with `fields` and clearing its identity."""
 
     def sleep(seconds):
+        if seconds < 1:
+            # subprocess's own wait loop: ident.alive runs `ps` on macOS.
+            return
         sleeps.append(seconds)
         if len(sleeps) == n:
             env = store.read_envelope(job_id)
@@ -2940,3 +2943,139 @@ def test_forced_release_is_not_failed_by_a_local_session_removal_error(
     env = store.read_envelope("destroy-me")
     assert env.cleanup is Cleanup.RELEASED
     assert any("disk full" in h for h in env.hints)
+
+
+def test_jobs_list_and_prune_survive_an_unreadable_envelope(mock_common_state):
+    from colab_cli.commands.job import _store
+    from colab_cli.job.models import Cleanup, JobEnvelope, Offload, Supervisor
+
+    store = _store()
+    store.write_envelope(
+        JobEnvelope(
+            job_id="readable",
+            workload=Workload.SUCCEEDED,
+            offload=Offload.NOT_REQUIRED,
+            cleanup=Cleanup.RELEASED,
+            supervisor=Supervisor.FINISHED,
+        )
+    )
+    bad = store.job_dir("from-a-newer-cli")
+    bad.mkdir(parents=True)
+    (bad / "envelope.json").write_text('{"job_id": "from-a-newer-cli", "future_field": 1}')
+    _json_mode(mock_common_state)
+
+    listed = runner.invoke(app, ["jobs", "list"])
+    assert listed.exit_code == 0, listed.output
+    rows = {r["job_id"]: r for r in json.loads(listed.output)["jobs"]}
+    assert rows["readable"]["workload"] == "succeeded"
+    assert "unreadable" in rows["from-a-newer-cli"]["reason"]
+    assert "future_field" in rows["from-a-newer-cli"]["reason"]
+
+    pruned = runner.invoke(app, ["jobs", "prune", "--dry-run"])
+    assert pruned.exit_code == 0, pruned.output
+    payload = json.loads(pruned.output)
+    assert {r["job_id"] for r in payload["removed"]} == {"readable"}
+    skipped = {r["job_id"]: r["reason"] for r in payload["skipped"]}
+    assert "unreadable" in skipped["from-a-newer-cli"]
+
+
+def _envelope(output):
+    """The JSON envelope in a command's output, after any `[job] phase=`
+    lines, however it is formatted."""
+    return json.JSONDecoder().raw_decode(output[output.index("{"):])[0]
+
+
+def _apply_with(monkeypatch, tmp_path, mock_common_state, **overrides):
+    """Plan a CPU job and run `job apply --json` with orchestrator phases
+    replaced by `overrides`; the rest are no-ops."""
+    import colab_cli.commands.job as job_command
+    from colab_cli.job.models import Cleanup
+    from colab_cli.job.orchestrator import Orchestrator
+    from types import SimpleNamespace
+
+    (tmp_path / "train.py").write_text("print(1)")
+    spec = tmp_path / "job.yaml"
+    spec.write_text(
+        "name: phases\naccelerator:\n  prefer: []\n  accept_cpu: true\n"
+        "code:\n  kind: file\n  entry: train.py\n"
+    )
+    out = tmp_path / "plan.json"
+    assert runner.invoke(app, ["job", "plan", str(spec), "--no-probe", "--out", str(out)]).exit_code == 0
+
+    def provision(self):
+        self.session_state = SimpleNamespace(name="phases", url="https://vm", token="x")
+        self.env.endpoint = "m-test"
+
+    calls = []
+    defaults = {
+        "provision": provision,
+        "install": lambda _self: None,
+        "restart": lambda _self: None,
+        "verify": lambda _self: None,
+        "seal_secret_channel": lambda _self: None,
+        "launch": lambda _self, _path: 4242,
+        "poll": lambda _self, _transport, deadline: None,
+        "job_transport": lambda _self: MagicMock(),
+        "cleanup_secret_channel": lambda _self: calls.append("cleanup_secret_channel") or True,
+        "cleanup": lambda self, force_leave_up=False: setattr(self.env, "cleanup", Cleanup.RELEASED),
+    }
+    stage = overrides.pop("_stage_payload", lambda _orch, _plan: None)
+    defaults.update(overrides)
+    for name, fn in defaults.items():
+        monkeypatch.setattr(Orchestrator, name, fn)
+    monkeypatch.setattr(job_command, "_stage_payload", stage)
+    _json_mode(mock_common_state)
+    mock_common_state.debug = False
+    result = runner.invoke(app, ["job", "apply", str(out)])
+    return result, calls
+
+
+def test_apply_catch_all_keeps_the_phase_type_and_message(
+    tmp_path, monkeypatch, mock_common_state
+):
+    def verify(self):
+        from colab_cli.job.models import Phase
+
+        self._set_phase(Phase.VERIFY)
+        raise KeyError("missing_field")
+
+    result, _calls = _apply_with(monkeypatch, tmp_path, mock_common_state, verify=verify)
+
+    job = _envelope(result.output)["job"]
+    assert job["reason"] == "internal supervisor failure in verify: KeyError: 'missing_field'"
+    assert job["retry_class"] == "do_not_retry"
+    assert job["finished_at"]
+
+
+def test_apply_stage_value_errors_are_fix_code_with_their_message(
+    tmp_path, monkeypatch, mock_common_state
+):
+    from colab_cli.commands import job as job_command
+
+    def stage_payload(**_kwargs):
+        raise ValueError("source file changed while staging: train.py")
+
+    monkeypatch.setattr("colab_cli.job.payload_bundle.stage_payload", stage_payload)
+    result, _calls = _apply_with(
+        monkeypatch, tmp_path, mock_common_state,
+        _stage_payload=job_command._stage_payload,
+        prepare_secret_channel=lambda _self: None,
+    )
+
+    job = _envelope(result.output)["job"]
+    assert job["phase"] == "stage"
+    assert job["retry_class"] == "fix_code"
+    assert job["finished_at"]
+    assert "source file changed while staging: train.py" in job["reason"]
+
+
+def test_apply_checks_the_credential_file_when_the_launch_reply_was_lost(
+    tmp_path, monkeypatch, mock_common_state
+):
+    """Without a pid there is no proof the launch kernel opened and
+    unlinked the handoff file, so cleanup must check for it."""
+    result, calls = _apply_with(
+        monkeypatch, tmp_path, mock_common_state, launch=lambda _self, _path: None
+    )
+
+    assert "cleanup_secret_channel" in calls

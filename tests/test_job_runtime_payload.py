@@ -1245,15 +1245,15 @@ def test_artifact_record_keeps_why_the_response_could_not_be_read(
     assert "then reading the response failed" in error["reason"]
 
 
-def test_redact_queries_removes_every_query_string():
-    from colab_cli.job.runtime_payload.redact import redact_queries
+def test_redact_credentials_removes_every_query_string():
+    from colab_cli.job.runtime_payload.redact import redact_credentials
 
     text = (
         "HTTPSConnectionPool(host='x', port=443): Max retries exceeded with url: "
         "/api/contents/content/jobs/j/runner.log?colab-runtime-proxy-token=SECRET1 "
         "and https://storage.example/o?X-Goog-Signature=SECRET2&x=1, no query: https://a/b"
     )
-    redacted = redact_queries(text)
+    redacted = redact_credentials(text)
     assert "SECRET1" not in redacted
     assert "SECRET2" not in redacted
     assert "/api/contents/content/jobs/j/runner.log?<redacted>" in redacted
@@ -1337,3 +1337,21 @@ def test_an_unreaped_killed_process_is_not_alive():
     finally:
         child.kill()
         child.wait()
+
+
+
+def test_redact_credentials_removes_url_userinfo():
+    """Package index URLs routinely carry a token as userinfo."""
+    from colab_cli.job.runtime_payload.redact import redact_credentials
+
+    text = (
+        "index https://ci-bot:SECRET1@pkgs.example/simple/ and "
+        "https://user:SECRET2@pkgs.example/simple/x?token=SECRET3 and "
+        "https://SECRET4@pkgs.example/simple/ and a plain https://pypi.org/simple/"
+    )
+    redacted = redact_credentials(text)
+    for secret in ("SECRET1", "SECRET2", "SECRET3", "SECRET4"):
+        assert secret not in redacted
+    assert "https://***@pkgs.example/simple/ and" in redacted
+    assert "https://***@pkgs.example/simple/x?<redacted>" in redacted
+    assert "https://pypi.org/simple/" in redacted
