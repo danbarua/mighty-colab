@@ -1,6 +1,6 @@
 ---
 log:
-2026-10-03: Documented the copy of VM records before every release, `destroy --wait`, artifact failure detail, and unbuffered consumer output; `apply` releases the VM when the runner is dead or never started; live repros for a never-started runner, a VM lost mid-run, and a run past the token boundary.
+2026-10-03: Documented the copy of VM records before every release, `destroy --wait`, artifact failure detail, and unbuffered consumer output; `apply` releases the VM when the runner is dead or never started; live repros for a never-started runner, a VM lost mid-run, and a run past the token boundary; dependency installs with uv then pip, and what a failed install reports.
 2026-09-16: Added `docs/job/mcp.md`: the MCP notification layer that lets an agent driving `job apply --async` learn a job finished without polling.
 2026-09-15: Split `jobs list`/`jobs prune` out of `job` into a new sibling group. Moved this guide into `docs/job/usage.md`.
 2026-09-13: Pointed spec authors to `docs/job/spec.md` for the field list, signed-URL prerequisites, and everyday examples.
@@ -271,6 +271,19 @@ as `retry_different`. If you genuinely want CPU, say `accept_cpu: true`.
 imported at kernel boot does nothing until the interpreter restarts. `job`
 restarts after installing and then re-probes against `sys.modules` — the
 question is what your code will actually import, not what pip reported.
+
+**A dependency that will not install.** `job` installs `deps` with uv and
+falls back to pip if uv fails. A failed install says why: `reason` names the
+packages and each installer's exit status and key error lines, `retry_class`
+is `fix_code` for a pin that cannot be resolved or a package that fails to
+build, `fix_human` for an index that refuses credentials (401/403), and
+`retry_same` for an index that is unreachable or failing (DNS, connection,
+429, 5xx). `install_attempts` in the envelope keeps each attempt's installer,
+version, command, index configuration and key lines, and `install.log` in
+the local job directory has the full output. An installer that runs past its
+25-minute budget is `fix_code`: the usual cause is a source build, and the fix
+is a version with a prebuilt wheel. A lost kernel connection during install, or a kernel
+interrupted, restarted or shut down while it installs, is `retry_same`.
 
 **`retry.when`, not `retry.on`.** YAML 1.1 resolves a bare `on:` key to boolean
 `true`, so the field is named `when`.

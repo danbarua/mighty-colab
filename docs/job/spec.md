@@ -1,5 +1,6 @@
 ---
 log:
+2026-10-03: `deps` install with uv, falling back to pip.
 2026-09-15: Added `budgets.artifact_sync_interval_seconds` (periodic mid-run re-upload of declared `artifacts[]`). Moved into `docs/job/spec.md`.
 2026-09-13: First version. Field list and everyday examples for a `job` spec, written for a reader who has not opened `docs/job/design.md`.
 ---
@@ -76,7 +77,7 @@ Common optional fields. Defaults apply when you omit them.
 | `code.args` | `[]` | `sys.argv[1:]` on the VM. Must not contain URLs with query credentials. |
 | `accelerator.prefer` | `[T4]` | Tried in order. Unknown names are plan errors. Nothing is substituted in silence. |
 | `accelerator.accept_cpu` | `false` | Set `true` if a CPU VM is acceptable. |
-| `deps` | `[]` | `pip` pins. The kernel restarts after install. Must not contain URLs with query credentials. |
+| `deps` | `[]` | PEP 508 requirements (pins, or `name @ URL`). Installed with uv, falling back to pip; the kernel restarts after install. Must not contain URLs with query credentials. |
 | `data` | `[]` | HTTPS GET inputs. The VM downloads them before your script starts. |
 | `artifacts` | `[]` | HTTPS PUT outputs. The runner uploads them after the script exits. |
 | `control.result` | omitted | Optional off-VM copy of `result.json`. |

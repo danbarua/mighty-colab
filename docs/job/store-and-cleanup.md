@@ -1,6 +1,6 @@
 ---
 log:
-2026-10-03: Added the records copied from the VM before every release.
+2026-10-03: Added the records copied from the VM before every release; an unreadable envelope is listed, and skipped by `jobs prune`.
 2026-09-15: First version, then `jobs list`/`jobs prune` implemented the same day (`mighty-colab jobs`, a sibling command group to `job`). This doc's manual-cleanup section is now the safety rationale `jobs prune` itself implements, not a workaround for a missing command.
 ---
 
@@ -87,6 +87,10 @@ to replicate it by hand:
   specific job) before deleting; if either shows a live endpoint, run
   `mighty-colab job destroy <job_id>` first, then re-verify with
   `mighty-colab sessions` before deleting the directory.
+- **An envelope that cannot be read** (truncated, or written by a newer CLI
+  with fields this one does not know) — `jobs list` and the MCP job resources
+  show the record with `envelope unreadable (...)`, and `jobs prune` skips it,
+  because its state is unknown.
 - **`done=False`, or an `apply.lock`/`supervisor.json` present** — do not
   delete. Either `apply` may still be running in another process on this or
   another machine, or a prior run was interrupted mid-flight. Run `job
