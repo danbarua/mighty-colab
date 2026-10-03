@@ -60,6 +60,7 @@ from colab_cli.job.models import (
 from colab_cli.job.orchestrator import (
     Orchestrator,
     PhaseError,
+    _now,
     copy_vm_records,
     raw_verdict,
     release_assignment,
@@ -670,6 +671,7 @@ def apply(
         transport = orch.job_transport()
         orch.poll(transport, deadline=deadline)
     except PhaseError as e:
+        orch.env.finished_at = orch.env.finished_at or _now()
         orch.env.workload = Workload.FAILED
         orch.env.offload = (
             Offload.NOT_REQUIRED if not p.spec.artifacts else Offload.SKIPPED
@@ -689,6 +691,7 @@ def apply(
     except Exception as e:  # noqa: BLE001 - every non-debug path needs a verdict
         if state.debug:
             raise
+        orch.env.finished_at = orch.env.finished_at or _now()
         if not orch.env.workload.terminal:
             before_run = orch.env.phase in {
                 Phase.PLAN,

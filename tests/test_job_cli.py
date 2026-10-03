@@ -3044,6 +3044,7 @@ def test_apply_catch_all_keeps_the_phase_type_and_message(
     job = _envelope(result.output)["job"]
     assert job["reason"] == "internal supervisor failure in verify: KeyError: 'missing_field'"
     assert job["retry_class"] == "do_not_retry"
+    assert job["finished_at"]
 
 
 def test_apply_stage_value_errors_are_fix_code_with_their_message(
@@ -3064,6 +3065,7 @@ def test_apply_stage_value_errors_are_fix_code_with_their_message(
     job = _envelope(result.output)["job"]
     assert job["phase"] == "stage"
     assert job["retry_class"] == "fix_code"
+    assert job["finished_at"]
     assert "source file changed while staging: train.py" in job["reason"]
 
 
