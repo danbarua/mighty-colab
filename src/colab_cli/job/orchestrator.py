@@ -43,6 +43,7 @@ from colab_cli.job import RESULT_SCHEMA_VERSION, SCHEMA_VERSION
 from colab_cli.job.models import (
     ArtifactResult,
     Cleanup,
+    InstallAttempt,
     JobEnvelope,
     JobSpec,
     Offload,
@@ -63,6 +64,10 @@ _logger = logging.getLogger(__name__)
 # prefix to validate `dest` paths against.
 REMOTE_ROOT = "/content/jobs"
 INSTALL_LOG_FILE = "install.log"
+INSTALL_LOG_HINT = (
+    "full installer output: install.log in the local job directory, copied "
+    "from the VM before release"
+)
 
 # Records in the VM's job directory that explain a run, copied into the
 # local job directory before every release. Never anything under
@@ -96,7 +101,6 @@ LAUNCH_ABSENCE_CONFIRM_SECONDS = 90.0
 # only spawns a process and returns a pid, so anything approaching this
 # ceiling means the kernel itself is wedged.
 LAUNCH_TIMEOUT = 120.0
-INSTALL_TIMEOUT = 1800.0
 VERIFY_TIMEOUT = 180.0
 RESTART_TIMEOUT = 60.0
 
@@ -510,47 +514,63 @@ class Orchestrator:
             )
 
     def install(self) -> None:
+        """uv first, pip if uv fails; see colab_cli.job.install."""
         if not self.spec.deps:
             return
+        from colab_cli.job import install as deps
+
         self._set_phase(Phase.INSTALL)
-        pkgs = ", ".join(repr(d) for d in self.spec.deps)
-        # pip writes to a file in the job directory as well as answering
-        # through the kernel: if the kernel connection drops mid-install,
-        # the reply is lost but the file is still copied off the VM before
-        # release.
-        code = (
-            "import os, subprocess, sys\n"
-            f"log_path = {self.remote_dir + '/' + INSTALL_LOG_FILE!r}\n"
-            "os.makedirs(os.path.dirname(log_path), exist_ok=True)\n"
-            f"pkgs = [{pkgs}]\n"
-            "with open(log_path, 'w') as log:\n"
-            "    r = subprocess.run([sys.executable, '-m', 'pip', 'install', '-v', "
-            "'--upgrade-strategy', 'only-if-needed', *pkgs],"
-            " stdout=log, stderr=subprocess.STDOUT, text=True)\n"
-            "with open(log_path, errors='replace') as log:\n"
-            "    print(log.read()[-40000:])\n"
-            "print('PIP_RC=%d' % r.returncode)\n"
-        )
         outputs = self._execute_code(
-            code,
-            timeout=INSTALL_TIMEOUT,
+            deps.install_code(f"{self.remote_dir}/{INSTALL_LOG_FILE}", list(self.spec.deps)),
+            timeout=deps.INSTALL_KERNEL_TIMEOUT,
             phase=Phase.INSTALL,
-            hints=[
-                "installer output written before the failure is in install.log on "
-                "the VM; it is copied to the local job directory before release"
-            ],
+            hints=[INSTALL_LOG_HINT],
         )
         text = _outputs_text(outputs)
-        if "PIP_RC=0" not in text:
+        raw = deps.parse_install_result(text)
+        if raw is None:
+            # The kernel code itself failed (a full disk, a broken VM),
+            # before any installer reported: not the user's pins.
             raise PhaseError(
                 Phase.INSTALL,
-                f"pip install failed: {_tail(text, phase='install/pip')}",
-                RetryClass.FIX_CODE,
-                [
-                    "check the version pins in `deps` against what Colab preinstalls",
-                    "full pip output logged to ~/.config/colab-cli/colab.log",
-                ],
+                "the install step failed on the VM before an installer reported: "
+                f"{_tail(redact_credentials(text), phase='install')}",
+                RetryClass.DO_NOT_RETRY,
+                [INSTALL_LOG_HINT],
             )
+        attempts = []
+        for attempt in raw:
+            attempt = deps.redact_attempt(attempt)
+            attempt["failure"], attempt["key_lines"] = deps.classify_attempt(attempt)
+            attempts.append(attempt)
+        records = [
+            InstallAttempt(**{k: a[k] for k in InstallAttempt.model_fields if k in a})
+            for a in attempts
+        ]
+        last = attempts[-1]
+        if last["exit_code"] == 0:
+            if len(attempts) == 1:
+                self.env.hints.append(
+                    f"dependencies installed with {deps.short_version(last['version'])} "
+                    f"in {last['seconds']}s"
+                )
+            else:
+                first = attempts[0]
+                self.env.install_attempts = records
+                self.env.hints.append(
+                    f"{first['installer']} failed ({first['failure']}): "
+                    f"{(first['key_lines'] or ['no error line'])[0]}; dependencies "
+                    f"installed with {deps.short_version(last['version'])} instead"
+                )
+            return
+        self.env.install_attempts = records
+        retry_class, failure = deps.install_verdict(attempts)
+        raise PhaseError(
+            Phase.INSTALL,
+            deps.failure_reason(list(self.spec.deps), attempts, failure),
+            retry_class,
+            [deps.FAILURE_HINT[failure], INSTALL_LOG_HINT],
+        )
 
     def restart(self) -> None:
         """Unconditional after install, and only after install.

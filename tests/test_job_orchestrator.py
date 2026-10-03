@@ -727,41 +727,6 @@ def test_verify_passes_on_cpu_when_no_gpu_was_requested(tmp_path):
 
     orch.verify()  # must not raise
 
-def test_install_failure_logs_full_pip_output_before_truncating(tmp_path, caplog):
-    """A build-from-source failure puts the useful part (which package,
-    why) near the top of stderr and generic pip boilerplate ("did not run
-    successfully", "This error originates from a subprocess...") at the
-    bottom -- so truncating the envelope `reason` to a tail keeps the part
-    that is identical for every failure and throws away the part that
-    names the cause. The full text must still reach the persistent log.
-    """
-    generic_tail = "note: This error originates from a subprocess. " * 20
-    full_output = (
-        "Collecting scipy==1.15.2\n"
-        "  Cython.Compiler.Errors.CompileError: scipy requires a Fortran90 compiler\n"
-        + generic_tail
-        + "\nPIP_RC=1\n"
-    )
-    rt = _runtime_returning(full_output)
-    spec = _spec(deps=["scipy==1.15.2"])
-    orch = _orch(tmp_path, spec=spec, runtime=rt)
-    orch.session_state = SimpleNamespace(url="https://u", token="t")
-
-    with caplog.at_level("INFO", logger="colab_cli.job.orchestrator"):
-        with pytest.raises(PhaseError) as exc:
-            orch.install()
-
-    assert exc.value.retry_class is RetryClass.FIX_CODE
-    # The truncated reason alone would not tell you which package failed.
-    assert "Fortran90 compiler" not in exc.value.reason
-    # But the full text -- including the actual cause -- reached the log.
-    logged = "\n".join(r.message for r in caplog.records)
-    assert "scipy requires a Fortran90 compiler" in logged
-    assert any(
-        "colab.log" in h for h in exc.value.hints
-    ), "hint must point at the persistent log, not just the truncated reason"
-
-
 def test_verify_counts_declared_artifact_space_before_launch(tmp_path):
     spec = _spec(
         accelerator=Accelerator(prefer=[], accept_cpu=True),
@@ -1472,37 +1437,6 @@ def test_cleanup_does_not_copy_records_when_the_vm_is_left_up(tmp_path):
     orch.cleanup(force_leave_up=True)
 
     assert events == []
-
-
-def test_install_writes_pip_output_to_a_file_on_the_vm(tmp_path, monkeypatch):
-    """A dropped kernel connection during install loses the kernel's reply.
-    The pip output must also be on VM disk, where the copy before release
-    can still reach it."""
-    import subprocess
-
-    from colab_cli.job import orchestrator as orchestrator_module
-
-    monkeypatch.setattr(orchestrator_module, "REMOTE_ROOT", str(tmp_path / "vm"))
-    rt = _runtime_returning("PIP_RC=0\n")
-    orch = _orch(tmp_path, spec=_spec(deps=["torch==2.4.1"]), runtime=rt)
-    orch.session_state = SimpleNamespace(url="https://u", token="t")
-    orch.install()
-    code = rt.execute_code.call_args.args[0]
-
-    def fake_pip(cmd, stdout=None, stderr=None, **_kw):
-        stdout.write("Collecting torch==2.4.1\n")
-        return subprocess.CompletedProcess(cmd, 0)
-
-    monkeypatch.setattr(subprocess, "run", fake_pip)
-    printed = StringIO()
-    with redirect_stdout(printed):
-        exec(code, {})
-
-    install_log = tmp_path / "vm" / "unit-job" / "install.log"
-    assert install_log.read_text() == "Collecting torch==2.4.1\n"
-    assert "Collecting torch==2.4.1" in printed.getvalue()
-    assert "PIP_RC=0" in printed.getvalue()
-
 
 
 def test_copy_vm_records_keeps_the_redacted_error_message(tmp_path):
