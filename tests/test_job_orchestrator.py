@@ -2000,3 +2000,40 @@ def test_a_keep_alive_daemon_that_cannot_start_fails_provisioning(
     assert exc.value.retry_class is RetryClass.FIX_HUMAN
     assert "Too many open files" in exc.value.reason
     assert orch.env.endpoint == "m-s-job"
+
+
+_INTERRUPTED = [
+    {
+        "output_type": "error",
+        "ename": "KeyboardInterrupt",
+        "evalue": "",
+        "traceback": ["/usr/lib/python3.13/subprocess.py in _wait(self, timeout)", "KeyboardInterrupt: "],
+    }
+]
+
+
+def test_an_interrupted_install_cell_is_retry_same(tmp_path):
+    """Shutting down or restarting a busy kernel interrupts the running
+    cell first; the call then returns a KeyboardInterrupt error output
+    instead of raising. Seen live when the install kernel was shut down."""
+    orch = _install_orch(tmp_path, None)
+    orch._runtime_handle().execute_code.side_effect = None
+    orch._runtime_handle().execute_code.return_value = _INTERRUPTED
+
+    with pytest.raises(PhaseError) as exc:
+        orch.install()
+
+    assert exc.value.retry_class is RetryClass.RETRY_SAME
+    assert exc.value.reason.startswith("kernel interrupted during install")
+    assert "subprocess.py" not in exc.value.reason
+    assert any("install.log" in h for h in exc.value.hints)
+
+
+def test_an_interrupted_launch_cell_leaves_the_job_to_poll(tmp_path):
+    rt = MagicMock()
+    rt.execute_code.return_value = _INTERRUPTED
+    orch = _orch(tmp_path, runtime=rt)
+    orch.session_state = SimpleNamespace(url="https://u", token="t")
+
+    assert orch.launch("/content/jobs/unit-job/src") is None
+    assert orch.env.workload is Workload.RUNNING

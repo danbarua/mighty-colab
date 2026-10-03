@@ -120,10 +120,18 @@ _KERNEL_TRANSPORT_MESSAGES = (
 )
 
 
+class KernelInterrupted(Exception):
+    """The running cell was interrupted (KeyboardInterrupt): the kernel was
+    interrupted, restarted or shut down while the call ran. Jupyter
+    interrupts a busy kernel before a shutdown or restart, so the call
+    returns an error output instead of raising."""
+
+
 def _kernel_transport_failure(error: BaseException) -> bool:
     """Whether a kernel execute call failed in transport (connection lost,
-    reply timeout, websocket closed) rather than in the code it ran."""
-    if isinstance(error, OSError):  # includes TimeoutError, ConnectionError
+    reply timeout, websocket closed, cell interrupted) rather than in the
+    code it ran."""
+    if isinstance(error, (OSError, KernelInterrupted)):  # OSError includes TimeoutError
         return True
     try:
         import requests
@@ -176,7 +184,12 @@ class KernelCallError(PhaseError):
 
     def __init__(self, phase: Phase, error: BaseException, hints=None):
         self.transport = _kernel_transport_failure(error)
-        what = "kernel connection failed" if self.transport else "kernel call failed"
+        if isinstance(error, KernelInterrupted):
+            what = "kernel interrupted"
+        elif self.transport:
+            what = "kernel connection failed"
+        else:
+            what = "kernel call failed"
         super().__init__(
             phase,
             f"{what} during {phase.value}: {describe_error(error)}",
@@ -496,11 +509,26 @@ class Orchestrator:
     ):
         runtime = self._runtime_handle()
         try:
-            return runtime.execute_code(code, timeout=timeout)
+            outputs = runtime.execute_code(code, timeout=timeout)
         except Exception as error:  # noqa: BLE001 - classified per phase
             raise KernelCallError(phase, error, hints) from error
         finally:
             self._sync_runtime_identity()
+        if any(
+            isinstance(o, dict)
+            and o.get("output_type") == "error"
+            and o.get("ename") == "KeyboardInterrupt"
+            for o in outputs or []
+        ):
+            raise KernelCallError(
+                phase,
+                KernelInterrupted(
+                    "the cell was interrupted (KeyboardInterrupt): the kernel was "
+                    "interrupted, restarted or shut down while it ran"
+                ),
+                hints,
+            )
+        return outputs
 
     def _close_runtime(self) -> None:
         runtime, self._runtime = self._runtime, None
@@ -531,10 +559,16 @@ class Orchestrator:
         if raw is None:
             # The kernel code itself failed (a full disk, a broken VM),
             # before any installer reported: not the user's pins.
+            errors = [
+                f"{o.get('ename')}: {o.get('evalue')}"
+                for o in outputs or []
+                if isinstance(o, dict) and o.get("output_type") == "error"
+            ]
+            detail = "; ".join(errors) if errors else _tail(text, phase="install")
             raise PhaseError(
                 Phase.INSTALL,
                 "the install step failed on the VM before an installer reported: "
-                f"{_tail(redact_credentials(text), phase='install')}",
+                f"{redact_credentials(detail)}",
                 RetryClass.DO_NOT_RETRY,
                 [INSTALL_LOG_HINT],
             )
