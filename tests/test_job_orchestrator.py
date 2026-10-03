@@ -1607,6 +1607,7 @@ def test_release_assignment_outcomes():
     assert release_assignment(client, "m-s-abc") == (Cleanup.RELEASED, None)
 
     client.unassign.side_effect = _colab_error(404)
+    client.list_assignments.return_value = []
     assert release_assignment(client, "m-s-abc") == (Cleanup.ALREADY_ABSENT, None)
 
     client.unassign.side_effect = _colab_error(500, '{"error": "backend unavailable"}')
@@ -1792,9 +1793,12 @@ def test_poll_rereads_the_result_before_declaring_the_runner_dead(tmp_path):
     assert orch.env.workload is Workload.SUCCEEDED
 
 
-def test_poll_classifies_a_runner_that_never_started(tmp_path):
+def test_poll_classifies_a_runner_that_never_started(tmp_path, monkeypatch):
     import datetime as dt
 
+    from colab_cli.job import orchestrator as orchestrator_module
+
+    monkeypatch.setattr(orchestrator_module, "LAUNCH_ABSENCE_CONFIRM_SECONDS", 0.0)
     orch = _orch(tmp_path)
     orch.env.started_at = (
         dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=600)
@@ -1834,3 +1838,64 @@ def test_poll_finishes_offload_when_the_assignment_is_gone(tmp_path):
 
     assert orch.env.workload is Workload.UNKNOWN
     assert orch.env.offload is Offload.SKIPPED
+
+
+
+def test_a_404_unassign_counts_as_absent_only_when_the_listing_agrees():
+    """`jobs prune` deletes already_absent records. A 404 that does not
+    mean the VM is gone must not delete the only handle to it."""
+    from colab_cli.job.orchestrator import release_assignment
+
+    client = MagicMock()
+    client.unassign.side_effect = _colab_error(404)
+
+    client.list_assignments.return_value = [SimpleNamespace(endpoint="m-s-abc")]
+    cleanup, detail = release_assignment(client, "m-s-abc")
+    assert cleanup is Cleanup.FAILED
+    assert "still listed" in detail
+    assert "HTTP 404" in detail
+
+    client.list_assignments.side_effect = RuntimeError("listing unavailable")
+    cleanup, detail = release_assignment(client, "m-s-abc")
+    assert cleanup is Cleanup.FAILED
+    assert "listing unavailable" in detail
+    assert "HTTP 404" in detail
+
+
+def test_poll_never_declares_never_started_once_the_runner_was_seen(tmp_path, monkeypatch):
+    """Near the proxy-token boundary a read of an existing file can return
+    NOT_FOUND. Once the runner's records have been read, later absence is
+    a transport question, not a verdict."""
+    import datetime as dt
+
+    from colab_cli.job import orchestrator as orchestrator_module
+
+    monkeypatch.setattr(orchestrator_module, "LAUNCH_ABSENCE_CONFIRM_SECONDS", 0.0)
+    orch = _orch(tmp_path)
+    orch.env.started_at = (
+        dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=3600)
+    ).isoformat()
+    transport = _poll_transport(
+        {"watchdog.json": [{"runner_alive": True, "elapsed": 3590}, None]}
+    )
+
+    orch.poll(transport, deadline=time.time() + 1, interval=0)
+
+    assert orch.env.workload is not Workload.UNKNOWN
+    assert orch.env.supervisor is Supervisor.INTERRUPTED
+
+
+def test_poll_needs_launch_json_absent_across_a_token_refresh_window(tmp_path):
+    """One poll's NOT_FOUND can be an expired token the transport has not
+    refreshed yet; absence must persist past its 404 refresh interval."""
+    import datetime as dt
+
+    orch = _orch(tmp_path)
+    orch.env.started_at = (
+        dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=600)
+    ).isoformat()
+    transport = _poll_transport({})
+
+    orch.poll(transport, deadline=time.time() + 1, interval=0)
+
+    assert orch.env.supervisor is Supervisor.INTERRUPTED

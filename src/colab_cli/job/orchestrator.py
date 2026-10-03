@@ -84,6 +84,10 @@ VM_RECORD_COPY_BUDGET_SECONDS = 120.0
 # launch.json is still absent this long after the launch RPC returned never
 # started (an argument error, an import error in the runtime payload).
 LAUNCH_RECORD_GRACE_SECONDS = 120.0
+# One NOT_FOUND can be an expired proxy token: JobTransport refreshes the
+# token on a 404 at most once per minute. launch.json must stay absent for
+# longer than that before the runner is declared never started.
+LAUNCH_ABSENCE_CONFIRM_SECONDS = 90.0
 
 # The launch RPC must not inherit the 10s default: `execute_code`'s timeout
 # is a wall-clock budget, and a cold import of the runtime package on a
@@ -172,6 +176,10 @@ class Orchestrator:
         self._job_transport = None
 
         self._secret_channel_prepared = False
+        # poll(): whether the runner's own records have ever been read, and
+        # since when launch.json has been continuously absent.
+        self._runner_seen = False
+        self._launch_absent_since: Optional[float] = None
 
     # -- envelope bookkeeping -------------------------------------------
 
@@ -774,6 +782,7 @@ class Orchestrator:
                 self.env.reason = None
                 wd, wd_status = transport.read_json(f"{self.remote_dir}/watchdog.json")
                 if wd_status.name == "OK" and wd:
+                    self._runner_seen = True
                     self.env.hints = [
                         f"t={wd.get('elapsed')}s "
                         f"remaining={wd.get('remaining')}s "
@@ -792,7 +801,9 @@ class Orchestrator:
                             transport,
                         )
                         return
-                elif wd_status.name == "NOT_FOUND":
+                elif wd_status.name == "NOT_FOUND" and not self._runner_seen:
+                    # Only a runner never observed can be "never started";
+                    # once seen, a later NOT_FOUND is a transport question.
                     since_launch = self._seconds_since_launch()
                     if (
                         since_launch is not None
@@ -801,7 +812,18 @@ class Orchestrator:
                         _launch, launch_status = transport.read_json(
                             f"{self.remote_dir}/launch.json"
                         )
-                        if launch_status.name == "NOT_FOUND":
+                        if launch_status.name == "OK":
+                            self._runner_seen = True
+                            self._launch_absent_since = None
+                        elif self._launch_absent_since is None:
+                            if launch_status.name == "NOT_FOUND":
+                                self._launch_absent_since = time.monotonic()
+                        if (
+                            launch_status.name == "NOT_FOUND"
+                            and self._launch_absent_since is not None
+                            and time.monotonic() - self._launch_absent_since
+                            >= LAUNCH_ABSENCE_CONFIRM_SECONDS
+                        ):
                             if self._absorb_late_result(transport):
                                 return
                             self._finish_without_result(
@@ -1165,7 +1187,26 @@ def release_assignment(client, endpoint: str) -> Tuple[Cleanup, Optional[str]]:
     except Exception as error:  # noqa: BLE001 - every caller records the outcome
         status = get_status_code(error)
         if status == 404:
-            return Cleanup.ALREADY_ABSENT, None
+            # A 404 can come from a changed control-plane path as well as
+            # from a VM that is gone, and already_absent records get pruned.
+            # Only the assignment listing confirms the VM is gone.
+            try:
+                listed = any(
+                    _listed_endpoint(assignment) == endpoint
+                    for assignment in client.list_assignments()
+                )
+            except Exception as listing_error:  # noqa: BLE001
+                return Cleanup.FAILED, (
+                    f"HTTP 404 from unassign ({describe_error(error)}), and the "
+                    f"assignment listing that would confirm it failed "
+                    f"({describe_error(listing_error)})"
+                )
+            if not listed:
+                return Cleanup.ALREADY_ABSENT, None
+            return Cleanup.FAILED, (
+                f"HTTP 404 from unassign, but {endpoint} is still listed; "
+                f"{describe_error(error)}"
+            )
         detail = describe_error(error)
         if status is not None:
             detail = f"HTTP {status}; {detail}"
@@ -1173,6 +1214,12 @@ def release_assignment(client, endpoint: str) -> Tuple[Cleanup, Optional[str]]:
         if body:
             detail += f"; body: {redact_queries(body)}"
         return Cleanup.FAILED, detail
+
+
+def _listed_endpoint(assignment) -> Optional[str]:
+    if isinstance(assignment, dict):
+        return assignment.get("endpoint")
+    return getattr(assignment, "endpoint", None)
 
 
 def copy_vm_records(
