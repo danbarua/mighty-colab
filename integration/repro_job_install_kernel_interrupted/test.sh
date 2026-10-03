@@ -13,13 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# The kernel connection is lost while dependencies install: the busy
-# launch kernel is shut down through the VM's Jupyter API while uv
-# downloads a large pin, which closes the kernel's websocket. This is the failure seen in a real run, where the websocket dropped
-# 41 s into install and the job was reported as an internal supervisor
-# failure with do_not_retry. `job apply` must report a lost kernel
-# connection during install as retry_same, keep install.log, and release
-# the VM.
+# The launch kernel is shut down while dependencies install. Jupyter
+# interrupts a busy kernel before shutting it down, so the install cell
+# ends with a KeyboardInterrupt error output. `job apply` must report that
+# as "kernel interrupted during install" with retry_same, keep install.log,
+# and release the VM.
+#
+# This covers an interrupted cell, not a dropped websocket: a websocket
+# drop (RuntimeError "Connection was lost.") has no on-demand trigger and
+# is covered by unit tests only.
 #
 # The kernel's id is not in the session record until the first execute
 # call returns, so `restart-kernel -s` cannot reach it during install; the
@@ -140,7 +142,7 @@ job = envelope["job"]
 print(f"apply returned {os.environ['ELAPSED']}s after the kernel shutdown: {job['reason']}")
 assert os.environ["APPLY_RC"] == "1", envelope
 assert job["retry_class"] == "retry_same", job
-assert "during install" in job["reason"], job
+assert job["reason"].startswith("kernel interrupted during install"), job
 assert job["cleanup"] == "released", job
 log = Path(os.environ["JOB_DIR"], "install.log").read_text()
 assert "=== mighty-colab install attempt " in log, log[:2000]
@@ -155,4 +157,4 @@ if mc sessions | grep -q "$ENDPOINT"; then
     exit 1
 fi
 
-echo "[SUCCESS] a lost kernel connection during install was retry_same, with install.log kept and the VM released"
+echo "[SUCCESS] a kernel interrupted during install was retry_same, with install.log kept and the VM released"

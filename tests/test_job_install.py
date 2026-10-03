@@ -383,3 +383,18 @@ def test_a_pip_build_failure_reason_names_the_builds_own_error(tmp_path):
     assert "mc_build_fails: build failed on purpose" in exc.value.reason
     pip_lines = orch.env.install_attempts[1].key_lines
     assert "mc_build_fails: build failed on purpose" in pip_lines
+
+
+def test_envelope_file_omits_install_attempts_when_there_are_none(tmp_path):
+    """Older CLIs read envelope.json from disk with extra fields forbidden.
+    A job whose install succeeded on the first try must stay readable."""
+    from colab_cli.job.models import InstallAttempt, JobEnvelope
+    from colab_cli.job.store import JobStore
+
+    store = JobStore(tmp_path / "jobs")
+    store.write_envelope(JobEnvelope(job_id="first-try"))
+    assert "install_attempts" not in (store.job_dir("first-try") / "envelope.json").read_text()
+
+    attempt = InstallAttempt(installer="uv", version="uv 0.12.15", command=["uv"], seconds=1.0, exit_code=1, failure="resolution")
+    store.write_envelope(JobEnvelope(job_id="failed", install_attempts=[attempt]))
+    assert store.read_envelope("failed").install_attempts == [attempt]

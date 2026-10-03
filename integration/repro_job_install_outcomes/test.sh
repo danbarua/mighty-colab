@@ -119,6 +119,16 @@ assert [a["installer"] for a in attempts] == ["uv", "pip"], attempts
 assert [a["failure"] for a in attempts] == ["resolution", "resolution"], attempts
 assert all(a["key_lines"] for a in attempts), attempts
 assert log.count("=== mighty-colab install result ") == 2, log[-2000:]
+# The classifier is built from tests/fixtures/installer_failures.json. When
+# Colab ships a different uv or pip, its output may change: re-capture.
+fixture = json.loads(Path("tests/fixtures/installer_failures.json").read_text())
+for attempt in attempts:
+    live = " ".join(attempt["version"].split()[:2])
+    captured = " ".join(fixture[attempt["installer"] + "_version"].split()[:2])
+    assert live == captured, (
+        f"Colab now ships {live}; the fixtures were captured with {captured}. "
+        "Re-run integration/capture_installer_failures/capture.sh and the install tests."
+    )
 print("resolution:", job["reason"][:300])
 '
 
