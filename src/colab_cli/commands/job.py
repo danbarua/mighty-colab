@@ -28,6 +28,7 @@ missing.
 import datetime
 import json
 import logging
+import math
 import os
 import subprocess
 import sys
@@ -56,7 +57,12 @@ from colab_cli.job.models import (
     Supervisor,
     Workload,
 )
-from colab_cli.job.orchestrator import Orchestrator, PhaseError, stop_session_keep_alive
+from colab_cli.job.orchestrator import (
+    Orchestrator,
+    PhaseError,
+    copy_vm_records,
+    stop_session_keep_alive,
+)
 from colab_cli.job.runtime_payload import ident
 from colab_cli.job.spec_io import fetch_control_result
 from colab_cli.job.store import (
@@ -792,7 +798,73 @@ def _read_off_vm_result(store: JobStore, job_id: str):
         return None
 
 
-def _force_release_unconfirmed_secret(env, state, store, action: str) -> None:
+# `job destroy` on a running job waits this long, by default, for the
+# runner to act on the cancel intent: stop the workload, upload artifacts
+# and write result.json.
+DESTROY_WAIT_SECONDS = 300
+RUNNER_RESULT_POLL_SECONDS = 5
+
+
+def _supervisor_alive(store, job_id: str) -> bool:
+    """Whether the `job apply` process that owns this job is still running.
+
+    A PID alone is not identity: after reuse, an unrelated process could be
+    mistaken for the supervisor and a credential-bearing VM left alive.
+    """
+    identity = store.supervisor_identity(job_id)
+    return bool(
+        identity
+        and ident.alive(identity["pid"], identity["starttime"], identity["boot_id"])
+    )
+
+
+def _await_supervisor_cleanup(store, job_id: str, wait: int):
+    """Poll the local envelope while a live `job apply` acts on the cancel
+    intent. Returns the envelope once its cleanup is terminal or the
+    supervisor has exited, or None when `wait` seconds pass first."""
+    polls = math.ceil(wait / RUNNER_RESULT_POLL_SECONDS) if wait > 0 else 0
+    for _ in range(polls):
+        time.sleep(RUNNER_RESULT_POLL_SECONDS)
+        current = store.read_envelope(job_id)
+        if current is not None and current.cleanup.terminal:
+            return current
+        if not _supervisor_alive(store, job_id):
+            return current
+    return None
+
+
+def _copy_before_release(env, transport, store) -> None:
+    """Copy the VM's records into the local job directory, then the
+    caller releases the VM. Nothing to copy without a reachable VM."""
+    if transport is None or not env.endpoint:
+        return
+    env.hints.append(copy_vm_records(transport, store, env.job_id))
+
+
+def _await_runner_result(transport, job_id: str, wait: int):
+    """Poll for the runner's result.json for up to `wait` seconds.
+
+    Returns the result, or None when the wait runs out or the runner can
+    no longer write one (dead, never started, assignment gone).
+    """
+    polls = math.ceil(wait / RUNNER_RESULT_POLL_SECONDS) if wait > 0 else 0
+    for _ in range(polls):
+        time.sleep(RUNNER_RESULT_POLL_SECONDS)
+        try:
+            kind, payload = _observe_remote(transport, job_id)
+        except Exception:  # noqa: BLE001 - waiting must not block teardown
+            return None
+        if kind == "result":
+            return payload
+        if kind in {"session_lost", "runner_dead", "never_started"}:
+            return None
+    return None
+
+
+def _force_release_unconfirmed_secret(
+    env, state, store, action: str, transport=None
+) -> None:
+    _copy_before_release(env, transport, store)
     if env.endpoint:
         try:
             state.client.unassign(env.endpoint)
@@ -937,7 +1009,8 @@ def _finalize_hints(env) -> None:
     env.hints = deduped
 
 
-def _release_orphaned_job(env, session, state, store) -> None:
+def _release_orphaned_job(env, session, state, store, transport) -> None:
+    _copy_before_release(env, transport, store)
     stop_session_keep_alive(session)
     if env.endpoint:
         try:
@@ -1028,15 +1101,7 @@ def status(
         )
         raise typer.Exit(1)
 
-    # A PID alone is not identity: after reuse, status could mistake an unrelated
-    # process for the supervisor and leave a credential-bearing VM alive.
-    identity = store.supervisor_identity(job_id)
-    supervisor_alive = bool(
-        identity
-        and ident.alive(
-            identity["pid"], identity["starttime"], identity["boot_id"]
-        )
-    )
+    supervisor_alive = _supervisor_alive(store, job_id)
     if env.supervisor is Supervisor.RUNNING and not supervisor_alive:
         env.supervisor = Supervisor.INTERRUPTED
         env.reason = "the supervisor process that started this job is gone"
@@ -1060,10 +1125,12 @@ def status(
             transport = JobTransport(session, state.client, state.store)
             if must_scrub and not _scrub_transfer_secret(transport, job_id):
                 env = _recover_off_vm_result(env, store, job_id) or env
-                _force_release_unconfirmed_secret(env, state, store, "status")
+                _force_release_unconfirmed_secret(
+                    env, state, store, "status", transport
+                )
             kind = None
             if orphaned and env.workload.terminal:
-                _release_orphaned_job(env, session, state, store)
+                _release_orphaned_job(env, session, state, store, transport)
                 _emit(env, "status")
                 return
             if not env.workload.terminal:
@@ -1132,7 +1199,7 @@ def status(
                         break
                     time.sleep(interval)
             if orphaned and env.workload.terminal:
-                _release_orphaned_job(env, session, state, store)
+                _release_orphaned_job(env, session, state, store, transport)
             else:
                 store.write_envelope(env)
 
@@ -1153,8 +1220,24 @@ def destroy(
         bool,
         typer.Option("--cancel-only", help="Signal the workload but keep the VM"),
     ] = False,
+    wait: Annotated[
+        int,
+        typer.Option(
+            "--wait",
+            min=0,
+            help=(
+                "Seconds to wait, after signalling a running job, for the runner "
+                "to stop it, upload artifacts and write result.json before the "
+                "VM is released. 0 releases at once."
+            ),
+        ),
+    ] = DESTROY_WAIT_SECONDS,
 ):
-    """Unconditional teardown. Safe to run twice; exits 0 if already gone."""
+    """Unconditional teardown. Safe to run twice; exits 0 if already gone.
+
+    Before release, the job's records on the VM (runner.log, install.log,
+    result.json and the other runner files) are copied into the local job
+    directory."""
     from colab_cli.common import state
     from colab_cli.job.transport import JobTransport
 
@@ -1198,6 +1281,7 @@ def destroy(
         transport, job_id
     )
     if cancel_only and not secret_removed:
+        _copy_before_release(env, transport, store)
         try:
             stop_session_keep_alive(session)
             state.client.unassign(env.endpoint)
@@ -1256,6 +1340,43 @@ def destroy(
             raise typer.Exit(1)
         return
 
+    if (
+        not env.workload.terminal
+        and transport is not None
+        and intent_status is not None
+        and intent_status.name == "OK"
+        and wait > 0
+    ):
+        if _supervisor_alive(store, job_id):
+            # A live `job apply` owns the release: it absorbs the runner's
+            # result, copies the records and unassigns. Releasing here as
+            # well would race it and overwrite its envelope.
+            typer.echo(
+                f"[colab] Waiting up to {wait}s for the running `job apply` to "
+                "stop the job and release the VM.",
+                err=True,
+            )
+            current = _await_supervisor_cleanup(store, job_id, wait)
+            if current is not None and current.cleanup in (
+                Cleanup.RELEASED,
+                Cleanup.ALREADY_ABSENT,
+            ):
+                _emit(current, "destroy", exit_code=0)
+                return
+            # Left up, failed, or still running: release from the latest
+            # record rather than the one read at the start of this command.
+            env = store.read_envelope(job_id) or env
+        else:
+            typer.echo(
+                f"[colab] Waiting up to {wait}s for the runner to stop the job "
+                "and write its result before release.",
+                err=True,
+            )
+            result = _await_runner_result(transport, job_id, wait)
+            if result is not None:
+                _absorb_remote_result(env, store, job_id, result)
+                env.supervisor = Supervisor.FINISHED
+    _copy_before_release(env, transport, store)
     stop_session_keep_alive(session)
     if env.endpoint:
         try:

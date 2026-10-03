@@ -60,6 +60,25 @@ _logger = logging.getLogger(__name__)
 # `destroy` has exactly one thing to remove and `plan` has exactly one
 # prefix to validate `dest` paths against.
 REMOTE_ROOT = "/content/jobs"
+INSTALL_LOG_FILE = "install.log"
+
+# Records in the VM's job directory that explain a run, copied into the
+# local job directory before every release. Never anything under
+# `mighty_runtime/`, which holds the transfer credential handoff.
+VM_RECORD_FILES = (
+    RUNNER_LOG_FILE,
+    INSTALL_LOG_FILE,
+    "result.json",
+    "exception.json",
+    "watchdog.json",
+    "launch.json",
+    "cancel.json",
+    "offload.manifest.json",
+    "stage.manifest.json",
+)
+# A reachable VM serves these in seconds. The budget bounds how long an
+# unreachable one can delay a release.
+VM_RECORD_COPY_BUDGET_SECONDS = 120.0
 
 # The launch RPC must not inherit the 10s default: `execute_code`'s timeout
 # is a wall-clock budget, and a cold import of the runtime package on a
@@ -173,12 +192,10 @@ class Orchestrator:
     def _pull_runner_log(self, transport) -> None:
         """Best-effort: copy the VM's runner.log to local disk.
 
-        Called every healthy poll tick, and once more from `cleanup()`
-        immediately before the VM is released -- the run's last output,
-        written between the final poll tick and process exit, would
-        otherwise never make it off the VM. Any failure here (including a
-        transport double that doesn't implement `read_text`) must never
-        break the actual verdict poll or block teardown.
+        Called every healthy poll tick. `cleanup()` copies runner.log again,
+        with the other VM records, through `copy_vm_records` immediately
+        before release. Any failure here (including a transport double that
+        doesn't implement `read_text`) must never break the verdict poll.
         """
         try:
             log_text, log_status = transport.read_text(
@@ -386,14 +403,21 @@ class Orchestrator:
             return
         self._set_phase(Phase.INSTALL)
         pkgs = ", ".join(repr(d) for d in self.spec.deps)
+        # pip writes to a file in the job directory as well as answering
+        # through the kernel: if the kernel connection drops mid-install,
+        # the reply is lost but the file is still copied off the VM before
+        # release.
         code = (
-            "import subprocess, sys\n"
+            "import os, subprocess, sys\n"
+            f"log_path = {self.remote_dir + '/' + INSTALL_LOG_FILE!r}\n"
+            "os.makedirs(os.path.dirname(log_path), exist_ok=True)\n"
             f"pkgs = [{pkgs}]\n"
-            "r = subprocess.run([sys.executable, '-m', 'pip', 'install', '-v', "
+            "with open(log_path, 'w') as log:\n"
+            "    r = subprocess.run([sys.executable, '-m', 'pip', 'install', '-v', "
             "'--upgrade-strategy', 'only-if-needed', *pkgs],"
-            " capture_output=True, text=True)\n"
-            "print(r.stdout[-20000:])\n"
-            "print(r.stderr[-20000:])\n"
+            " stdout=log, stderr=subprocess.STDOUT, text=True)\n"
+            "with open(log_path, errors='replace') as log:\n"
+            "    print(log.read()[-40000:])\n"
             "print('PIP_RC=%d' % r.returncode)\n"
         )
         outputs = self._execute_code(code, timeout=INSTALL_TIMEOUT)
@@ -950,10 +974,16 @@ class Orchestrator:
                 )
             self._persist()
             return
-        # Last chance: the run's final output can land after the last
-        # poll tick that still returned "not done yet" -- pull once more
-        # before the VM that holds it disappears for good.
-        self._pull_runner_log(self.job_transport())
+        # Last chance: whatever explains this run is on the VM, and the VM
+        # is about to go.
+        try:
+            transport = self.job_transport()
+        except Exception as e:  # noqa: BLE001 - teardown must not raise
+            self.env.hints.append(
+                f"VM records not copied before release ({type(e).__name__})"
+            )
+        else:
+            self.env.hints.append(copy_vm_records(transport, self.store, self.job_id))
         self._stop_keep_alive()
         try:
             self.client.unassign(self.env.endpoint)
@@ -1023,6 +1053,60 @@ def _extract_tagged(text: str, tag: str, raw: bool = False):
             except json.JSONDecodeError:
                 return None
     return None
+
+
+def copy_vm_records(
+    transport,
+    store: JobStore,
+    job_id: str,
+    *,
+    budget: float = VM_RECORD_COPY_BUDGET_SECONDS,
+) -> str:
+    """Copy the job's `VM_RECORD_FILES` into its local job directory.
+
+    Called before every release of a job VM, whatever asked for it: once
+    the VM is gone these files are the only account of what happened.
+    Files the VM does not have are skipped. Copying stops when the session
+    is lost, and no new read starts after `budget` seconds, so an
+    unreachable VM cannot hold up its own release for long; a read already
+    in progress runs to the transport's own timeout. Never raises; returns an envelope hint that
+    names what was copied and where, or why copying stopped.
+    """
+    local_dir = store.job_dir(job_id)
+    copied: List[str] = []
+    unreadable: List[str] = []
+    stopped = None
+    deadline = time.monotonic() + budget
+    for name in VM_RECORD_FILES:
+        if time.monotonic() > deadline:
+            stopped = f"{budget:.0f}s budget spent"
+            break
+        try:
+            text, status = transport.read_text(f"{REMOTE_ROOT}/{job_id}/{name}")
+            status_name = getattr(status, "name", str(status))
+            if status_name == "NOT_FOUND":
+                continue
+            if status_name == "SESSION_LOST":
+                stopped = "session_lost"
+                break
+            if status_name != "OK" or text is None:
+                unreadable.append(name)
+                continue
+            local_dir.mkdir(parents=True, exist_ok=True)
+            (local_dir / name).write_text(text)
+            copied.append(name)
+        except Exception as e:  # noqa: BLE001 - must never block a release
+            stopped = type(e).__name__
+            break
+    hint = (
+        f"VM records copied before release to {local_dir}: "
+        f"{', '.join(copied) if copied else 'none'}"
+    )
+    if unreadable:
+        hint += f"; unreadable: {', '.join(unreadable)}"
+    if stopped is not None:
+        hint += f"; copying stopped ({stopped})"
+    return hint
 
 
 def _tail(text: str, n: int = 600, *, phase: str = "") -> str:

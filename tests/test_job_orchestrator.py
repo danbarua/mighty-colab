@@ -1326,3 +1326,179 @@ def test_stage_failure_without_item_detail_falls_back_to_generic_reason(tmp_path
     assert orch.env.workload is Workload.FAILED
     assert "declared input could not be fetched" in orch.env.reason
     assert orch.env.retry_class is RetryClass.FIX_HUMAN
+
+
+# --------------------------------------------------------------------------
+# Evidence survives release
+# --------------------------------------------------------------------------
+
+
+def test_absorbed_artifact_failure_keeps_its_cause(tmp_path):
+    spec = _spec(
+        artifacts=[ArtifactItem(path="/content/out/adapter.tar", url="https://x/a.tar")]
+    )
+    orch = _orch(tmp_path, spec=spec)
+    error = {
+        "exception": "HTTPStatusError",
+        "reason": "HTTP 413 Payload Too Large (upload cut short: BrokenPipeError)",
+        "http_status": 413,
+        "body": "<html>413</html>",
+    }
+    orch._absorb_result(
+        {
+            "workload": "succeeded",
+            "exit_code": 0,
+            "artifacts": [
+                {
+                    "path": "/content/out/adapter.tar",
+                    "url_id": "https://x/a.tar#abc123",
+                    "status": "failed",
+                    "bytes": 173199360,
+                    "error": error,
+                }
+            ],
+        }
+    )
+    orch._persist()
+
+    assert orch.env.offload is Offload.FAILED
+    stored = JobStore(tmp_path / "jobs").read_envelope("unit-job")
+    assert stored.artifacts[0].error.model_dump() == error
+
+
+class _VMFiles:
+    """Contents transport double: serves `files` by remote path and records
+    every read in `events`."""
+
+    def __init__(self, files, events, statuses=None):
+        self.files = files
+        self.events = events
+        self.statuses = statuses or {}
+
+    def read_text(self, path):
+        self.events.append(("read", path))
+        name = path.rsplit("/", 1)[-1]
+        if name in self.statuses:
+            return None, self.statuses[name]
+        if path in self.files:
+            return self.files[path], FakeStatus.OK
+        return None, FakeStatus.NOT_FOUND
+
+
+def test_copy_vm_records_copies_what_exists_and_names_it(tmp_path):
+    from colab_cli.job.orchestrator import copy_vm_records
+
+    remote = "/content/jobs/unit-job"
+    events = []
+    transport = _VMFiles(
+        {
+            f"{remote}/runner.log": "step 10/10\n",
+            f"{remote}/result.json": '{"workload": "failed"}',
+            f"{remote}/install.log": "Collecting torch\n",
+        },
+        events,
+    )
+    store = JobStore(tmp_path / "jobs")
+
+    hint = copy_vm_records(transport, store, "unit-job")
+
+    local = store.job_dir("unit-job")
+    assert (local / "runner.log").read_text() == "step 10/10\n"
+    assert (local / "result.json").read_text() == '{"workload": "failed"}'
+    assert (local / "install.log").read_text() == "Collecting torch\n"
+    assert not (local / "watchdog.json").exists()
+    assert str(local) in hint
+    for name in ("runner.log", "result.json", "install.log"):
+        assert name in hint
+    assert "watchdog.json" not in hint
+    assert all(".secrets" not in path for _kind, path in events)
+
+
+def test_copy_vm_records_stops_when_the_session_is_lost(tmp_path):
+    from colab_cli.job.orchestrator import copy_vm_records
+
+    events = []
+    transport = _VMFiles({}, events, statuses={"runner.log": FakeStatus.SESSION_LOST})
+
+    hint = copy_vm_records(transport, JobStore(tmp_path / "jobs"), "unit-job")
+
+    assert len(events) == 1
+    assert "session_lost" in hint
+
+
+def test_copy_vm_records_never_raises(tmp_path):
+    from colab_cli.job.orchestrator import copy_vm_records
+
+    transport = MagicMock()
+    transport.read_text.side_effect = RuntimeError("contents down")
+
+    hint = copy_vm_records(transport, JobStore(tmp_path / "jobs"), "unit-job")
+
+    assert "RuntimeError" in hint
+
+
+def test_cleanup_copies_vm_records_before_releasing_the_vm(tmp_path):
+    events = []
+    remote = "/content/jobs/unit-job"
+    transport = _VMFiles(
+        {
+            f"{remote}/runner.log": "Traceback ...\n",
+            f"{remote}/install.log": "pip output\n",
+            f"{remote}/watchdog.json": "{}",
+        },
+        events,
+    )
+    client = MagicMock()
+    client.unassign.side_effect = lambda endpoint: events.append(("unassign", endpoint))
+    orch = _orch(tmp_path, client=client, transport_factory=lambda _s: transport)
+    orch.env.endpoint = "m-s-abc"
+    orch.env.workload = Workload.FAILED
+
+    orch.cleanup()
+
+    assert events[-1] == ("unassign", "m-s-abc")
+    assert ("read", f"{remote}/install.log") in events
+    local = JobStore(tmp_path / "jobs").job_dir("unit-job")
+    assert (local / "install.log").read_text() == "pip output\n"
+    assert any("install.log" in hint and str(local) in hint for hint in orch.env.hints)
+
+
+def test_cleanup_does_not_copy_records_when_the_vm_is_left_up(tmp_path):
+    events = []
+    transport = _VMFiles({}, events)
+    orch = _orch(tmp_path, transport_factory=lambda _s: transport)
+    orch.env.endpoint = "m-s-abc"
+
+    orch.cleanup(force_leave_up=True)
+
+    assert events == []
+
+
+def test_install_writes_pip_output_to_a_file_on_the_vm(tmp_path, monkeypatch):
+    """A dropped kernel connection during install loses the kernel's reply.
+    The pip output must also be on VM disk, where the copy before release
+    can still reach it."""
+    import subprocess
+
+    from colab_cli.job import orchestrator as orchestrator_module
+
+    monkeypatch.setattr(orchestrator_module, "REMOTE_ROOT", str(tmp_path / "vm"))
+    rt = _runtime_returning("PIP_RC=0\n")
+    orch = _orch(tmp_path, spec=_spec(deps=["torch==2.4.1"]), runtime=rt)
+    orch.session_state = SimpleNamespace(url="https://u", token="t")
+    orch.install()
+    code = rt.execute_code.call_args.args[0]
+
+    def fake_pip(cmd, stdout=None, stderr=None, **_kw):
+        stdout.write("Collecting torch==2.4.1\n")
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(subprocess, "run", fake_pip)
+    printed = StringIO()
+    with redirect_stdout(printed):
+        exec(code, {})
+
+    install_log = tmp_path / "vm" / "unit-job" / "install.log"
+    assert install_log.read_text() == "Collecting torch==2.4.1\n"
+    assert "Collecting torch==2.4.1" in printed.getvalue()
+    assert "PIP_RC=0" in printed.getvalue()

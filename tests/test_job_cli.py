@@ -68,6 +68,13 @@ def isolated_job_store(tmp_path, mock_common_state, monkeypatch):
     return mock_common_state
 
 
+@pytest.fixture(autouse=True)
+def no_real_sleep(monkeypatch):
+    """`job destroy` sleeps between polls while it waits for a running
+    job's runner to finish. Tests that count sleeps patch this again."""
+    monkeypatch.setattr("colab_cli.commands.job.time.sleep", lambda _s: None)
+
+
 def _json_mode(state_mock):
     """`--json` is read from the patched singleton, not the CLI flag.
 
@@ -2473,3 +2480,293 @@ def test_prune_json_reports_removed_and_skipped(mock_common_state):
     assert payload["dry_run"] is False
     assert [r["job_id"] for r in payload["removed"]] == ["done-released"]
     assert [s["job_id"] for s in payload["skipped"]] == ["still-running"]
+
+# --------------------------------------------------------------------------
+# Every release copies the VM's records first
+# --------------------------------------------------------------------------
+
+
+class _RunningVM:
+    """Contents transport double for a job VM. `results` is consumed one
+    entry per result.json read; the last entry repeats."""
+
+    def __init__(self, events, results, files=None, launch=None, runner_alive=True):
+        from colab_cli.job.transport import ReadStatus
+
+        self.ok = ReadStatus.OK
+        self.not_found = ReadStatus.NOT_FOUND
+        self.events = events
+        self.results = list(results)
+        self.files = files or {}
+        self.launch = launch or {"pid": 7, "starttime": "1", "boot_id": "b"}
+        self.runner_alive = runner_alive
+
+    def read_json(self, path):
+        if path.endswith("/result.json"):
+            self.events.append("read result")
+            result = self.results.pop(0) if len(self.results) > 1 else self.results[0]
+            return (result, self.ok) if result else (None, self.not_found)
+        if path.endswith("/launch.json"):
+            return self.launch, self.ok
+        if path.endswith("/watchdog.json"):
+            return {"runner_alive": self.runner_alive}, self.ok
+        return None, self.not_found
+
+    def read_text(self, path):
+        name = path.rsplit("/", 1)[-1]
+        if name in self.files:
+            self.events.append(f"copy {name}")
+            return self.files[name], self.ok
+        return None, self.not_found
+
+    def write_json(self, path, _value):
+        self.events.append(f"write {path.rsplit('/', 1)[-1]}")
+        return self.ok
+
+    def remove(self, _path):
+        return self.ok
+
+
+def _use_vm(monkeypatch, mock_common_state, vm, events):
+    monkeypatch.setattr("colab_cli.job.transport.JobTransport", lambda *_args: vm)
+    mock_common_state.client.unassign.side_effect = lambda _endpoint: events.append(
+        "unassign"
+    )
+
+
+def test_destroy_waits_for_the_runner_then_copies_records_before_unassign(
+    monkeypatch, mock_common_state
+):
+    """Destroy on a running job writes the cancel intent. The runner then
+    stops the workload, uploads artifacts and writes result.json; releasing
+    the VM before that loses all three."""
+    store = _persist_running_job(mock_common_state)
+    events = []
+    terminal = {
+        "schema_version": "2",
+        "cli_version": "c",
+        "runtime_payload_version": "sha256:p",
+        "workload": "cancelled",
+        "cancel_intent": "cancelled",
+        "exit_code": None,
+        "signal": 15,
+    }
+    vm = _RunningVM(
+        events,
+        results=[None, None, None, terminal],
+        files={"runner.log": "step 3\n[runner] cancelled\n", "result.json": "{}"},
+    )
+    _use_vm(monkeypatch, mock_common_state, vm, events)
+    sleeps = []
+    monkeypatch.setattr("colab_cli.commands.job.time.sleep", sleeps.append)
+
+    result = runner.invoke(app, ["job", "destroy", "destroy-me"])
+
+    assert result.exit_code == 0, result.output
+    assert events.index("write cancel.json") < events.index("copy runner.log")
+    assert events.count("read result") == 4
+    assert events[-1] == "unassign"
+    assert events.index("copy runner.log") < events.index("unassign")
+    assert len(sleeps) == 3
+    env = store.read_envelope("destroy-me")
+    assert env.workload is Workload.CANCELLED
+    local = store.job_dir("destroy-me")
+    assert (local / "runner.log").read_text() == "step 3\n[runner] cancelled\n"
+    assert any("runner.log" in h and str(local) in h for h in env.hints)
+
+
+def test_destroy_stops_waiting_after_the_bound_and_still_copies_records(
+    monkeypatch, mock_common_state
+):
+    store = _persist_running_job(mock_common_state)
+    events = []
+    vm = _RunningVM(events, results=[None], files={"runner.log": "still going\n"})
+    _use_vm(monkeypatch, mock_common_state, vm, events)
+    sleeps = []
+    monkeypatch.setattr("colab_cli.commands.job.time.sleep", sleeps.append)
+
+    result = runner.invoke(app, ["job", "destroy", "destroy-me", "--wait", "12"])
+
+    assert result.exit_code == 0, result.output
+    assert sum(sleeps) >= 12
+    assert sum(sleeps) < 12 + max(sleeps)
+    assert events[-2:] == ["copy runner.log", "unassign"]
+    assert store.read_envelope("destroy-me").workload is Workload.UNKNOWN
+
+
+def test_destroy_stops_waiting_when_the_runner_is_dead(monkeypatch, mock_common_state):
+    _persist_running_job(mock_common_state)
+    events = []
+    vm = _RunningVM(events, results=[None], runner_alive=False)
+    _use_vm(monkeypatch, mock_common_state, vm, events)
+    sleeps = []
+    monkeypatch.setattr("colab_cli.commands.job.time.sleep", sleeps.append)
+
+    result = runner.invoke(app, ["job", "destroy", "destroy-me"])
+
+    assert result.exit_code == 0, result.output
+    assert len(sleeps) == 1
+    assert events[-1] == "unassign"
+
+
+def test_destroy_wait_zero_releases_without_polling(monkeypatch, mock_common_state):
+    _persist_running_job(mock_common_state)
+    events = []
+    vm = _RunningVM(events, results=[None], files={"runner.log": "x\n"})
+    _use_vm(monkeypatch, mock_common_state, vm, events)
+    sleeps = []
+    monkeypatch.setattr("colab_cli.commands.job.time.sleep", sleeps.append)
+
+    result = runner.invoke(app, ["job", "destroy", "destroy-me", "--wait", "0"])
+
+    assert result.exit_code == 0, result.output
+    assert sleeps == []
+    assert events.count("read result") == 1
+    assert events[-2:] == ["copy runner.log", "unassign"]
+
+
+def test_forced_release_copies_records_before_unassign(monkeypatch, mock_common_state):
+    """An unconfirmed credential deletion forces teardown even under
+    --cancel-only. The records are still copied first."""
+    from colab_cli.job.transport import ReadStatus
+
+    store = _persist_running_job(mock_common_state)
+    events = []
+    vm = _RunningVM(events, results=[None], files={"runner.log": "x\n"})
+    vm.remove = lambda _path: ReadStatus.DEGRADED
+    _use_vm(monkeypatch, mock_common_state, vm, events)
+
+    result = runner.invoke(app, ["job", "destroy", "destroy-me", "--cancel-only"])
+
+    assert result.exit_code == 1
+    assert events[-2:] == ["copy runner.log", "unassign"]
+    env = store.read_envelope("destroy-me")
+    assert any("runner.log" in h for h in env.hints)
+
+
+def test_status_orphan_release_copies_records_before_unassign(
+    monkeypatch, mock_common_state
+):
+    store = _persist_running_job(mock_common_state, job_id="poll-orphan")
+    events = []
+    vm = _RunningVM(
+        events,
+        results=[{"workload": "failed", "exit_code": 1}],
+        files={"runner.log": "Traceback\n", "exception.json": "{}"},
+    )
+    _use_vm(monkeypatch, mock_common_state, vm, events)
+
+    result = runner.invoke(app, ["job", "status", "poll-orphan", "--poll"])
+
+    assert result.exit_code == 0, result.output
+    assert events[-1] == "unassign"
+    assert "copy exception.json" in events
+    local = store.job_dir("poll-orphan")
+    assert (local / "exception.json").read_text() == "{}"
+
+
+def _live_supervisor(store, job_id):
+    from colab_cli.job.models import Supervisor
+    from colab_cli.job.runtime_payload import ident
+
+    env = store.read_envelope(job_id)
+    env.supervisor = Supervisor.RUNNING
+    store.write_envelope(env)
+    store.write_supervisor_identity(
+        job_id,
+        pid=os.getpid(),
+        starttime=ident.starttime(os.getpid()),
+        boot_id=ident.boot_id(),
+    )
+
+
+def _supervisor_finishes_on_sleep(store, job_id, n, sleeps, **fields):
+    """Fake clock: on the n-th sleep the `job apply` supervisor finishes,
+    writing its envelope with `fields` and clearing its identity."""
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) == n:
+            env = store.read_envelope(job_id)
+            for name, value in fields.items():
+                setattr(env, name, value)
+            store.write_envelope(env)
+            store.clear_supervisor_identity(job_id)
+
+    return sleep
+
+
+def test_destroy_lets_a_live_apply_supervisor_release_the_vm(
+    monkeypatch, mock_common_state
+):
+    """`job apply --async` then `job destroy`: the live supervisor sees the
+    runner's result, copies the records and releases. Destroy must not
+    unassign a second time or overwrite that envelope with its own copy."""
+    from colab_cli.job.models import Cleanup, Supervisor
+
+    store = _persist_running_job(mock_common_state)
+    _live_supervisor(store, "destroy-me")
+    events = []
+    vm = _RunningVM(events, results=[None], files={"runner.log": "x\n"})
+    _use_vm(monkeypatch, mock_common_state, vm, events)
+    sleeps = []
+    supervisor_hint = "VM records copied before release to /x: runner.log"
+    monkeypatch.setattr(
+        "colab_cli.commands.job.time.sleep",
+        _supervisor_finishes_on_sleep(
+            store,
+            "destroy-me",
+            2,
+            sleeps,
+            workload=Workload.CANCELLED,
+            cleanup=Cleanup.RELEASED,
+            supervisor=Supervisor.FINISHED,
+            hints=[supervisor_hint],
+        ),
+    )
+
+    result = runner.invoke(app, ["job", "destroy", "destroy-me"])
+
+    assert result.exit_code == 0, result.output
+    assert "unassign" not in events
+    assert not any(e.startswith("copy") for e in events)
+    assert len(sleeps) == 2
+    env = store.read_envelope("destroy-me")
+    assert env.workload is Workload.CANCELLED
+    assert env.cleanup is Cleanup.RELEASED
+    assert env.hints == [supervisor_hint]
+
+
+def test_destroy_releases_a_vm_the_apply_supervisor_left_up(
+    monkeypatch, mock_common_state
+):
+    from colab_cli.job.models import Cleanup, Supervisor
+
+    store = _persist_running_job(mock_common_state)
+    _live_supervisor(store, "destroy-me")
+    events = []
+    vm = _RunningVM(events, results=[None], files={"runner.log": "x\n"})
+    _use_vm(monkeypatch, mock_common_state, vm, events)
+    sleeps = []
+    monkeypatch.setattr(
+        "colab_cli.commands.job.time.sleep",
+        _supervisor_finishes_on_sleep(
+            store,
+            "destroy-me",
+            1,
+            sleeps,
+            workload=Workload.SUCCEEDED,
+            offload=Offload.FAILED,
+            cleanup=Cleanup.LEFT_UP,
+            supervisor=Supervisor.FINISHED,
+        ),
+    )
+
+    result = runner.invoke(app, ["job", "destroy", "destroy-me"])
+
+    assert result.exit_code == 0, result.output
+    assert events[-2:] == ["copy runner.log", "unassign"]
+    env = store.read_envelope("destroy-me")
+    assert env.workload is Workload.SUCCEEDED
+    assert env.offload is Offload.FAILED
+    assert env.cleanup is Cleanup.RELEASED
