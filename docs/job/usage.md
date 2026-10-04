@@ -168,7 +168,7 @@ When present, treat it as advice for the next action, not an automatic retry pro
 | `refresh_urls` | re-sign URLs and re-plan |
 | `do_not_retry` | do not retry unchanged |
 
-`apply` makes one attempt and never retries by itself. Planning rejects non-default `retry.when`, `max_attempts`, and `mode` values. Unexpected supervisor exceptions receive `do_not_retry`. A workload cancelled by `job destroy` or Ctrl-C, and a failed release after a successful workload, have no `retry_class`.
+`apply` makes one attempt and never retries by itself. Planning rejects non-default `retry.when`, `max_attempts`, and `mode` values. Unexpected supervisor exceptions receive `do_not_retry`. A workload cancelled by `job destroy`, and a failed release after a successful workload, have no `retry_class`.
 
 Some outcomes you will see:
 

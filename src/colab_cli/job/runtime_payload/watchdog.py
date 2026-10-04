@@ -15,10 +15,9 @@ import subprocess
 import sys
 import time
 
-from . import ident
+from . import GRACE_SECONDS, ident
 
 INTERVAL_SECONDS = 30
-GRACE_SECONDS = 5
 
 
 def _atomic_write_json(path, payload):

@@ -215,7 +215,7 @@ plan.json
 
 Apply's own restart uses an explicit 60-second timeout; any failure is `retry_same`, and the reason says whether it timed out or names the error. `verify` fails with `fix_code` when a declared dependency is not importable after the restart, and with `retry_different` when a GPU was granted but none is visible or the declared payloads exceed 80% of free disk.
 
-Apply tries one attempt. `RetryClass` is advice for the next caller action, not an automatic retry engine. Planning rejects non-default `retry.when`, `max_attempts`, and `mode` values. The classes are `fix_code`, `fix_human`, `retry_same`, `retry_different`, `refresh_urls`, and `do_not_retry`. Not every outcome has one: a workload cancelled by a person or a tool (`job destroy`, Ctrl-C after launch), and a failed release after a successful workload, leave `retry_class` null.
+Apply tries one attempt. `RetryClass` is advice for the next caller action, not an automatic retry engine. Planning rejects non-default `retry.when`, `max_attempts`, and `mode` values. The classes are `fix_code`, `fix_human`, `retry_same`, `retry_different`, `refresh_urls`, and `do_not_retry`. Not every outcome has one: a workload cancelled by `job destroy` (with or without `--cancel-only`), and a failed release after a successful workload, leave `retry_class` null.
 
 `colab_cli/job/verdict.py` turns the runner's result into `reason` and `retry_class`:
 
@@ -340,7 +340,7 @@ The unit suite covers model validation, plan diagnostics without reflected input
 
 The live repro scripts under `integration/` (see `integration/README.md`) cover launch-kernel restart (`repro_job_kernel_restart`), signed-URL redaction (`repro_job_signed_url_redaction`), job-owned keep-alive (`repro_job_keep_alive`), supervisor crash recovery (`repro_job_crash_recovery`), cancel-only (`repro_job_cancel_only`), a runner that never starts (`repro_job_never_started`), a VM lost mid-run (`repro_job_vm_gone`), a run past the token expiry (`repro_job_token_boundary`), install outcomes (`repro_job_install_outcomes`), and a kernel interrupted during install (`repro_job_install_kernel_interrupted`). `integration/capture_installer_failures` records the installer output the classifier is tested against. Live runs without a repro script are listed with their dates in `chronology.md`.
 
-These paths are covered by unit tests only: a websocket drop during install, an unassign that fails while the endpoint is still listed, and escaped-descendant handling (a Linux `/proc` test of the shipped payload; no live Colab escapee run is recorded). The early-413 recovery for bodies over Cloudflare's 100 MB limit is covered by loopback TLS tests, not a live upload.
+These paths are covered by unit tests only: a websocket drop during install (one during `verify` is recorded in the chronology: `retry_same`, VM released), an unassign that fails while the endpoint is still listed, and escaped-descendant handling (a Linux `/proc` test of the shipped payload; no live Colab escapee run is recorded). The early-413 recovery for bodies over Cloudflare's 100 MB limit is covered by loopback TLS tests, not a live upload.
 
 ## Known gaps
 

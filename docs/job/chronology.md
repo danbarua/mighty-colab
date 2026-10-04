@@ -9,6 +9,18 @@ request and `issue #N` an issue in `danbarua/mighty-colab`.
 The other documents in `docs/job/` describe the current system. This one
 records what changed and what each claim rests on.
 
+### 2026-10-04: Finding: a websocket drop during `verify`, seen live, is `retry_same` and releases the VM
+
+In a run of `repro_job_timeout_and_interrupt`, the kernel websocket dropped
+15 seconds after provisioning (the websocket client logged `'NoneType'
+object has no attribute 'sock' - goodbye`). `apply` recorded `failed_phase:
+verify`, `retry_class: retry_same` and the reason `kernel connection failed
+during verify: RuntimeError: Connection was lost.`, and released the VM.
+This is the first recorded occurrence of the transport-failure path that PR
+#76 covers with unit tests; there is still no on-demand trigger for it.
+
+Evidence: a recorded live run on 2026-10-04.
+
 ### 2026-10-04: Every runner-side failure says what happened, and its retry class follows from it
 
 A `wall_clock` kill reported `signal 15` with `reason: null`: nothing read the

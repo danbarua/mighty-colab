@@ -36,7 +36,7 @@ from colab_cli.job.models import (
     RetryClass,
     TransferError,
 )
-from colab_cli.job.runtime_payload.runner import GRACE_SECONDS
+from colab_cli.job.runtime_payload import GRACE_SECONDS
 
 Method = Literal["GET", "PUT"]
 Outcome = Tuple[Optional[str], Optional[RetryClass]]

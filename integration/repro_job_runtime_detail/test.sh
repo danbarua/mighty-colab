@@ -18,8 +18,9 @@
 #   1. wall_clock passes: "wall_clock budget of 60s reached", fix_code;
 #   2. the workload allocates until the kernel's OOM killer takes it:
 #      SIGKILL with the kernel's "Killed process" line, fix_code;
-#   3. one input stages, the next is a 404: both inputs recorded, the
-#      response body kept, fix_code, the consumer never runs;
+#   3. one input stages, the next is a 404 on a URL with a signed-looking
+#      query: both inputs recorded, the response body kept, fix_code, the
+#      consumer never runs, and the query appears in no local record;
 #   4. an input whose sha256 is wrong: planned and received digests,
 #      fix_code;
 #   5. an uncaught exception from a library: its module-qualified type
@@ -36,7 +37,8 @@ JOB_ID=""
 DATA_URL="https://raw.githubusercontent.com/danbarua/mighty-colab/011b7978bab3d9356bae8a10f8253411c95ad8dd/LICENSE"
 DATA_SHA256="cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
 DATA_BYTES=11358
-MISSING_URL="https://raw.githubusercontent.com/danbarua/mighty-colab/011b7978bab3d9356bae8a10f8253411c95ad8dd/no-such-file"
+SENTINEL="RUNTIME_DETAIL_SIGNED_QUERY_SENTINEL_$$"
+MISSING_URL="https://raw.githubusercontent.com/danbarua/mighty-colab/011b7978bab3d9356bae8a10f8253411c95ad8dd/no-such-file?X-Goog-Signature=$SENTINEL"
 
 mc() {
     uv run mighty-colab --auth=adc --config "$SESSION_FILE" "$@"
@@ -141,6 +143,7 @@ print("oom:", env["reason"])
 # 3. a 404 after a staged input
 run stage-404 sleeper.py '["10"]' 'budgets: {wall_clock: 600}' \
     "data: [{url: \"$DATA_URL\", dest: inputs/LICENSE, sha256: $DATA_SHA256, size_bytes: $DATA_BYTES}, {url: \"$MISSING_URL\", dest: inputs/missing.bin, size_bytes: 1}]"
+STAGE_JOB="$JOB_ID"
 check '
 assert env["workload"] == "failed", env
 assert env["failed_phase"] == "stage", env
@@ -153,6 +156,17 @@ assert failed["error"]["body"], failed
 assert env["reason"].startswith("staging failed at inputs/missing.bin ("), env
 assert "tick" not in log, "the consumer ran"
 print("stage 404:", env["reason"], "| body:", failed["error"]["body"][:60])
+'
+# The secrets sidecar holds the full URL by design; nothing else may.
+JOB_ROOT="$TMP_DIR/jobs/$STAGE_JOB" SENTINEL="$SENTINEL" APPLY_OUT="$TMP_DIR/stage-404.json" uv run python -c '
+import os
+from pathlib import Path
+sentinel = os.environ["SENTINEL"].encode()
+files = [p for p in Path(os.environ["JOB_ROOT"]).rglob("*") if p.is_file()]
+files.append(Path(os.environ["APPLY_OUT"]))
+leaks = [str(p) for p in files if not p.name.endswith(".mighty-colab-secrets.json") and sentinel in p.read_bytes()]
+assert not leaks, leaks
+print("stage 404: signed query in no local record")
 '
 
 # 4. a wrong sha256

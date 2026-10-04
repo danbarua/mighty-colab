@@ -23,7 +23,7 @@ from urllib import error as urllib_error
 from urllib import request
 from urllib.parse import urlsplit
 
-from . import RESULT_SCHEMA_VERSION, RUNTIME_PAYLOAD_VERSION, SCHEMA_VERSION
+from . import GRACE_SECONDS, RESULT_SCHEMA_VERSION, RUNTIME_PAYLOAD_VERSION, SCHEMA_VERSION
 from . import ident
 from .netpolicy import (
     BlockedDestination,
@@ -34,7 +34,6 @@ from .netpolicy import (
 )
 from .redact import redact_credentials
 
-GRACE_SECONDS = 5
 HTTP_TIMEOUT_SECONDS = 30
 # How many bytes of an HTTP error response body a transfer record keeps.
 ERROR_BODY_BYTES = 300
