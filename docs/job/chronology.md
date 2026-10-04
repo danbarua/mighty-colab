@@ -18,10 +18,27 @@ status`" hint for a command that skips `left_up` jobs. Now `--timeout`
 cancels the runner, keeps its result and releases the VM; Ctrl-C before
 launch releases the VM; Ctrl-C after launch leaves cleanup pending so `job
 status --poll` collects the result and releases it. SIGTERM (an agent
-harness ending a long tool call) and SIGHUP are handled the same way;
-Python's default for them exits with no cleanup.
+harness ending a long tool call) and SIGHUP, whose Python default exits with
+no cleanup, release the VM before launch; after launch `apply` hands the job
+to a detached `job status --poll`, which releases the VM when the job ends,
+because whoever started it may not come back.
 
 Evidence: `integration/repro_job_timeout_and_interrupt`.
+
+### 2026-10-04: Finding: the watchdog killed its own runner on a cancel or at the deadline
+
+The launch sets `MIGHTY_JOB_ID` in the runner's environment, so the runner
+counts as a tagged process, and the watchdog's escapee sweep excluded only
+the watchdog itself. On a cancel it sent the runner SIGTERM, which the
+runner does not handle; at the `wall_clock` deadline it escalated to SIGKILL
+five seconds later. Whether a cancelled or deadline-killed job kept its
+artifacts and `result.json` was a race between the runner and its own
+watchdog: a timeout cancel ended `unknown` ("the runner is dead and wrote no
+result.json") in one live run and `cancelled` in others. The sweep now
+excludes the runner.
+
+Evidence: `integration/repro_job_timeout_and_interrupt` (cases 1 and 4);
+unit tests for both watchdog sweeps.
 
 ### 2026-10-04: Finding: the job repros' session checks could pass with a VM still listed
 
