@@ -47,10 +47,19 @@ def _safe_killpg(pgid, sig):
         return False
 
 
-def _signal_escapees(job_dir, sig) -> None:
+def _signal_escapees(job_dir, sig, runner_pid) -> None:
+    """Signal the job's tagged processes, never this watchdog or the runner.
+
+    The runner carries MIGHTY_JOB_ID too, but after a cancel or the
+    deadline it is the process that reaps the workload, uploads artifacts
+    and writes result.json; killing it loses all three.
+    """
     job_id = os.path.basename(os.path.normpath(job_dir))
+    exclude = {os.getpid()}
+    if runner_pid > 0:
+        exclude.add(runner_pid)
     try:
-        ident.signal_tagged(job_id, sig, exclude={os.getpid()})
+        ident.signal_tagged(job_id, sig, exclude=exclude)
     except Exception:  # noqa: BLE001 - watchdog must keep polling
         pass
 
@@ -146,7 +155,7 @@ def _record(job_dir, runner_alive, deadline, now, started):
     )
 
 
-def _cancel(job_dir, shim_pgid, now):
+def _cancel(job_dir, shim_pgid, now, runner_pid):
     # The runner may have already issued the same intent. Keep one durable
     # record and make cancellation one-shot.
     cancel_path = os.path.join(job_dir, "cancel.json")
@@ -156,7 +165,7 @@ def _cancel(job_dir, shim_pgid, now):
             {"cancelled_by": "wall_clock", "at": now},
         )
     _safe_killpg(shim_pgid, signal.SIGTERM)
-    _signal_escapees(job_dir, signal.SIGTERM)
+    _signal_escapees(job_dir, signal.SIGTERM, runner_pid)
 
 
 def main(argv):
@@ -224,14 +233,14 @@ def main(argv):
         if not cancel_sent and (cancel_requested or deadline_reached):
             if cancel_requested:
                 _safe_killpg(shim_pgid, signal.SIGTERM)
-                _signal_escapees(job_dir, signal.SIGTERM)
+                _signal_escapees(job_dir, signal.SIGTERM, pid)
             else:
-                _cancel(job_dir, shim_pgid, now)
+                _cancel(job_dir, shim_pgid, now, pid)
             cancel_sent = True
             escalate_at = now + GRACE_SECONDS
         elif not kill_sent and escalate_at is not None and now >= escalate_at:
             _safe_killpg(shim_pgid, signal.SIGKILL)
-            _signal_escapees(job_dir, signal.SIGKILL)
+            _signal_escapees(job_dir, signal.SIGKILL, pid)
             kill_sent = True
 
 
