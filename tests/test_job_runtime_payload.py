@@ -1803,3 +1803,59 @@ def test_oom_log_keeps_only_the_kernels_kill_lines_for_this_run(monkeypatch):
     assert runner_module._oom_log(0) == []
     # Kernel log bytes that are not UTF-8 must not raise in the verdict path.
     assert seen["errors"] == "replace"
+
+
+def test_the_shim_says_how_much_of_a_long_message_it_cut(tmp_path):
+    _proc, _result, job_dir = _run(tmp_path, "raise ValueError('y' * 2500)\n")
+    message = json.loads((job_dir / "exception.json").read_text())["message"]
+    assert message == "y" * 2000 + " [... 500 characters omitted; the full message is in runner.log]"
+
+
+def test_watchdog_logs_an_unusable_deadline_once(tmp_path, monkeypatch, capsys):
+    from colab_cli.job.runtime_payload import watchdog
+
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    ticks = 0
+    monkeypatch.setattr(
+        watchdog, "_runner_identity", lambda _d: (424242, "", "", "soon", 0.0, None)
+    )
+    monkeypatch.setattr(watchdog.ident, "alive", lambda *_a: True)
+
+    def record(*_a):
+        nonlocal ticks
+        ticks += 1
+        if ticks == 3:
+            (job_dir / "result.json").write_text("{}")
+
+    monkeypatch.setattr(watchdog, "_record", record)
+    monkeypatch.setattr(watchdog.time, "sleep", lambda _s: None)
+    watchdog._logged.clear()
+
+    watchdog.main(["--job-dir", str(job_dir), "--shim-pgid", "4321", "--interval", "0.01"])
+
+    err = capsys.readouterr().err
+    assert err.count("launch.json deadline 'soon' is not a number") == 1
+
+
+def test_a_long_setup_traceback_is_cut_with_a_marker_and_logged_in_full(tmp_path, capsys):
+    from colab_cli.job.runtime_payload import runner as runner_module
+
+    result_path = tmp_path / "result.json"
+
+    def deep(n):
+        if n == 0:
+            raise RuntimeError("z" * 5000)
+        deep(n - 1)
+
+    try:
+        deep(3)
+    except RuntimeError as error:
+        runner_module._stage_failure(
+            result_path=str(result_path), job_dir=str(tmp_path), result_put_url=None,
+            cli_version="t", started=0.0, attempt=1, error=error, inputs=[],
+        )
+    trace = json.loads(result_path.read_text())["exception"]["traceback"]
+    assert trace.startswith("[... ")
+    assert "characters omitted; the full traceback is in runner.log ...]" in trace
+    assert "in deep" in capsys.readouterr().out

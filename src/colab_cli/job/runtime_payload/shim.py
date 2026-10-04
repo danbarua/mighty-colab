@@ -18,6 +18,9 @@ import traceback
 # it surfaced. The full text goes to stderr, which is runner.log.
 TRACEBACK_HEAD_CHARS = 2000
 TRACEBACK_TAIL_CHARS = 4000
+# exception.json keeps this much of the exception's message, and says how
+# much more there was; the full message is in the traceback in runner.log.
+MESSAGE_CHARS = 2000
 
 
 def _atomic_write_json(path, payload):
@@ -49,6 +52,17 @@ def _traceback_excerpt(text):
         text[:TRACEBACK_HEAD_CHARS]
         + f"\n[... {omitted} characters omitted; the full traceback is in runner.log ...]\n"
         + text[-TRACEBACK_TAIL_CHARS:]
+    )
+
+
+def _message(exc):
+    text = str(exc)
+    if len(text) <= MESSAGE_CHARS:
+        return text
+    omitted = len(text) - MESSAGE_CHARS
+    return (
+        text[:MESSAGE_CHARS]
+        + f" [... {omitted} characters omitted; the full message is in runner.log]"
     )
 
 
@@ -100,7 +114,7 @@ def main(argv):
             os.path.join(job_dir, "exception.json"),
             {
                 "type": _type_name(e),
-                "message": str(e)[:2000],
+                "message": _message(e),
                 "traceback": _traceback_excerpt(text),
             },
         )

@@ -1181,7 +1181,15 @@ class Orchestrator:
         env.signal = result.get("signal")
         env.exception = result.get("exception")
         env.surviving_descendants = result.get("surviving_descendants", []) or []
-        env.finished_at = _vm_time(result.get("finished_at")) or _now()
+        env.finished_at = _vm_time(result.get("finished_at"))
+        if env.finished_at is None:
+            env.finished_at = _now()
+            _logger.warning(
+                "result.json finished_at %r is not an epoch time; "
+                "finished_at is this machine's time %s",
+                result.get("finished_at"),
+                env.finished_at,
+            )
         env.inputs = [InputResult(**item) for item in (result.get("inputs") or [])]
         env.artifacts = [
             ArtifactResult(**artifact)

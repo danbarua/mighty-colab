@@ -65,7 +65,20 @@ def _signal_escapees(job_dir, sig, runner_pid) -> None:
 
 def _log(message):
     """One line to runner.log, which the watchdog shares with the runner."""
-    print(f"[watchdog] {message}", file=sys.stderr, flush=True)
+    try:
+        print(f"[watchdog] {message}", file=sys.stderr, flush=True)
+    except (OSError, ValueError):
+        pass
+
+
+_logged = set()
+
+
+def _log_once(message):
+    """Log a condition the watchdog meets on every tick only the first time."""
+    if message not in _logged:
+        _logged.add(message)
+        _log(message)
 
 
 
@@ -101,8 +114,8 @@ def _disk_free(job_dir):
     for path in (job_dir, "/"):
         try:
             return shutil.disk_usage(path).free, path
-        except OSError:
-            continue
+        except OSError as error:
+            _log_once(f"disk usage of {path} unavailable: {type(error).__name__}: {error}")
     return None, None
 
 
@@ -150,6 +163,11 @@ def _runner_identity(job_dir):
         started = float(launch.get("started_at"))
     except (TypeError, ValueError):
         started = None
+        if error is None:
+            _log_once(
+                f"launch.json started_at {launch.get('started_at')!r} is not a "
+                "number; elapsed is measured from the watchdog's start"
+            )
     return (
         pid,
         launch.get("starttime", ""),
@@ -255,6 +273,10 @@ def main(argv):
             deadline_value = float(deadline) if deadline is not None else None
         except (TypeError, ValueError):
             deadline_value = None
+            _log_once(
+                f"launch.json deadline {deadline!r} is not a number; the watchdog "
+                "enforces no deadline (the runner still enforces its own)"
+            )
         try:
             _record(
                 job_dir,

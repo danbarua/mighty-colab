@@ -265,8 +265,24 @@ def test_a_long_exception_message_is_cut_in_the_reason():
         {"workload": "failed", "exit_code": 1,
          "exception": {"type": "ValueError", "message": "x" * 5000, "traceback": ""}}
     )
-    assert len(env.reason) < 600
+    assert env.reason.endswith(
+        "x [... 4500 characters omitted; the full message is in `exception`]"
+    )
     assert env.exception["message"] == "x" * 5000
+
+
+def test_a_transfer_error_without_a_category_is_classified_and_logged(caplog):
+    error = TransferError(exception="OSError", reason="boom")
+    with caplog.at_level("WARNING", logger="colab_cli.job.verdict"):
+        assert transfer_retry_class(error, "GET") is RetryClass.RETRY_SAME
+    assert "transfer error has no category (exception=OSError reason=boom)" in caplog.text
+
+
+def test_a_result_without_finished_at_uses_local_time_and_says_so(caplog):
+    with caplog.at_level("WARNING", logger="colab_cli.job.orchestrator"):
+        env = _absorb({"workload": "succeeded", "exit_code": 0})
+    assert env.finished_at is not None
+    assert "result.json finished_at None is not an epoch time" in caplog.text
 
 
 def test_an_exit_without_an_exception_points_at_runner_log():

@@ -39,6 +39,8 @@ HTTP_TIMEOUT_SECONDS = 30
 ERROR_BODY_BYTES = 300
 # Kernel log lines kept as evidence of an OOM kill.
 OOM_LOG_LINES = 3
+# Characters of a staging setup error's traceback kept in result.json.
+STAGE_TRACEBACK_CHARS = 4000
 _URL_ENV_NAMES = (
     "MIGHTY_CONTROL_RESULT_PUT_URL",
     "MIGHTY_RESULT_PUT_URL",
@@ -797,13 +799,20 @@ def _stage_failure(
     removed, in case an unexpected exception quotes a signed URL.
     """
     if isinstance(error, StageItemError):
-        message, trace = str(error), ""
+        message, full_trace, trace = str(error), "", ""
     else:
         message = redact_credentials(f"{type(error).__name__}: {error}")
-        trace = redact_credentials(traceback.format_exc()[-4000:])
+        full_trace = redact_credentials(traceback.format_exc())
+        trace = full_trace
+        if len(full_trace) > STAGE_TRACEBACK_CHARS:
+            omitted = len(full_trace) - STAGE_TRACEBACK_CHARS
+            trace = (
+                f"[... {omitted} characters omitted; the full traceback is in runner.log ...]\n"
+                + full_trace[-STAGE_TRACEBACK_CHARS:]
+            )
     _log(f"stage failed: {message}")
-    if trace:
-        _log(trace.rstrip())
+    if full_trace:
+        _log(full_trace.rstrip())
     result = _result_payload(
         workload="failed",
         cli_version=cli_version,
@@ -848,8 +857,10 @@ def _oom_kill_count():
                 name, _, value = line.partition(" ")
                 if name == "oom_kill":
                     return int(value)
-    except (OSError, ValueError):
+    except (OSError, ValueError) as error:
+        _log(f"OOM kill count unavailable: {type(error).__name__}: {error}")
         return None
+    _log("OOM kill count unavailable: /proc/vmstat has no oom_kill line")
     return None
 
 

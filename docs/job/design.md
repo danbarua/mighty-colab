@@ -148,7 +148,7 @@ The local apply supervisor polls `result.json` and `watchdog.json`, and copies `
 
 `waitpid()` cannot always provide a Python exception. `os._exit()`, SIGKILL/OOM, and native crashes can produce `workload: failed` with exit/signal information and no exception.
 
-The shim records a Python exception in `exception.json`. A type outside builtins is module-qualified (`torch.OutOfMemoryError`). A traceback over 6000 characters keeps its first 2000, which for a chained exception hold the original cause, and its last 4000; the full traceback goes to `runner.log`. A `sys.exit()` with a non-zero code keeps the traceback to the call.
+The shim records a Python exception in `exception.json`. A type outside builtins is module-qualified (`torch.OutOfMemoryError`). A traceback over 6000 characters keeps its first 2000, which for a chained exception hold the original cause, and its last 4000, with a line saying how many characters were left out; the full traceback goes to `runner.log`. A message over 2000 characters is cut the same way. A `sys.exit()` with a non-zero code keeps the traceback to the call.
 
 ## Runtime-proxy token expiry
 
@@ -223,7 +223,7 @@ Apply tries one attempt. `RetryClass` is advice for the next caller action, not 
 |---|---|---|
 | `wall_clock` kill | `fix_code` | `wall_clock budget of <n>s reached; the workload was stopped by SIGTERM (15)`, or that it did not exit within 5 s of SIGTERM and was killed by SIGKILL |
 | a signal with no cancel request | `fix_code` | `the workload was killed by SIGKILL (9) with no cancel request`, then the OOM evidence: how many times the kernel's out-of-memory killer ran, with its last `Killed process` line, or that no OOM kill happened during the run |
-| an exception | `fix_code` | `the workload exited 1: <type>: <message>`, the message cut at 500 characters |
+| an exception | `fix_code` | `the workload exited 1: <type>: <message>`; a message over 500 characters is cut, with a note of how much was left out |
 | a non-zero exit without an exception | `fix_code` | `the workload exited <n> without a recorded exception; its output is in runner.log` |
 | tagged processes survived | `fix_code` | `the workload exited 0 but <n> tagged process(es) survived containment: <pids>` |
 | cancelled by a requester | none (`--timeout` sets `retry_same`) | `cancelled by <requester>; <how the workload stopped>` |

@@ -26,6 +26,7 @@ applies them. The policy:
 
 from __future__ import annotations
 
+import logging
 from typing import Iterable, List, Literal, Optional, Sequence, Tuple
 
 from colab_cli.job.models import (
@@ -37,6 +38,8 @@ from colab_cli.job.models import (
     TransferError,
 )
 from colab_cli.job.runtime_payload import GRACE_SECONDS
+
+_logger = logging.getLogger(__name__)
 
 Method = Literal["GET", "PUT"]
 Outcome = Tuple[Optional[str], Optional[RetryClass]]
@@ -75,6 +78,13 @@ def transfer_retry_class(error: TransferError, method: Method) -> RetryClass:
         if 400 <= status < 500:
             return RetryClass.FIX_CODE
         return RetryClass.RETRY_SAME
+    if error.category is None:
+        _logger.warning(
+            "transfer error has no category (exception=%s reason=%s); "
+            "classified as retry_same",
+            error.exception,
+            error.reason,
+        )
     return _CATEGORY_RETRY.get(error.category, RetryClass.RETRY_SAME)
 
 
@@ -175,7 +185,13 @@ def workload_outcome(result: dict, wall_clock: int) -> Outcome:
             f"survived containment: {', '.join(str(p) for p in tagged)}"
         )
     elif isinstance(exception, dict) and exception.get("type"):
-        message = str(exception.get("message") or "")[:EXCEPTION_MESSAGE_CHARS]
+        message = str(exception.get("message") or "")
+        if len(message) > EXCEPTION_MESSAGE_CHARS:
+            message = (
+                message[:EXCEPTION_MESSAGE_CHARS]
+                + f" [... {len(message) - EXCEPTION_MESSAGE_CHARS} characters "
+                "omitted; the full message is in `exception`]"
+            )
         reason = f"the workload exited {exit_code}: {exception['type']}: {message}"
     else:
         reason = (
@@ -232,10 +248,15 @@ def offload_outcome(
             "artifact offload failed: "
             + "; ".join(f"{a.path} ({a.error.summary})" if a.error else a.path for a in failed)
         )
-        classes.extend(
-            transfer_retry_class(a.error, "PUT") if a.error else RetryClass.RETRY_SAME
-            for a in failed
-        )
+        for a in failed:
+            if a.error is None:
+                _logger.warning(
+                    "failed artifact %s has no error record; classified as retry_same",
+                    a.path,
+                )
+                classes.append(RetryClass.RETRY_SAME)
+            else:
+                classes.append(transfer_retry_class(a.error, "PUT"))
     if not parts and remote_offload == "failed":
         parts.append("artifact offload failed")
         classes.append(RetryClass.RETRY_SAME)
