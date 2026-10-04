@@ -1243,11 +1243,8 @@ def test_absorb_result_honors_remote_offload_failure_and_phase(tmp_path):
 
 
 def test_stage_failure_surfaces_which_file_and_why(tmp_path):
-    """The runner classifies a staging failure into a safe dest+category
-    (StageItemError in runtime_payload/runner.py) before it ever leaves
-    the VM -- the envelope's `reason` must actually use it instead of
-    falling back to the fully generic message that doesn't say which
-    declared input failed or how."""
+    """The reason names the input, its URL identity and the response; the
+    record keeps the redacted body for the rest."""
     orch = _orch(tmp_path)
 
     orch._absorb_result(
@@ -1255,24 +1252,47 @@ def test_stage_failure_surfaces_which_file_and_why(tmp_path):
             "workload": "failed",
             "exit_code": 1,
             "phase": "stage",
-            "exception": {
-                "type": "StageItemError",
-                "message": "inputs/2shapes_train.npz: http_error (403)",
-                "traceback": "",
-            },
+            "inputs": [
+                {"dest": "inputs/a.npz", "url_id": "https://x/a.npz#111",
+                 "status": "ok", "bytes": 10, "sha256": "ab" * 32},
+                {"dest": "inputs/2shapes_train.npz", "url_id": "https://x/b.npz#222",
+                 "status": "failed",
+                 "error": {"exception": "HTTPError", "reason": "HTTP Error 403: Forbidden",
+                           "http_status": 403, "body": "<Error>SignatureDoesNotMatch</Error>",
+                           "category": "http"}},
+            ],
         }
     )
 
     assert orch.env.workload is Workload.FAILED
-    assert "inputs/2shapes_train.npz" in orch.env.reason
-    assert "http_error" in orch.env.reason
-    assert orch.env.retry_class is RetryClass.FIX_HUMAN
+    assert orch.env.reason == (
+        "staging failed at inputs/2shapes_train.npz (https://x/b.npz#222): "
+        "HTTP Error 403: Forbidden. The consumer never started."
+    )
+    assert orch.env.retry_class is RetryClass.REFRESH_URLS
+    assert orch.env.failed_phase is Phase.STAGE
+    assert [i.status for i in orch.env.inputs] == ["ok", "failed"]
+    assert orch.env.inputs[1].error.body == "<Error>SignatureDoesNotMatch</Error>"
 
 
-def test_stage_failure_without_item_detail_falls_back_to_generic_reason(tmp_path):
-    """A stage failure that never reached a specific item (e.g. a
-    malformed manifest) has no dest/category to report -- must not crash
-    or fabricate one, just use the pre-existing generic explanation."""
+@pytest.mark.parametrize(
+    "error, retry",
+    [
+        ({"http_status": 404, "category": "http"}, RetryClass.FIX_CODE),
+        ({"http_status": 401, "category": "http"}, RetryClass.REFRESH_URLS),
+        ({"http_status": 410, "category": "http"}, RetryClass.FIX_CODE),
+        ({"http_status": 429, "category": "http"}, RetryClass.RETRY_SAME),
+        ({"http_status": 503, "category": "http"}, RetryClass.RETRY_SAME),
+        ({"category": "network"}, RetryClass.RETRY_SAME),
+        ({"category": "size"}, RetryClass.FIX_CODE),
+        ({"category": "checksum"}, RetryClass.FIX_CODE),
+        ({"category": "local"}, RetryClass.FIX_CODE),
+        ({"category": "blocked"}, RetryClass.FIX_HUMAN),
+        ({"category": "setup"}, RetryClass.DO_NOT_RETRY),
+        ({"category": "error"}, RetryClass.RETRY_SAME),
+    ],
+)
+def test_stage_failure_retry_class_follows_the_transfer_table(tmp_path, error, retry):
     orch = _orch(tmp_path)
 
     orch._absorb_result(
@@ -1280,17 +1300,41 @@ def test_stage_failure_without_item_detail_falls_back_to_generic_reason(tmp_path
             "workload": "failed",
             "exit_code": 1,
             "phase": "stage",
+            "inputs": [
+                {"dest": "in.bin", "url_id": "https://x/in#1", "status": "failed",
+                 "error": {"exception": "E", "reason": "r", **error}},
+            ],
+        }
+    )
+
+    assert orch.env.retry_class is retry
+
+
+def test_stage_failure_before_any_input_is_a_supervisor_fault(tmp_path):
+    """A credential channel or manifest the runner cannot use is a bug in
+    mighty-colab; the runner's message says which."""
+    orch = _orch(tmp_path)
+
+    orch._absorb_result(
+        {
+            "workload": "failed",
+            "exit_code": 1,
+            "phase": "stage",
+            "inputs": [],
             "exception": {
-                "type": "ValueError",
-                "message": "stage failed",
+                "type": "ManifestError",
+                "message": "ManifestError: required transfer credential channel is missing",
                 "traceback": "",
             },
         }
     )
 
     assert orch.env.workload is Workload.FAILED
-    assert "declared input could not be fetched" in orch.env.reason
-    assert orch.env.retry_class is RetryClass.FIX_HUMAN
+    assert orch.env.reason == (
+        "staging failed before any input was fetched: ManifestError: required "
+        "transfer credential channel is missing. The consumer never started."
+    )
+    assert orch.env.retry_class is RetryClass.DO_NOT_RETRY
 
 
 # --------------------------------------------------------------------------
@@ -1308,6 +1352,7 @@ def test_absorbed_artifact_failure_keeps_its_cause(tmp_path):
         "reason": "HTTP 413 Payload Too Large (upload cut short: BrokenPipeError)",
         "http_status": 413,
         "body": "<html>413</html>",
+        "category": "http",
     }
     orch._absorb_result(
         {
@@ -1327,6 +1372,7 @@ def test_absorbed_artifact_failure_keeps_its_cause(tmp_path):
     orch._persist()
 
     assert orch.env.offload is Offload.FAILED
+    assert orch.env.retry_class is RetryClass.FIX_CODE
     stored = JobStore(tmp_path / "jobs").read_envelope("unit-job")
     assert stored.artifacts[0].error.model_dump() == error
 
@@ -1637,12 +1683,17 @@ def _stage_failure_result():
         "phase": "stage",
         "artifacts": [],
         "offload": "pending",
+        "inputs": [
+            {"dest": "inputs/x.npy", "url_id": "https://x/x.npy#abc", "status": "failed",
+             "error": {"exception": "HTTPError", "reason": "HTTP Error 403: Forbidden",
+                       "http_status": 403, "category": "http"}},
+        ],
         "exception": {
             "type": "StageItemError",
-            "message": "inputs/x.npy: http_error (403)",
+            "message": "inputs/x.npy: HTTP Error 403: Forbidden",
             "traceback": "",
         },
-        "runner_error": "inputs/x.npy: http_error (403)",
+        "runner_error": "inputs/x.npy: HTTP Error 403: Forbidden",
     }
 
 
@@ -1660,7 +1711,7 @@ def test_stage_failure_skips_offload_and_releases_the_vm(tmp_path):
     orch.cleanup()
 
     assert orch.env.offload is Offload.SKIPPED
-    assert "staging failed (inputs/x.npy: http_error (403))" in orch.env.reason
+    assert "staging failed at inputs/x.npy (https://x/x.npy#abc): HTTP Error 403" in orch.env.reason
     assert "required artifact" not in orch.env.reason
     client.unassign.assert_called_once_with("m-s-abc")
     assert orch.env.cleanup is Cleanup.RELEASED
@@ -1708,6 +1759,30 @@ def test_poll_classifies_a_dead_runner_without_waiting_for_the_deadline(tmp_path
     assert "95s" in orch.env.reason
     assert orch.env.offload is Offload.NOT_REQUIRED
     assert orch.env.finished_at is not None
+
+
+def test_poll_does_not_end_the_job_when_liveness_is_unknown(tmp_path):
+    """The watchdog reports runner_alive null when launch.json gives no
+    usable identity; that is not a dead runner."""
+    orch = _orch(tmp_path)
+    transport = _poll_transport(
+        {
+            "watchdog.json": [
+                {"runner_alive": None, "elapsed": 95, "remaining": 505,
+                 "runner_identity_error": "launch.json unreadable: JSONDecodeError: x",
+                 "gpu": None, "gpu_error": "nvidia-smi exited 9: Unknown Error"}
+            ],
+        }
+    )
+
+    orch.poll(transport, deadline=time.time() + 1, interval=0)
+
+    assert orch.env.workload is not Workload.UNKNOWN
+    assert orch.env.supervisor is Supervisor.INTERRUPTED
+    assert orch.env.hints == [
+        "t=95s remaining=505s gpu=none (nvidia-smi exited 9: Unknown Error) "
+        "disk_free=None runner_alive=None (launch.json unreadable: JSONDecodeError: x)"
+    ]
 
 
 def test_poll_rereads_the_result_before_declaring_the_runner_dead(tmp_path):
@@ -2155,7 +2230,17 @@ def test_a_passed_deadline_cancels_the_runner_and_keeps_its_result(tmp_path, mon
     monkeypatch.setattr("time.sleep", lambda _s: None)
     orch = _orch(tmp_path)
     orch.env.supervisor = Supervisor.INTERRUPTED
-    transport = _cancel_transport([None, {"workload": "cancelled", "signal": 15, "cancel_intent": "cancelled"}])
+    transport = _cancel_transport(
+        [
+            None,
+            {
+                "workload": "cancelled",
+                "signal": 15,
+                "signal_name": "SIGTERM",
+                "cancel_intent": {"intent": "cancelled", "by": "job apply --timeout"},
+            },
+        ]
+    )
 
     orch.cancel_after_deadline(transport, budget=900)
 
@@ -2164,7 +2249,28 @@ def test_a_passed_deadline_cancels_the_runner_and_keeps_its_result(tmp_path, mon
     assert orch.env.workload is Workload.CANCELLED
     assert orch.env.supervisor is Supervisor.FINISHED
     assert orch.env.failed_phase is Phase.RUN
-    assert "--timeout of 900s" in orch.env.reason
+    # The result shows the cancel arrived, so "cancel requested" is not
+    # repeated beside it.
+    assert orch.env.reason == (
+        "apply's --timeout of 900s passed before a verdict; cancelled by job "
+        "apply --timeout; the workload was stopped by SIGTERM (15)"
+    )
+    assert orch.env.retry_class is RetryClass.RETRY_SAME
+
+
+def test_a_passed_deadline_with_a_result_that_finished_first_keeps_the_cancel_note(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+    orch = _orch(tmp_path)
+    orch.env.supervisor = Supervisor.INTERRUPTED
+    transport = _cancel_transport([None, {"workload": "succeeded", "exit_code": 0}])
+
+    orch.cancel_after_deadline(transport, budget=900)
+
+    assert orch.env.reason == (
+        "apply's --timeout of 900s passed before a verdict; cancel requested"
+    )
     assert orch.env.retry_class is RetryClass.RETRY_SAME
 
 

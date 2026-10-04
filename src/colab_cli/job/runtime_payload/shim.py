@@ -13,6 +13,10 @@ import runpy
 import sys
 import traceback
 
+# exception.json keeps the first and last characters of a long traceback:
+# the head of a chained traceback is the original cause, the tail is where
+# it surfaced. The full text goes to stderr, which is runner.log.
+TRACEBACK_HEAD_CHARS = 2000
 TRACEBACK_TAIL_CHARS = 4000
 
 
@@ -37,6 +41,26 @@ def _systemexit_code(exc: SystemExit) -> int:
     return 1
 
 
+def _traceback_excerpt(text):
+    if len(text) <= TRACEBACK_HEAD_CHARS + TRACEBACK_TAIL_CHARS:
+        return text
+    omitted = len(text) - TRACEBACK_HEAD_CHARS - TRACEBACK_TAIL_CHARS
+    return (
+        text[:TRACEBACK_HEAD_CHARS]
+        + f"\n[... {omitted} characters omitted; the full traceback is in runner.log ...]\n"
+        + text[-TRACEBACK_TAIL_CHARS:]
+    )
+
+
+def _type_name(exc):
+    """Builtins by bare name, anything else module-qualified
+    (`torch.OutOfMemoryError`, not `OutOfMemoryError`)."""
+    kind = type(exc)
+    if kind.__module__ == "builtins":
+        return kind.__qualname__
+    return f"{kind.__module__}.{kind.__qualname__}"
+
+
 def main(argv):
     if len(argv) < 3 or argv[0] != "--job-dir":
         print("usage: shim --job-dir DIR entry.py [args...]", file=sys.stderr)
@@ -58,22 +82,26 @@ def main(argv):
         code = _systemexit_code(e)
         # A clean sys.exit(0) is a successful completion, not a failure.
         if code != 0:
+            # The traceback says where sys.exit was called.
             _atomic_write_json(
                 os.path.join(job_dir, "exception.json"),
                 {
                     "type": "SystemExit",
                     "message": str(e.code),
-                    "traceback": "",
+                    "traceback": _traceback_excerpt(traceback.format_exc()),
                 },
             )
         return code
     except BaseException as e:  # noqa: BLE001 - deliberately record anything
+        text = traceback.format_exc()
+        sys.stderr.write(text)
+        sys.stderr.flush()
         _atomic_write_json(
             os.path.join(job_dir, "exception.json"),
             {
-                "type": type(e).__name__,
+                "type": _type_name(e),
                 "message": str(e)[:2000],
-                "traceback": traceback.format_exc()[-TRACEBACK_TAIL_CHARS:],
+                "traceback": _traceback_excerpt(text),
             },
         )
         return 1

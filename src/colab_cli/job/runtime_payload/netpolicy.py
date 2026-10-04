@@ -84,7 +84,9 @@ def resolve_public_addresses(host: str, port: int) -> list[str]:
         raise BlockedDestination(f"no addresses for {host}")
     blocked = [ip for ip in addresses if not address_is_public(ip)]
     if blocked:
-        raise BlockedDestination(f"non-public address for {host}")
+        raise BlockedDestination(
+            f"non-public address for {host}: {', '.join(blocked)}"
+        )
     return addresses
 
 

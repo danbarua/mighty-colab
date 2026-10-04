@@ -191,8 +191,10 @@ def test_required_secret_channel_missing_fails_before_consumer(tmp_path):
     assert result["cli_version"] == "unknown"
     assert result["runtime_payload_version"].startswith("sha256:")
     assert not marker.exists()
-    assert result["exception"]["message"] == "stage failed"
-    assert result["runner_error"] == "stage failed"
+    message = "ManifestError: required transfer credential channel is missing"
+    assert result["exception"]["message"] == message
+    assert result["runner_error"] == message
+    assert result["inputs"] == []
 
 
 def test_invalid_secret_channel_writes_provenanced_stage_failure(tmp_path):
@@ -367,7 +369,7 @@ def test_watchdog_forwards_a_preexisting_cancel_intent(tmp_path, monkeypatch):
     monkeypatch.setattr(
         watchdog,
         "_runner_identity",
-        lambda _job_dir: (os.getpid(), "", "", None, time.time()),
+        lambda _job_dir: (os.getpid(), "", "", None, time.time(), None),
     )
 
     def record(*_args):
@@ -416,13 +418,14 @@ def test_stage_hash_mismatch_does_not_run_consumer(tmp_path):
     assert result["phase"] == "stage"
     assert result["workload"] == "failed"
     # `file://` never reaches the hash check: urlopen_public's HTTPS-only
-    # policy rejects it first (BlockedDestination, not a checksum failure
-    # despite this test's name -- kept for what it does validate: a
-    # failed stage never runs the consumer). Still confirms the safe
-    # dest+category record reaches the durable result either way; see
-    # test_classify_stage_error_* below for the checksum/size/http/network
-    # categories this classifier actually exists to distinguish.
-    assert result["exception"]["message"] == "input.bin: error"
+    # policy rejects it first. What this validates: a failed stage never
+    # runs the consumer, and the input's record says why.
+    [record] = result["inputs"]
+    assert record["dest"] == "input.bin"
+    assert record["status"] == "failed"
+    assert record["error"]["category"] == "blocked"
+    assert record["error"]["reason"] == "URL scheme must be https"
+    assert result["exception"]["message"] == "input.bin: URL scheme must be https"
     assert not sentinel.exists()
 
 
@@ -652,61 +655,155 @@ def test_succeeded_is_refused_while_a_tagged_descendant_survives():
     assert cancelled == "cancelled"
 
 
-def test_classify_stage_error_checksum_and_size_mismatch():
-    from colab_cli.job.runtime_payload.runner import _classify_stage_error
+def _serve_bytes(monkeypatch, payload):
+    from colab_cli.job.runtime_payload import runner
 
-    category, detail = _classify_stage_error(
-        ValueError("staged sha256 does not match manifest")
-    )
-    assert category == "checksum_mismatch"
-    assert detail is None
-    category, detail = _classify_stage_error(
-        ValueError("staged size does not match manifest")
-    )
-    assert category == "size_mismatch"
-    assert detail is None
+    class Response:
+        def __init__(self):
+            self.offset = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, size):
+            chunk = payload[self.offset : self.offset + size]
+            self.offset += len(chunk)
+            return chunk
+
+    monkeypatch.setattr(runner, "urlopen_public", lambda *_a, **_k: Response())
 
 
-def test_classify_stage_error_http_and_network():
-    import urllib.error
+@pytest.mark.parametrize(
+    "size, digest, kind, message",
+    [
+        (5, None, "size", "received more than the planned 5 bytes"),
+        (7, None, "size", "received 6 bytes, planned 7"),
+        (
+            None,
+            "0" * 64,
+            "checksum",
+            f"received sha256 {hashlib.sha256(b'actual').hexdigest()}, planned {'0' * 64}",
+        ),
+    ],
+)
+def test_a_staged_mismatch_says_what_was_planned_and_received(
+    tmp_path, monkeypatch, size, digest, kind, message
+):
+    from colab_cli.job.runtime_payload import runner
 
-    from colab_cli.job.runtime_payload.runner import _classify_stage_error
-
-    category, detail = _classify_stage_error(
-        urllib.error.HTTPError(
-            "https://x?sig=secret", 403, "Forbidden", {}, None
+    _serve_bytes(monkeypatch, b"actual")
+    with pytest.raises(runner.StagedMismatch) as caught:
+        runner._http_get_to_file(
+            "https://x.example/o", str(tmp_path / "o"),
+            expected_size=size, expected_hash=digest,
         )
-    )
-    assert category == "http_error"
-    assert detail == 403
-
-    category, detail = _classify_stage_error(
-        urllib.error.URLError("[Errno 8] nodename nor servname provided")
-    )
-    assert category == "network_error"
-    assert detail is None
+    assert caught.value.kind == kind
+    assert str(caught.value) == message
+    assert not (tmp_path / "o").exists()
 
 
-def test_stage_item_error_message_never_contains_the_url():
-    """The whole point: dest path and category only, never the wrapped
-    exception's own text, which for a urllib error can embed a signed
-    URL's query string."""
+def test_error_category_separates_response_network_local_and_setup():
+    import socket
     import urllib.error
 
-    from colab_cli.job.runtime_payload.runner import StageItemError
-
-    cause = urllib.error.HTTPError(
-        "https://storage.googleapis.com/bucket/obj?x-goog-signature=SECRET",
-        403,
-        "Forbidden",
-        {},
-        None,
+    from colab_cli.job.runtime_payload import runner
+    from colab_cli.job.runtime_payload.netpolicy import (
+        BlockedDestination,
+        HTTPStatusError,
+        UploadCutShort,
     )
-    error = StageItemError("inputs/2shapes_train.npz", cause)
 
-    assert str(error) == "inputs/2shapes_train.npz: http_error (403)"
-    assert "SECRET" not in str(error)
-    assert "x-goog-signature" not in str(error)
+    cases = [
+        (HTTPStatusError(403, "Forbidden", b""), "http"),
+        (urllib.error.HTTPError("https://x", 404, "Not Found", {}, None), "http"),
+        (urllib.error.URLError(ConnectionRefusedError(61, "refused")), "network"),
+        (socket.gaierror(-2, "Name or service not known"), "network"),
+        (TimeoutError("timed out"), "network"),
+        (UploadCutShort(BrokenPipeError(32, "Broken pipe"), "then nothing"), "network"),
+        (OSError(28, "No space left on device"), "local"),
+        (PermissionError(13, "Permission denied"), "local"),
+        (BlockedDestination("non-public address for x: 10.0.0.1"), "blocked"),
+        (runner.StagedMismatch("checksum", "m"), "checksum"),
+        (runner.StagedMismatch("size", "m"), "size"),
+        (runner.ManifestError("m"), "setup"),
+        (RuntimeError("m"), "error"),
+    ]
+    for error, category in cases:
+        assert runner._error_category(error) == category, error
+
+
+def test_a_staging_http_error_keeps_its_body_without_the_signed_query(
+    tmp_path, monkeypatch
+):
+    import io
+    import urllib.error
+
+    from colab_cli.job.runtime_payload import runner
+
+    url = "https://storage.example/bucket/obj?X-Goog-Signature=SECRET"
+
+    def reject(*_a, **_k):
+        body = io.BytesIO(
+            b"<Error><Code>ExpiredToken</Code><Details>" + url.encode() + b"</Details></Error>"
+            + b"x" * 1000
+        )
+        raise urllib.error.HTTPError(url, 400, "Bad Request", {}, body)
+
+    monkeypatch.setattr(runner, "urlopen_public", reject)
+    item = {"url_ref": hashlib.sha256(url.encode()).hexdigest(),
+            "url_id": runner._url_id(url), "dest": "inputs/obj"}
+
+    with pytest.raises(runner.StageItemError) as caught:
+        runner._stage_one(str(tmp_path), item, {item["url_ref"]: url})
+
+    record = caught.value.record
+    assert record["dest"] == "inputs/obj"
+    assert record["status"] == "failed"
+    assert record["url_id"] == runner._url_id(url)
+    assert record["error"]["http_status"] == 400
+    assert record["error"]["category"] == "http"
+    assert "ExpiredToken" in record["error"]["body"]
+    assert len(record["error"]["body"].encode()) <= runner.ERROR_BODY_BYTES
+    text = json.dumps(record) + str(caught.value)
+    assert "SECRET" not in text
+    assert "X-Goog-Signature" not in text
+
+
+def test_staging_records_each_input_it_consumed(tmp_path, monkeypatch, capsys):
+    from colab_cli.job.runtime_payload import runner
+
+    _serve_bytes(monkeypatch, b"actual")
+    records = []
+    manifest = tmp_path / "stage.json"
+    manifest.write_text(json.dumps([{"url": "https://x.example/a", "dest": "a.bin"}]))
+
+    runner._stage(str(tmp_path), str(manifest), {}, records)
+
+    digest = hashlib.sha256(b"actual").hexdigest()
+    assert records == [
+        {"dest": "a.bin", "url_id": runner._url_id("https://x.example/a"),
+         "status": "ok", "sha256": digest, "bytes": 6}
+    ]
+    assert f"[runner] staged dest=a.bin bytes=6 sha256={digest}" in capsys.readouterr().out
+
+
+def test_an_unusable_stage_item_is_a_setup_error_with_its_dest(tmp_path):
+    from colab_cli.job.runtime_payload import runner
+
+    records = []
+    manifest = tmp_path / "stage.json"
+    manifest.write_text(json.dumps([{"url_ref": "0" * 64, "url_id": "u", "dest": "a.bin"}]))
+
+    with pytest.raises(runner.StageItemError):
+        runner._stage(str(tmp_path), str(manifest), {}, records)
+
+    [record] = records
+    assert record["dest"] == "a.bin"
+    assert record["error"]["category"] == "setup"
+    assert record["error"]["reason"] == "manifest credential reference is unavailable"
 
 
 def test_sync_artifacts_once_uploads_a_changed_file(tmp_path, monkeypatch, capsys):
@@ -1096,6 +1193,7 @@ def test_artifact_record_keeps_a_transport_error_without_a_response(
         "reason": "[Errno 104] Connection reset by peer",
         "http_status": None,
         "body": None,
+        "category": "network",
     }
 
 
@@ -1115,11 +1213,13 @@ def test_offload_records_why_an_artifact_url_could_not_be_resolved(tmp_path):
         )
     )
 
-    records, failed = runner._offload(str(tmp_path), str(manifest), {})
+    records, failed, error = runner._offload(str(tmp_path), str(manifest), {})
 
     assert failed is True
+    assert error is None
     assert records[0]["status"] == "failed"
-    assert records[0]["error"]["exception"] == "ValueError"
+    assert records[0]["error"]["exception"] == "ManifestError"
+    assert records[0]["error"]["category"] == "setup"
     assert records[0]["error"]["reason"] == (
         "manifest credential reference is unavailable"
     )
@@ -1165,9 +1265,11 @@ def test_offload_logs_an_unreadable_manifest(tmp_path, capsys):
     manifest = tmp_path / "offload.json"
     manifest.write_text("{not json")
 
-    records, failed = runner._offload(str(tmp_path), str(manifest), {})
+    records, failed, error = runner._offload(str(tmp_path), str(manifest), {})
 
     assert (records, failed) == ([], True)
+    assert error.startswith("offload manifest unreadable: ManifestError: manifest ")
+    assert "JSONDecodeError" in error
     assert "[runner] offload manifest unreadable" in capsys.readouterr().out
 
 
@@ -1372,7 +1474,8 @@ def test_watchdog_never_signals_the_runner(tmp_path, monkeypatch):
     ticks = 0
 
     monkeypatch.setattr(
-        watchdog, "_runner_identity", lambda _d: (runner_pid, "", "", time.time() - 1, time.time())
+        watchdog, "_runner_identity",
+        lambda _d: (runner_pid, "", "", time.time() - 1, time.time(), None),
     )
     monkeypatch.setattr(watchdog.ident, "alive", lambda *_a: True)
     monkeypatch.setattr(
@@ -1409,7 +1512,7 @@ def test_watchdog_deadline_kill_never_signals_the_runner(tmp_path, monkeypatch):
     ticks = 0
 
     monkeypatch.setattr(
-        watchdog, "_runner_identity", lambda _d: (runner_pid, "", "", 5.0, 0.0)
+        watchdog, "_runner_identity", lambda _d: (runner_pid, "", "", 5.0, 0.0, None)
     )
     monkeypatch.setattr(watchdog.ident, "alive", lambda *_a: True)
     monkeypatch.setattr(
@@ -1432,3 +1535,232 @@ def test_watchdog_deadline_kill_never_signals_the_runner(tmp_path, monkeypatch):
 
     assert len(excluded) >= 2, "both the deadline SIGTERM and the SIGKILL escalation sweep"
     assert all(runner_pid in ex for ex in excluded)
+
+
+# --------------------------------------------------------------------------
+# Failure detail in the result, runner.log and watchdog.json
+# --------------------------------------------------------------------------
+
+
+def test_sigkill_names_the_signal_on_the_vm(tmp_path):
+    _proc, result, _job_dir = _run(
+        tmp_path, "import os, signal; os.kill(os.getpid(), signal.SIGKILL)\n"
+    )
+    assert result["signal_name"] == "SIGKILL"
+    # An int where /proc/vmstat exists (Linux), None elsewhere.
+    assert result["oom_kills"] in (None, 0)
+    assert result["oom_log"] == []
+
+
+def test_the_runner_deadline_writes_a_wall_clock_cancel_intent(tmp_path):
+    _proc, result, job_dir = _run(
+        tmp_path, "import time; time.sleep(60)\n", "--deadline", "1"
+    )
+    assert result["workload"] == "cancelled"
+    assert result["cancel_intent"]["intent"] == "cancelled"
+    assert result["cancel_intent"]["by"] == "wall_clock"
+    assert result["signal_name"] == "SIGTERM"
+
+
+def test_an_unreadable_cancel_record_still_cancels_and_is_a_warning(tmp_path):
+    _package, entry, job_dir = _prepare(tmp_path, "import time; time.sleep(60)\n")
+    runner = subprocess.Popen(
+        [sys.executable, "-m", "mighty_runtime.runner", "--job-dir", str(job_dir), str(entry)],
+        cwd=tmp_path,
+        env=_runtime_env(tmp_path),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        launch = job_dir / "launch.json"
+        for _ in range(200):
+            if launch.exists() and launch.stat().st_size:
+                break
+            time.sleep(0.01)
+        (job_dir / "cancel.json").write_text("{")
+        runner.wait(timeout=20)
+    finally:
+        if runner.poll() is None:
+            runner.kill()
+    result = json.loads((job_dir / "result.json").read_text())
+    assert result["workload"] == "cancelled"
+    assert result["cancel_intent"]["by"] is None
+    assert result["cancel_intent"]["error"].startswith("JSONDecodeError")
+    assert any(w.startswith("cancel.json unreadable") for w in result["runner_warnings"])
+
+
+def test_a_failing_periodic_sync_is_logged_and_counted(tmp_path, monkeypatch, capsys):
+    from colab_cli.job.runtime_payload import runner as runner_module
+    from colab_cli.job.runtime_payload.netpolicy import HTTPStatusError
+
+    monkeypatch.setattr(runner_module.time, "sleep", lambda _s: None)
+    (tmp_path / "a.pt").write_bytes(b"a")
+    url = "https://x.example/a?X-Goog-Signature=SECRET"
+
+    def reject(_url, _path):
+        raise HTTPStatusError(403, "Forbidden", f"denied {url}".encode())
+
+    monkeypatch.setattr(runner_module, "_http_put_file", reject)
+    failures = {}
+    manifest = [{"path": "a.pt", "url_ref": hashlib.sha256(url.encode()).hexdigest(),
+                 "url_id": runner_module._url_id(url)}]
+    urls = {manifest[0]["url_ref"]: url}
+
+    runner_module._sync_artifacts_once(str(tmp_path), manifest, urls, {}, failures)
+    runner_module._sync_artifacts_once(str(tmp_path), manifest, urls, {}, failures)
+
+    assert failures == {"a.pt": (2, "HTTP 403 Forbidden")}
+    out = capsys.readouterr().out
+    assert out.count("[runner] artifact sync failed path=a.pt http_status=403") == 2
+    assert "SECRET" not in out
+
+
+def test_a_failed_result_put_logs_status_and_reason_without_the_query(
+    tmp_path, monkeypatch, capsys
+):
+    from colab_cli.job.runtime_payload import runner as runner_module
+    from colab_cli.job.runtime_payload.netpolicy import HTTPStatusError
+
+    url = "https://x.example/result.json?X-Goog-Signature=SECRET"
+
+    def reject(_url, _path):
+        raise HTTPStatusError(403, "Forbidden", f"<Error>{url}</Error>".encode())
+
+    monkeypatch.setattr(runner_module, "_http_put_file", reject)
+    runner_module._put_result(str(tmp_path / "result.json"), url)
+
+    out = capsys.readouterr().out
+    assert "[runner] control.result PUT failed http_status=403" in out
+    assert "reason=HTTP 403 Forbidden" in out
+    assert "SECRET" not in out
+
+
+def test_a_setup_error_keeps_its_text_and_traceback_without_signed_queries(tmp_path):
+    from colab_cli.job.runtime_payload import runner as runner_module
+
+    result_path = tmp_path / "result.json"
+    try:
+        raise RuntimeError("fetch of https://x.example/o?sig=SECRET went wrong")
+    except RuntimeError as error:
+        runner_module._stage_failure(
+            result_path=str(result_path), job_dir=str(tmp_path), result_put_url=None,
+            cli_version="t", started=0.0, attempt=1, error=error, inputs=[],
+        )
+    result = json.loads(result_path.read_text())
+    assert result["exception"]["message"].startswith(
+        "RuntimeError: fetch of https://x.example/o"
+    )
+    assert "RuntimeError" in result["exception"]["traceback"]
+    assert "SECRET" not in result_path.read_text()
+
+
+def test_the_shim_keeps_where_sys_exit_was_called(tmp_path):
+    _proc, _result, job_dir = _run(tmp_path, "import sys\n\ndef stop():\n    sys.exit(3)\n\nstop()\n")
+    record = json.loads((job_dir / "exception.json").read_text())
+    assert record["type"] == "SystemExit"
+    assert record["message"] == "3"
+    assert "in stop" in record["traceback"]
+
+
+def test_the_shim_keeps_the_head_of_a_long_chained_traceback(tmp_path):
+    source = (
+        "try:\n"
+        "    raise KeyError('original cause ' + 'x' * 7000)\n"
+        "except KeyError as e:\n"
+        "    raise RuntimeError('surfaced here') from e\n"
+    )
+    proc, _result, job_dir = _run(tmp_path, source)
+    record = json.loads((job_dir / "exception.json").read_text())
+    assert record["type"] == "RuntimeError"
+    assert "characters omitted; the full traceback is in runner.log" in record["traceback"]
+    assert "KeyError: 'original cause x" in record["traceback"][:2000]
+    assert "RuntimeError: surfaced here" in record["traceback"][-500:]
+    assert "The above exception was the direct cause" in proc.stderr
+
+
+def test_the_shim_qualifies_a_non_builtin_exception_type(tmp_path):
+    source = "import json\njson.loads('{')\n"
+    _proc, _result, job_dir = _run(tmp_path, source)
+    assert json.loads((job_dir / "exception.json").read_text())["type"] == (
+        "json.decoder.JSONDecodeError"
+    )
+
+
+def test_watchdog_gpu_query_says_why_there_is_no_reading(monkeypatch):
+    from colab_cli.job.runtime_payload import watchdog
+
+    def absent(*_a, **_k):
+        raise FileNotFoundError("nvidia-smi")
+
+    monkeypatch.setattr(watchdog.subprocess, "run", absent)
+    assert watchdog._gpu_query() == (None, "nvidia-smi not found")
+
+    monkeypatch.setattr(
+        watchdog.subprocess,
+        "run",
+        lambda *_a, **_k: subprocess.CompletedProcess(
+            [], 9, stdout="", stderr="Unable to determine the device handle for GPU0: Unknown Error"
+        ),
+    )
+    assert watchdog._gpu_query() == (
+        None,
+        "nvidia-smi exited 9: Unable to determine the device handle for GPU0: Unknown Error",
+    )
+
+
+def test_watchdog_reports_unknown_liveness_for_an_unreadable_launch_record(tmp_path, monkeypatch):
+    """An unreadable launch.json is not a dead runner; the supervisor ends
+    the job only on runner_alive false."""
+    from colab_cli.job.runtime_payload import watchdog
+
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    (job_dir / "launch.json").write_text("{")
+    monkeypatch.setattr(watchdog, "_gpu_query", lambda: (None, "nvidia-smi not found"))
+
+    def stop(*_a):
+        (job_dir / "result.json").write_text("{}")
+
+    monkeypatch.setattr(watchdog.time, "sleep", stop)
+    watchdog.main(["--job-dir", str(job_dir), "--shim-pgid", "4321", "--interval", "0.01"])
+    watchdog.main(["--job-dir", str(job_dir), "--shim-pgid", "4321", "--interval", "0.01"])
+
+    record = json.loads((job_dir / "watchdog.json").read_text())
+    assert record["runner_alive"] is None
+    assert record["runner_identity_error"].startswith("launch.json unreadable: JSONDecodeError")
+    assert record["disk_path"] == str(job_dir)
+    assert record["gpu_error"] == "nvidia-smi not found"
+
+
+def test_watchdog_still_kills_at_the_deadline_when_its_record_cannot_be_written(
+    tmp_path, monkeypatch, capsys
+):
+    from colab_cli.job.runtime_payload import watchdog
+
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    killed = []
+    ticks = 0
+    monkeypatch.setattr(
+        watchdog, "_runner_identity", lambda _d: (424242, "", "", 5.0, 0.0, None)
+    )
+    monkeypatch.setattr(watchdog.ident, "alive", lambda *_a: True)
+    monkeypatch.setattr(watchdog.ident, "signal_tagged", lambda *_a, **_k: [])
+    monkeypatch.setattr(watchdog, "_safe_killpg", lambda pgid, sig: killed.append(sig))
+
+    def full_disk(*_a):
+        nonlocal ticks
+        ticks += 1
+        if ticks == 3:
+            (job_dir / "result.json").write_text("{}")
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(watchdog, "_record", full_disk)
+    clock = iter(range(0, 1000, 10))
+    monkeypatch.setattr(watchdog.time, "time", lambda: float(next(clock)))
+    monkeypatch.setattr(watchdog.time, "sleep", lambda _s: None)
+
+    watchdog.main(["--job-dir", str(job_dir), "--shim-pgid", "4321", "--interval", "0.01"])
+
+    assert signal.SIGTERM in killed
+    assert "[watchdog] watchdog.json not written: OSError" in capsys.readouterr().err

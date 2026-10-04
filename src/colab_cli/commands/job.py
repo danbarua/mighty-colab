@@ -286,6 +286,11 @@ def _human(env: JobEnvelope) -> str:
         lines.append(
             f"  exception:  {env.exception.get('type')}: {env.exception.get('message')}"
         )
+    for i in env.inputs:
+        if i.error is not None:
+            lines.append(f"  input:      {i.dest} -> {i.status}: {i.error.summary}")
+            if i.error.body:
+                lines.append(f"              response body: {' '.join(i.error.body.split())}")
     if env.artifacts:
         for a in env.artifacts:
             if a.error is None:

@@ -44,6 +44,7 @@ from colab_cli.job import RESULT_SCHEMA_VERSION, SCHEMA_VERSION
 from colab_cli.job.models import (
     ArtifactResult,
     Cleanup,
+    InputResult,
     InstallAttempt,
     JobEnvelope,
     JobSpec,
@@ -54,6 +55,7 @@ from colab_cli.job.models import (
     Supervisor,
     Workload,
 )
+from colab_cli.job import verdict
 from colab_cli.job.store import RUNNER_LOG_FILE, JobStore
 from colab_cli.job.runtime_payload import RUNTIME_PAYLOAD_VERSION
 from colab_cli.job.runtime_payload.redact import describe_error, redact_credentials
@@ -113,6 +115,13 @@ RESTART_TIMEOUT = 60.0
 
 def _now() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def _vm_time(epoch) -> Optional[str]:
+    """An epoch timestamp the VM recorded, as ISO 8601 UTC."""
+    if not isinstance(epoch, (int, float)) or isinstance(epoch, bool):
+        return None
+    return datetime.datetime.fromtimestamp(epoch, datetime.timezone.utc).isoformat()
 
 
 # Messages the vendored kernel client raises when the kernel connection,
@@ -964,13 +973,7 @@ class Orchestrator:
                 wd, wd_status = transport.read_json(f"{self.remote_dir}/watchdog.json")
                 if wd_status.name == "OK" and wd:
                     self._runner_seen = True
-                    self.env.hints = [
-                        f"t={wd.get('elapsed')}s "
-                        f"remaining={wd.get('remaining')}s "
-                        f"gpu={wd.get('gpu')} "
-                        f"disk_free={wd.get('disk_free_bytes')} "
-                        f"runner_alive={wd.get('runner_alive')}"
-                    ]
+                    self.env.hints = [watchdog_hint(wd)]
                     if wd.get("runner_alive") is False:
                         if self._absorb_late_result(transport):
                             return
@@ -1051,10 +1054,11 @@ class Orchestrator:
         releases the VM. Reaching the deadline is a failure of the run to
         produce a verdict in time, whatever the runner reports after."""
         timed_out = f"apply's --timeout of {budget:.0f}s passed before a verdict"
+        requester = "job apply --timeout"
         try:
             intent = transport.write_json(
                 f"{self.remote_dir}/cancel.json",
-                {"intent": "cancelled", "by": "job apply --timeout", "at": _now()},
+                {"intent": "cancelled", "by": requester, "at": _now()},
             )
             intent_note = (
                 "cancel requested"
@@ -1067,8 +1071,16 @@ class Orchestrator:
         if kind == "result":
             self._absorb_or_keep(outcome, transport)
             self.env.record_failure(Phase.RUN)
-            self.env.reason = f"{timed_out}; {intent_note}" + (
-                f"; {self.env.reason}" if self.env.reason else ""
+            # A result cancelled by this request already says so.
+            received = verdict.cancel_source(outcome.get("cancel_intent")) == requester
+            self.env.reason = "; ".join(
+                part
+                for part in (
+                    timed_out,
+                    None if received else intent_note,
+                    self.env.reason,
+                )
+                if part
             )
             if self.env.retry_class is None:
                 self.env.retry_class = RetryClass.RETRY_SAME
@@ -1160,8 +1172,8 @@ class Orchestrator:
         Orchestrator.absorb_provenance(env, result)
 
         # The runner's verdict supersedes reasons written while it was
-        # unknown (an interruption, a degraded transport); the branches
-        # below set them again from the result.
+        # unknown (an interruption, a degraded transport); they are set
+        # again from the result below.
         env.reason = None
         env.retry_class = None
         env.workload = Workload(result.get("workload", "unknown"))
@@ -1169,7 +1181,8 @@ class Orchestrator:
         env.signal = result.get("signal")
         env.exception = result.get("exception")
         env.surviving_descendants = result.get("surviving_descendants", []) or []
-        env.finished_at = _now()
+        env.finished_at = _vm_time(result.get("finished_at")) or _now()
+        env.inputs = [InputResult(**item) for item in (result.get("inputs") or [])]
         env.artifacts = [
             ArtifactResult(**artifact)
             for artifact in (result.get("artifacts", []) or [])
@@ -1178,96 +1191,42 @@ class Orchestrator:
         # A stage failure means the consumer never ran and the runner never
         # reached offload: nothing was uploaded because nothing was tried.
         stage_failed = env.phase is Phase.STAGE and env.workload is Workload.FAILED
-        result_paths = {artifact.path for artifact in env.artifacts}
-        missing_required = any(
-            declared.required
-            and (
-                declared.path not in result_paths
-                or any(
-                    artifact.path == declared.path and artifact.status == "missing"
-                    for artifact in env.artifacts
-                )
-            )
-            for declared in spec.artifacts
-        )
+        offload_reason = offload_retry = None
         if not spec.artifacts:
             env.offload = Offload.NOT_REQUIRED
         elif stage_failed:
             env.offload = Offload.SKIPPED
-        elif missing_required:
-            missing_paths = sorted(
-                declared.path
-                for declared in spec.artifacts
-                if declared.required
-                and (
-                    declared.path not in result_paths
-                    or any(
-                        artifact.path == declared.path and artifact.status == "missing"
-                        for artifact in env.artifacts
-                    )
-                )
-            )
-            env.offload = Offload.FAILED
-            # Declared artifact paths are caller-chosen relative paths, not
-            # signed URLs -- safe to name, and the whole point of naming
-            # them: "a required artifact was not produced" alone forces a
-            # second round trip just to find out which one.
-            env.reason = f"required artifact(s) not produced: {', '.join(missing_paths)}"
-            env.retry_class = RetryClass.FIX_CODE
-        elif result.get("offload") == "failed" or any(
-            artifact.status == "failed" for artifact in env.artifacts
-        ):
-            failed = sorted(
-                (a for a in env.artifacts if a.status == "failed"),
-                key=lambda a: a.path,
-            )
-            env.offload = Offload.FAILED
-            env.reason = (
-                "artifact offload failed: "
-                + "; ".join(
-                    f"{a.path} ({a.error.summary})" if a.error else a.path
-                    for a in failed
-                )
-                if failed
-                else "artifact offload failed"
-            )
-            env.retry_class = RetryClass.RETRY_SAME
         else:
-            env.offload = Offload.OK
-
-        # Stage failures are classified by the runner into a coarse, safe
-        # category before ever leaving the VM (see StageItemError in
-        # runtime_payload/runner.py) -- the destination path and category
-        # are not secrets; only the raw exception/URL ever was. Use that
-        # detail when the runner supplied it; fall back to the generic
-        # explanation for older runtime payloads or non-item failures
-        # (e.g. a malformed manifest) that never got that far.
-        if stage_failed:
-            env.retry_class = RetryClass.FIX_HUMAN
-            detail = None
-            if isinstance(env.exception, dict):
-                msg = env.exception.get("message")
-                if msg and msg != "stage failed":
-                    detail = msg
-            if detail:
-                env.reason = f"staging failed ({detail}). The consumer never started."
-            else:
-                env.reason = (
-                    "staging failed: a declared input could not be fetched, or "
-                    "failed its sha256 check. The consumer never started."
-                )
-            env.hints.append(
-                "check, in order: the URL has not expired; the object exists "
-                "and the grant covers it; data[].sha256 matches the object"
+            env.offload, offload_reason, offload_retry = verdict.offload_outcome(
+                spec.artifacts,
+                env.artifacts,
+                result.get("offload"),
+                result.get("offload_error"),
             )
-        elif env.workload is Workload.FAILED and env.retry_class is None:
-            env.retry_class = RetryClass.FIX_CODE
+
         if stage_failed:
+            env.reason, env.retry_class = verdict.stage_outcome(
+                env.inputs, env.exception
+            )
             env.record_failure(Phase.STAGE)
-        elif env.workload in (Workload.FAILED, Workload.UNKNOWN):
-            env.record_failure(Phase.RUN)
-        elif env.offload is Offload.FAILED:
-            env.record_failure(Phase.OFFLOAD)
+        else:
+            workload_reason, workload_retry = verdict.workload_outcome(
+                result, spec.budgets.wall_clock
+            )
+            env.reason = (
+                "; ".join(r for r in (workload_reason, offload_reason) if r) or None
+            )
+            # The workload's own failure decides the next action; an upload
+            # failure alongside it is named in the reason.
+            env.retry_class = workload_retry or offload_retry
+            if workload_retry is not None:
+                env.record_failure(Phase.RUN)
+            elif env.offload is Offload.FAILED:
+                env.record_failure(Phase.OFFLOAD)
+        for warning in result.get("runner_warnings") or []:
+            hint = f"runner: {warning}"
+            if hint not in env.hints:
+                env.hints.append(hint)
         if env.surviving_descendants:
             hint = (
                 f"{len(env.surviving_descendants)} descendant(s) outlived the "
@@ -1507,6 +1466,25 @@ def observe_remote(transport, job_id: str):
     ):
         return "runner_dead", launch
     return "runner_alive", launch
+
+
+def watchdog_hint(wd: dict) -> str:
+    """One line from watchdog.json: elapsed and remaining time, GPU (or why
+    nvidia-smi gave nothing), free disk, and whether the runner is alive
+    (or why that is unknown)."""
+    gpu = wd.get("gpu")
+    if gpu is None and wd.get("gpu_error"):
+        gpu = f"none ({wd['gpu_error']})"
+    alive = f"{wd.get('runner_alive')}"
+    if wd.get("runner_identity_error"):
+        alive += f" ({wd['runner_identity_error']})"
+    return (
+        f"t={wd.get('elapsed')}s "
+        f"remaining={wd.get('remaining')}s "
+        f"gpu={gpu} "
+        f"disk_free={wd.get('disk_free_bytes')} "
+        f"runner_alive={alive}"
+    )
 
 
 def await_runner_result(transport, job_id: str, wait: int):
