@@ -1764,3 +1764,42 @@ def test_watchdog_still_kills_at_the_deadline_when_its_record_cannot_be_written(
 
     assert signal.SIGTERM in killed
     assert "[watchdog] watchdog.json not written: OSError" in capsys.readouterr().err
+
+
+def test_a_log_line_that_cannot_be_written_does_not_stop_the_runner(monkeypatch):
+    import builtins
+
+    from colab_cli.job.runtime_payload import runner as runner_module
+
+    def full_disk(*_a, **_k):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(builtins, "print", full_disk)
+    runner_module._log("verdict line")
+
+
+def test_oom_log_keeps_only_the_kernels_kill_lines_for_this_run(monkeypatch):
+    from colab_cli.job.runtime_payload import runner as runner_module
+
+    dmesg = "\n".join(
+        [
+            "[ 10.0] eth0: link up",
+            "[ 50.0] Out of memory: Killed process 11 (old) total-vm:1kB",
+            "[ 90.0] Memory cgroup out of memory: Killed process 22 (python3) total-vm:2kB",
+            "[ 95.0] oom_reaper: reaped process 22 (python3)",
+        ]
+    )
+    seen = {}
+
+    def run(cmd, **kwargs):
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(cmd, 0, stdout=dmesg, stderr="")
+
+    monkeypatch.setattr(runner_module.subprocess, "run", run)
+
+    assert runner_module._oom_log(1) == [
+        "[ 90.0] Memory cgroup out of memory: Killed process 22 (python3) total-vm:2kB"
+    ]
+    assert runner_module._oom_log(0) == []
+    # Kernel log bytes that are not UTF-8 must not raise in the verdict path.
+    assert seen["errors"] == "replace"

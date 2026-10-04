@@ -33,6 +33,7 @@ import requests
 
 import colab_cli.common as common
 from colab_cli.contents import ContentsClient
+from colab_cli.job.runtime_payload.redact import describe_error
 from colab_cli.state import SessionState, StateStore
 from colab_cli.utils import get_status_code
 
@@ -52,6 +53,18 @@ class TransportError(Exception):
     def __init__(self, status: ReadStatus, message: str):
         super().__init__(message)
         self.status = status
+
+
+def _failed(what: str, error: BaseException, retries: int = 0, after: str = "") -> str:
+    """`what` and why it failed: the error with credentials redacted (a
+    requests error quotes the Contents URL, which carries the proxy token),
+    the retries spent, and what was tried after it."""
+    message = f"{what}: {describe_error(error)}"
+    if retries:
+        message += f" (after {retries} retr{'y' if retries == 1 else 'ies'})"
+    if after:
+        message += f"; {after}"
+    return message
 
 
 class JobTransport:
@@ -208,7 +221,12 @@ class JobTransport:
                     refresh_status = self._refresh_token()
                     if refresh_status is not ReadStatus.OK:
                         raise TransportError(
-                            refresh_status, f"upload failed: {remote_path}"
+                            refresh_status,
+                            _failed(
+                                f"upload failed: {remote_path}",
+                                error,
+                                after=f"the token refresh failed ({refresh_status.value})",
+                            ),
                         ) from error
                     continue
                 if isinstance(error, requests.exceptions.Timeout):
@@ -217,14 +235,21 @@ class JobTransport:
                         return
                     if confirmed is None:
                         raise TransportError(
-                            ReadStatus.DEGRADED, f"upload failed: {remote_path}"
+                            ReadStatus.DEGRADED,
+                            _failed(
+                                f"upload failed: {remote_path}",
+                                error,
+                                transient_retries,
+                                after="whether it completed could not be confirmed",
+                            ),
                         ) from error
                 if self._is_transient(error) and transient_retries < self.max_retries:
                     self._sleep(self.backoff_factor * (2**transient_retries))
                     transient_retries += 1
                     continue
                 raise TransportError(
-                    self._classify_endpoint(), f"upload failed: {remote_path}"
+                    self._classify_endpoint(),
+                    _failed(f"upload failed: {remote_path}", error, transient_retries),
                 ) from error
 
 
@@ -244,7 +269,12 @@ class JobTransport:
                     refresh_status = self._refresh_token()
                     if refresh_status is not ReadStatus.OK:
                         raise TransportError(
-                            refresh_status, f"could not create {remote_dir}"
+                            refresh_status,
+                            _failed(
+                                f"could not create {remote_dir}",
+                                error,
+                                after=f"the token refresh failed ({refresh_status.value})",
+                            ),
                         ) from error
                     continue
                 if isinstance(error, requests.exceptions.Timeout):
@@ -253,14 +283,21 @@ class JobTransport:
                         return
                     if confirmed is None:
                         raise TransportError(
-                            ReadStatus.DEGRADED, f"could not create {remote_dir}"
+                            ReadStatus.DEGRADED,
+                            _failed(
+                                f"could not create {remote_dir}",
+                                error,
+                                transient_retries,
+                                after="whether it completed could not be confirmed",
+                            ),
                         ) from error
                 if self._is_transient(error) and transient_retries < self.max_retries:
                     self._sleep(self.backoff_factor * (2**transient_retries))
                     transient_retries += 1
                     continue
                 raise TransportError(
-                    self._classify_endpoint(), f"could not create {remote_dir}"
+                    self._classify_endpoint(),
+                    _failed(f"could not create {remote_dir}", error, transient_retries),
                 ) from error
 
 

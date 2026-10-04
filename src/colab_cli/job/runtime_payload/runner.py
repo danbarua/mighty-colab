@@ -111,7 +111,7 @@ def _read_json_checked(path):
             return json.load(f), None
     except FileNotFoundError:
         return None, None
-    except (OSError, ValueError) as error:
+    except Exception as error:  # noqa: BLE001 - a bad record must not eat the verdict
         return None, f"{type(error).__name__}: {error}"
 
 
@@ -383,8 +383,12 @@ def _http_put_file(url, path):
 def _log(message):
     """One line to runner.log, flushed at once: the supervisor copies
     runner.log off the VM as soon as result.json appears, and anything
-    still buffered then never reaches the local job record."""
-    print(f"[runner] {message}", flush=True)
+    still buffered then never reaches the local job record. A log line
+    that cannot be written (a full disk) must not stop the verdict."""
+    try:
+        print(f"[runner] {message}", flush=True)
+    except (OSError, ValueError):
+        pass
 
 
 # No response at all: DNS, refused or reset connections, timeouts, TLS
@@ -836,8 +840,9 @@ def _signal_name(number):
 
 def _oom_kill_count():
     """System-wide count of kernel OOM kills from /proc/vmstat, or None
-    where it is unreadable. On Colab the job's cgroup has no memory limit,
-    so its own memory.events never counts a kill; the global counter does."""
+    where it is unreadable. On Colab the job's own cgroup (memory.max is
+    "max") did not count an OOM kill that this counter did: the limit that
+    fired belongs to an enclosing cgroup."""
     try:
         with open("/proc/vmstat") as f:
             for line in f:
@@ -855,7 +860,12 @@ def _oom_log(count):
     kernel log is unreadable."""
     try:
         out = subprocess.run(
-            ["dmesg"], capture_output=True, text=True, timeout=5, check=False
+            ["dmesg"],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=5,
+            check=False,
         )
     except (OSError, subprocess.SubprocessError) as error:
         _log(f"dmesg unavailable: {type(error).__name__}: {error}")

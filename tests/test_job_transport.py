@@ -376,3 +376,51 @@ def test_stalled_upload_is_degraded_not_session_lost(
 
     assert error.value.status is ReadStatus.DEGRADED
     client.list_assignments.assert_not_called()
+
+
+def test_a_failed_upload_says_why_without_the_proxy_token(
+    mocker, session_state, assignment, tmp_path
+):
+    local = tmp_path / "train.py"
+    local.write_text("print(1)\n")
+    contents = MagicMock()
+    response = requests.Response()
+    response.status_code = 500
+    contents.upload.side_effect = requests.HTTPError(
+        "500 Server Error: Internal Server Error for url: "
+        "https://proxy.example/api/contents/content/jobs/x/src/train.py?authuser=0&token=SECRET",
+        response=response,
+    )
+    client = MagicMock()
+    client.list_assignments.return_value = [assignment]
+    transport, _factory, _refreshed = make_transport(
+        mocker, session_state, contents, client, MagicMock()
+    )
+
+    with pytest.raises(TransportError) as error:
+        transport.upload(str(local), "/content/jobs/x/src/train.py")
+
+    message = str(error.value)
+    assert message.startswith(
+        "upload failed: /content/jobs/x/src/train.py: HTTPError: 500 Server Error"
+    )
+    assert "(after 3 retries)" in message
+    assert "SECRET" not in message
+
+
+def test_a_failed_token_refresh_is_named(mocker, session_state, tmp_path):
+    local = tmp_path / "train.py"
+    local.write_text("print(1)\n")
+    contents = MagicMock()
+    contents.upload.side_effect = http_error(401)
+    client = MagicMock()
+    client.list_assignments.return_value = []
+    transport, _factory, _refreshed = make_transport(
+        mocker, session_state, contents, client, MagicMock()
+    )
+
+    with pytest.raises(TransportError) as error:
+        transport.upload(str(local), "/content/jobs/x/src/train.py")
+
+    assert error.value.status is ReadStatus.SESSION_LOST
+    assert str(error.value).endswith("; the token refresh failed (session_lost)")
