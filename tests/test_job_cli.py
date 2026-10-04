@@ -3295,26 +3295,85 @@ def test_sigterm_before_launch_releases_the_vm(tmp_path, monkeypatch, mock_commo
     assert "SIGTERM" in job["reason"] and "before the runner was launched" in job["reason"]
 
 
-def test_sighup_after_launch_keeps_the_job_recoverable(tmp_path, monkeypatch, mock_common_state):
+def test_sigterm_after_launch_hands_off_to_a_detached_poll(
+    tmp_path, monkeypatch, mock_common_state
+):
+    """An agent that hit its tool-call limit may never come back: a detached
+    `job status --poll` collects the result and releases the VM."""
     import os
     import signal
 
-    released, detached = [], []
+    from colab_cli.commands import job as job_command
+
+    spawned, released = [], []
+
+    def spawn_status_poll(**kwargs):
+        store = job_command._store()
+        spawned.append(
+            (kwargs["job_id"], kwargs["log_path"], store.supervisor_identity(kwargs["job_id"]))
+        )
+        return 4343
+
+    monkeypatch.setattr(job_command, "spawn_status_poll", spawn_status_poll)
+
+    def poll(_self, _transport, deadline):
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    result, _ = _apply_with(
+        monkeypatch, tmp_path, mock_common_state,
+        launch=_launch_running, poll=poll,
+        cleanup=lambda self, force_leave_up=False: released.append(True),
+        detach=lambda self: None,
+    )
+
+    job = _envelope(result.output)["job"]
+    assert released == []
+    assert len(spawned) == 1
+    job_id, log_path, identity_at_spawn = spawned[0]
+    assert job_id == job["job_id"] and log_path.endswith("status-poll.log")
+    assert identity_at_spawn is None, "a live supervisor identity would stop the poll releasing"
+    assert job["cleanup"] == "pending"
+    assert "SIGTERM" in job["reason"] and "detached `job status --poll`" in job["reason"]
+    assert any("status-poll.log" in h for h in job["hints"])
+
+
+def test_sighup_after_launch_also_hands_off(tmp_path, monkeypatch, mock_common_state):
+    import os
+    import signal
+
+    from colab_cli.commands import job as job_command
+
+    spawned = []
+    monkeypatch.setattr(job_command, "spawn_status_poll", lambda **kw: spawned.append(kw) or 1)
 
     def poll(_self, _transport, deadline):
         os.kill(os.getpid(), signal.SIGHUP)
 
     result, _ = _apply_with(
         monkeypatch, tmp_path, mock_common_state,
-        launch=_launch_running, poll=poll,
-        cleanup=lambda self, force_leave_up=False: released.append(True),
-        detach=lambda self: detached.append(True),
+        launch=_launch_running, poll=poll, detach=lambda self: None,
     )
 
-    job = _envelope(result.output)["job"]
-    assert released == [] and detached == [True]
-    assert job["cleanup"] == "pending"
-    assert "SIGHUP" in job["reason"] and "keeps running" in job["reason"]
+    assert len(spawned) == 1
+    assert "SIGHUP" in _envelope(result.output)["job"]["reason"]
+
+
+def test_ctrl_c_after_launch_does_not_hand_off(tmp_path, monkeypatch, mock_common_state):
+    """A person who pressed Ctrl-C comes back; the job stays recoverable."""
+    from colab_cli.commands import job as job_command
+
+    spawned = []
+    monkeypatch.setattr(job_command, "spawn_status_poll", lambda **kw: spawned.append(kw) or 1)
+
+    def poll(_self, _transport, deadline):
+        raise KeyboardInterrupt
+
+    _apply_with(
+        monkeypatch, tmp_path, mock_common_state,
+        launch=_launch_running, poll=poll, detach=lambda self: None,
+    )
+
+    assert spawned == []
 
 
 def test_apply_restores_the_signal_handlers_it_installed(tmp_path, monkeypatch, mock_common_state):

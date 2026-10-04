@@ -155,20 +155,39 @@ def spawn_apply_async(
     parent's parsed Typer flags (AGENTS.md item 16). The child never gets
     `--async` itself -- it must run the real, blocking lifecycle.
     """
+    args = ["job", "apply"]
+    if plan_file:
+        args.append(plan_file)
+    if job_id_opt:
+        args.extend(["--job-id", job_id_opt])
+    if timeout is not None:
+        args.extend(["--timeout", str(timeout)])
+    if leave_up:
+        args.append("--leave-up")
+    return _spawn_detached(args, log_path, auth_provider, config_path)
+
+
+def spawn_status_poll(
+    *, job_id: str, log_path: str, auth_provider=None, config_path: Optional[str] = None
+) -> int:
+    """Spawns a detached `job status JOB_ID --poll`: the supervisor that
+    finishes an orphaned job, collecting its result and releasing the VM
+    when it ends. apply hands a launched job to it when stopped by SIGTERM
+    or SIGHUP, so nobody has to come back for the VM."""
+    return _spawn_detached(
+        ["job", "status", job_id, "--poll"], log_path, auth_provider, config_path
+    )
+
+
+def _spawn_detached(args, log_path: str, auth_provider, config_path) -> int:
+    """Runs `mighty-colab ARGS` as a detached process with stdio sent to
+    `log_path`, propagating the global flags it does not inherit."""
     cmd = [sys.executable, "-m", "colab_cli.cli"]
     if auth_provider is not None:
         cmd.append(f"--auth={auth_provider.value}")
     if config_path is not None:
         cmd.extend(["--config", config_path])
-    cmd.extend(["job", "apply"])
-    if plan_file:
-        cmd.append(plan_file)
-    if job_id_opt:
-        cmd.extend(["--job-id", job_id_opt])
-    if timeout is not None:
-        cmd.extend(["--timeout", str(timeout)])
-    if leave_up:
-        cmd.append("--leave-up")
+    cmd.extend(args)
 
     kwargs = {}
     if sys.platform != "win32":
@@ -687,6 +706,7 @@ def apply(
     deadline = time.time() + budget
     secret_handoff = False
     previous_handlers = {}
+    hand_off_log = None
     for stop_signal in (signal.SIGTERM, signal.SIGHUP):
         try:
             previous_handlers[stop_signal] = signal.signal(stop_signal, _stop_supervisor)
@@ -744,9 +764,30 @@ def apply(
                 "before the runner was launched; the VM is released"
             )
             orch.env.retry_class = RetryClass.RETRY_SAME
+        elif isinstance(stop, SupervisorStopped):
+            # SIGTERM (an agent's tool-call limit) or SIGHUP (a closed
+            # terminal): whoever started apply may not come back. A
+            # detached `job status --poll` takes over after this process
+            # has cleared its supervisor identity (below).
+            hand_off_log = str(store.job_dir(p.job_id) / "status-poll.log")
+            orch.env.supervisor = Supervisor.INTERRUPTED
+            orch.env.reason = (
+                f"stopped by {how} after the runner was launched; the job keeps "
+                "running, and a detached `job status --poll` collects the result "
+                "and releases the VM when it ends"
+            )
+            orch.env.retry_class = None
+            orch.env.hints.extend(
+                [
+                    f"the VM is still billing: the detached poll logs to {hand_off_log}",
+                    f"the VM is still billing: `mighty-colab job destroy {p.job_id}` "
+                    "stops the job and releases the VM now",
+                ]
+            )
         else:
-            # The detached runner keeps going. Cleanup stays pending, so
-            # `job status --poll` collects the result and releases the VM.
+            # Ctrl-C: the person who pressed it comes back. The detached
+            # runner keeps going and cleanup stays pending, so `job status
+            # --poll` collects the result and releases the VM.
             orch.env.supervisor = Supervisor.INTERRUPTED
             orch.env.reason = (
                 f"interrupted locally by {how} after the runner was launched; the "
@@ -836,6 +877,23 @@ def apply(
             orch.cleanup(force_leave_up=keep)
         store.clear_supervisor_identity(p.job_id)
         claim.release()
+        if hand_off_log is not None and orch.env.cleanup is Cleanup.PENDING:
+            # Only now: a detached poll that saw this process's supervisor
+            # identity would treat the job as supervised and never release.
+            try:
+                spawn_status_poll(
+                    job_id=p.job_id,
+                    log_path=hand_off_log,
+                    auth_provider=state.auth_provider,
+                    config_path=state.config_path,
+                )
+            except Exception as error:  # noqa: BLE001 - the job stays recoverable
+                orch.env.hints.append(
+                    f"the VM is still billing: the detached poll could not start "
+                    f"({describe_error(error)}); run `mighty-colab job status "
+                    f"{p.job_id} --poll` or `mighty-colab job destroy {p.job_id}`"
+                )
+                store.write_envelope(orch.env)
         for stop_signal, handler in previous_handlers.items():
             signal.signal(stop_signal, handler)
 
