@@ -14,14 +14,16 @@
 # limitations under the License.
 
 # A local supervisor that stops early must not leave a VM billing with
-# nobody responsible for it. Three CPU jobs:
+# nobody responsible for it, and a stopped job keeps its verdict. Four CPU jobs:
 #   1. `apply --timeout` passes while the workload still runs: apply
 #      cancels the runner, keeps its result, and releases the VM;
 #   2. SIGINT (Ctrl-C) during install, before the runner is launched:
 #      apply releases the VM;
 #   3. SIGTERM after launch, as an agent harness sends when a tool call runs
-#      too long: the run continues, cleanup stays pending (not left_up), and
-#      `job status --poll` collects the result and releases the VM.
+#      too long: the run continues, and a detached `job status --poll` that
+#      apply starts on its way out collects the result and releases the VM;
+#   4. wall_clock passes: the watchdog kills the workload and escalates, but
+#      never signals the runner, which writes the verdict.
 # Signals go to the apply process itself (the pid in supervisor.json), not
 # to the uv wrapper.
 
@@ -41,6 +43,17 @@ APPLY_PID=""
 
 mc() {
     uv run mighty-colab --auth=adc --config "$SESSION_FILE" "$@"
+}
+
+# Assignment checks parse `--json sessions` instead of matching its text.
+endpoint_listed() {
+    SESSIONS="$(mc --json sessions 2>/dev/null)" ENDPOINT="$1" uv run python -c \
+        'import json, os; listed = {s.get("endpoint") for s in json.loads(os.environ["SESSIONS"])["sessions"]}; raise SystemExit(0 if os.environ["ENDPOINT"] in listed else 1)'
+}
+
+no_sessions() {
+    SESSIONS="$(mc --json sessions 2>/dev/null)" uv run python -c \
+        'import json, os; raise SystemExit(0 if not json.loads(os.environ["SESSIONS"])["sessions"] else 1)'
 }
 
 cleanup() {
@@ -76,7 +89,7 @@ plan() {
         echo "accelerator: {prefer: [], accept_cpu: true}"
         echo "code: {kind: file, root: $TMP_DIR, entry: sleeper.py, args: [\"$seconds\"]}"
         [ -n "$dep" ] && echo "deps: [\"$dep\"]"
-        echo "budgets: {wall_clock: 1200}"
+        echo "budgets: {wall_clock: ${WALL_CLOCK:-1200}}"
     } >"$TMP_DIR/$name.yaml"
     JOB_ID=$(mc --json job plan "$TMP_DIR/$name.yaml" --no-probe | uv run python -c \
         "import json, sys; print(json.load(sys.stdin)['job_id'])")
@@ -125,7 +138,7 @@ interrupt_apply() {
 assert_released() {
     local endpoint
     endpoint=$(job_field endpoint)
-    if grep -q -- "$endpoint" <<<"$(mc sessions)"; then
+    if endpoint_listed "$endpoint"; then
         mc sessions
         echo "$1 left $endpoint listed" >&2
         exit 1
@@ -144,7 +157,9 @@ $1"
 plan timeout 600
 mc --json job apply --job-id "$JOB_ID" --timeout 150 >"$TMP_DIR/timeout.json" || true
 check '
-assert env["workload"] in ("cancelled", "unknown"), env
+# The runner survives the cancel (the watchdog never signals it) and
+# writes its own verdict.
+assert env["workload"] == "cancelled", env
 assert env["failed_phase"] == "run", env
 assert "--timeout of 150s" in env["reason"], env
 assert env["cleanup"] == "released", env
@@ -169,7 +184,8 @@ print("install interrupt:", env["reason"])
 '
 assert_released "install interrupt"
 
-# 3. SIGTERM after launch, then status --poll collects and releases.
+# 3. SIGTERM after launch: a detached `job status --poll` takes over and
+#    releases the VM when the job ends, with nobody coming back.
 plan run-interrupt 60
 mc --json job apply --job-id "$JOB_ID" >"$TMP_DIR/run.json" 2>/dev/null &
 APPLY_PID=$!
@@ -178,29 +194,33 @@ interrupt_apply TERM
 check '
 assert env["cleanup"] == "pending", env
 assert "SIGTERM" in env["reason"], env
-assert env["supervisor"] == "interrupted", env
-assert "keeps running" in env["reason"], env
+assert "detached `job status --poll`" in env["reason"], env
 print("run interrupt:", env["reason"])
 '
 ENDPOINT=$(job_field endpoint)
-grep -q -- "$ENDPOINT" <<<"$(mc sessions)" || { echo "the interrupted run's VM should still be assigned" >&2; exit 1; }
-mc --json job status "$JOB_ID" --poll --interval 5 >"$TMP_DIR/status.json" &
-APPLY_PID=$!
+endpoint_listed "$ENDPOINT" || { echo "the handed-off run's VM should still be assigned" >&2; exit 1; }
 for _ in $(seq 1 150); do
-    kill -0 "$APPLY_PID" 2>/dev/null || break
+    [ "$(job_field cleanup)" = released ] && break
     sleep 2
 done
-if kill -0 "$APPLY_PID" 2>/dev/null; then
-    echo "job status --poll did not finish within 300s" >&2
-    exit 1
-fi
-wait "$APPLY_PID" || true
-APPLY_PID=""
 check '
+assert env["cleanup"] == "released", f"the detached poll did not release the VM within 300s: {env}"
 assert env["workload"] == "succeeded", env
-assert env["cleanup"] == "released", env
-print("status --poll after interrupt:", env["workload"], env["cleanup"])
+assert os.path.exists(os.path.join(os.environ["JOB_DIR"], "status-poll.log")), "no status-poll.log"
+print("detached poll:", env["workload"], env["cleanup"])
 '
-assert_released "status --poll"
+assert_released "detached poll"
 
-echo "[SUCCESS] --timeout cancelled and released; Ctrl-C before launch released; SIGTERM after launch stayed recoverable and status --poll released"
+# 4. wall_clock passes: the watchdog terminates the workload and escalates
+#    to SIGKILL, but never touches the runner, which writes the verdict.
+WALL_CLOCK=60 plan wall-clock 600
+mc --json job apply --job-id "$JOB_ID" >"$TMP_DIR/wall-clock.json" || true
+check '
+assert env["workload"] in ("cancelled", "failed"), f"no runner verdict after the wall_clock kill: {env}"
+assert "runner is dead" not in (env["reason"] or ""), env
+assert env["cleanup"] == "released", env
+print("wall_clock:", env["workload"], "signal", env["signal"], "|", env["reason"])
+'
+assert_released wall_clock
+
+echo "[SUCCESS] --timeout cancelled and released; Ctrl-C before launch released; SIGTERM after launch handed off and the detached poll released"

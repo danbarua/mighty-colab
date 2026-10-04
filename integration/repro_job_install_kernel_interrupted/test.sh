@@ -44,6 +44,17 @@ mc() {
     uv run mighty-colab --auth=adc --config "$SESSION_FILE" "$@"
 }
 
+# Assignment checks parse `--json sessions` instead of matching its text.
+endpoint_listed() {
+    SESSIONS="$(mc --json sessions 2>/dev/null)" ENDPOINT="$1" uv run python -c \
+        'import json, os; listed = {s.get("endpoint") for s in json.loads(os.environ["SESSIONS"])["sessions"]}; raise SystemExit(0 if os.environ["ENDPOINT"] in listed else 1)'
+}
+
+no_sessions() {
+    SESSIONS="$(mc --json sessions 2>/dev/null)" uv run python -c \
+        'import json, os; raise SystemExit(0 if not json.loads(os.environ["SESSIONS"])["sessions"] else 1)'
+}
+
 cleanup() {
     if [ -n "$APPLY_PID" ] && kill -0 "$APPLY_PID" 2>/dev/null; then
         kill "$APPLY_PID" 2>/dev/null || true
@@ -151,7 +162,7 @@ PY
 ENDPOINT=$(APPLY_JSON="$APPLY_JSON" uv run python -c \
     "import json, os; print(json.load(open(os.environ['APPLY_JSON']))['job']['endpoint'])")
 JOB_ID=""
-if grep -q -- "$ENDPOINT" <<<"$(mc sessions)"; then
+if endpoint_listed "$ENDPOINT"; then
     mc sessions
     echo "the released endpoint $ENDPOINT is still listed" >&2
     exit 1
