@@ -1,10 +1,3 @@
----
-log:
-2026-10-03: `deps` install with uv, falling back to pip.
-2026-09-15: Added `budgets.artifact_sync_interval_seconds` (periodic mid-run re-upload of declared `artifacts[]`). Moved into `docs/job/spec.md`.
-2026-09-13: First version. Field list and everyday examples for a `job` spec, written for a reader who has not opened `docs/job/design.md`.
----
-
 # Job spec files
 
 A spec is a YAML file that describes one unattended Colab job.
@@ -167,7 +160,7 @@ The runner streams each data GET and each artifact PUT while it computes SHA-256
 
 Omit `size_bytes` on an artifact only when you do not know the size. That omission is a plan warning. `apply` then refuses the plan unless `ignore_warnings: true`.
 
-A missing optional artifact (`required: false`) does not fail offload. A failed PUT currently fails scalar offload even when the artifact is optional.
+A missing optional artifact (`required: false`) does not fail offload. A failed PUT fails scalar offload even when the artifact is optional.
 
 ### Off-VM result backstop
 
@@ -200,7 +193,7 @@ Do not pass `--headers` to `sign-url`. The runner sends `Content-Type: applicati
 
 ## Signed URLs
 
-The VM has no GCS client. It has no service-account key. It uses `urllib` against HTTPS.
+The VM has no GCS client. It has no service-account key. It uses `urllib` and `http.client` against HTTPS.
 
 A signed URL is an HTTPS URL with a time-limited signature in the query string. You create the object in a bucket the VM can reach. You sign the URL on your laptop. You paste the URL into the spec.
 
@@ -216,6 +209,8 @@ Treat every signed URL as a credential. Generated `spec.json`, `plan.json`, remo
 4. The URL is signed for GET. A PUT signature fails the ranged probe.
 5. Expiry covers `budgets.wall_clock` plus 15 minutes.
 6. `sha256` is 64 hexadecimal characters when you set it.
+
+`apply` checks expiry again, from the current time, before it allocates a VM. That check does not count install time. Installing `deps` can take up to about 53 minutes before the run starts. When `deps` is not empty, sign data and artifact URLs for longer than `wall_clock` plus 15 minutes.
 
 Plan performs a one-byte ranged GET on each `data[]` URL unless you pass `--no-probe`. HTTP 403 or 404 is a plan error.
 
@@ -297,9 +292,11 @@ mighty-colab sessions
 
 Limits that still apply:
 
-- No GPU run completed through the approximately 60-minute proxy refresh.
 - Retry, resume, and `control.log` are not implemented.
 - Caller-owned specs and secret sidecars still contain full signed URLs.
+- URL expiry is checked before install, not after it.
 - After launch, a dropped laptop session does not kill the consumer. `job status --poll` recovers an orphaned supervisor. It does not implement full supervisor takeover.
+
+`docs/job/design.md` lists every known gap.
 
 Use `mighty-colab sessions` after every interrupted run. Destroy any endpoint you no longer need.

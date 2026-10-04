@@ -1355,3 +1355,80 @@ def test_redact_credentials_removes_url_userinfo():
     assert "https://***@pkgs.example/simple/ and" in redacted
     assert "https://***@pkgs.example/simple/x?<redacted>" in redacted
     assert "https://pypi.org/simple/" in redacted
+
+
+def test_watchdog_never_signals_the_runner(tmp_path, monkeypatch):
+    """The runner carries MIGHTY_JOB_ID like the workload, but it is the
+    process that stops the workload, uploads artifacts and writes
+    result.json after a cancel or the deadline. Seen live: a cancelled job
+    lost its result when the watchdog's escapee sweep killed the runner."""
+    from colab_cli.job.runtime_payload import watchdog
+
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    (job_dir / "cancel.json").write_text('{"intent":"cancelled"}')
+    runner_pid = 424242
+    excluded = []
+    ticks = 0
+
+    monkeypatch.setattr(
+        watchdog, "_runner_identity", lambda _d: (runner_pid, "", "", time.time() - 1, time.time())
+    )
+    monkeypatch.setattr(watchdog.ident, "alive", lambda *_a: True)
+    monkeypatch.setattr(
+        watchdog.ident, "signal_tagged", lambda _job, _sig, exclude=(): excluded.append(set(exclude)) or []
+    )
+    monkeypatch.setattr(watchdog, "_safe_killpg", lambda pgid, sig: True)
+
+    def record(*_args):
+        nonlocal ticks
+        ticks += 1
+        if ticks == 3:
+            (job_dir / "result.json").write_text("{}")
+
+    monkeypatch.setattr(watchdog, "_record", record)
+    clock = iter(range(0, 1000, 10))
+    monkeypatch.setattr(watchdog.time, "time", lambda: float(next(clock)))
+    monkeypatch.setattr(watchdog.time, "sleep", lambda _s: None)
+
+    watchdog.main(["--job-dir", str(job_dir), "--shim-pgid", "4321", "--interval", "0.01"])
+
+    assert excluded, "the escapee sweep should have run"
+    assert all(runner_pid in ex for ex in excluded)
+
+
+def test_watchdog_deadline_kill_never_signals_the_runner(tmp_path, monkeypatch):
+    """At wall_clock the watchdog terminates the workload, then escalates;
+    the runner must survive both to offload and write result.json."""
+    from colab_cli.job.runtime_payload import watchdog
+
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    runner_pid = 424242
+    excluded = []
+    ticks = 0
+
+    monkeypatch.setattr(
+        watchdog, "_runner_identity", lambda _d: (runner_pid, "", "", 5.0, 0.0)
+    )
+    monkeypatch.setattr(watchdog.ident, "alive", lambda *_a: True)
+    monkeypatch.setattr(
+        watchdog.ident, "signal_tagged", lambda _job, _sig, exclude=(): excluded.append(set(exclude)) or []
+    )
+    monkeypatch.setattr(watchdog, "_safe_killpg", lambda pgid, sig: True)
+
+    def record(*_args):
+        nonlocal ticks
+        ticks += 1
+        if ticks == 4:
+            (job_dir / "result.json").write_text("{}")
+
+    monkeypatch.setattr(watchdog, "_record", record)
+    clock = iter(range(0, 1000, 10))
+    monkeypatch.setattr(watchdog.time, "time", lambda: float(next(clock)))
+    monkeypatch.setattr(watchdog.time, "sleep", lambda _s: None)
+
+    watchdog.main(["--job-dir", str(job_dir), "--shim-pgid", "4321", "--interval", "0.01"])
+
+    assert len(excluded) >= 2, "both the deadline SIGTERM and the SIGKILL escalation sweep"
+    assert all(runner_pid in ex for ex in excluded)

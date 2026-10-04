@@ -2037,3 +2037,173 @@ def test_an_interrupted_launch_cell_leaves_the_job_to_poll(tmp_path):
 
     assert orch.launch("/content/jobs/unit-job/src") is None
     assert orch.env.workload is Workload.RUNNING
+
+
+# --------------------------------------------------------------------------
+# failed_phase: which phase's failure decided the outcome
+# --------------------------------------------------------------------------
+
+
+def test_record_failure_keeps_the_first_phase():
+    from colab_cli.job.models import JobEnvelope
+
+    env = JobEnvelope(job_id="x")
+    env.record_failure(Phase.RUN)
+    env.record_failure(Phase.CLEANUP)
+    assert env.failed_phase is Phase.RUN
+
+
+@pytest.mark.parametrize(
+    "result,artifacts,expected",
+    [
+        (_stage_failure_result(), True, Phase.STAGE),
+        ({"workload": "failed", "exit_code": 1}, False, Phase.RUN),
+        ({"workload": "unknown", "runner_error": "escapee detection unavailable"}, False, Phase.RUN),
+        ({"workload": "cancelled", "signal": 15}, False, None),
+        ({"workload": "succeeded", "exit_code": 0}, False, None),
+        (
+            {
+                "workload": "succeeded",
+                "exit_code": 0,
+                "artifacts": [{"path": "/content/out/model.pt", "url_id": "https://x/m.pt#1", "status": "failed"}],
+            },
+            True,
+            Phase.OFFLOAD,
+        ),
+        (
+            {
+                "workload": "failed",
+                "exit_code": 1,
+                "artifacts": [{"path": "/content/out/model.pt", "url_id": "https://x/m.pt#1", "status": "failed"}],
+            },
+            True,
+            Phase.RUN,
+        ),
+    ],
+)
+def test_absorbed_result_records_the_failed_phase(tmp_path, result, artifacts, expected):
+    spec = _spec(
+        artifacts=[ArtifactItem(path="/content/out/model.pt", url="https://x/m.pt", required=False)]
+    ) if artifacts else _spec()
+    orch = _orch(tmp_path, spec=spec)
+
+    orch._absorb_result(result)
+
+    assert orch.env.failed_phase is expected
+
+
+def test_poll_without_a_result_records_run_as_the_failed_phase(tmp_path):
+    orch = _orch(tmp_path)
+    transport = _poll_transport(
+        {
+            "launch.json": [{"pid": 7, "starttime": "1", "boot_id": "b"}],
+            "watchdog.json": [{"runner_alive": False, "elapsed": 95}],
+        }
+    )
+
+    orch.poll(transport, deadline=time.time() + 2, interval=0)
+
+    assert orch.env.failed_phase is Phase.RUN
+
+
+def test_a_failed_release_after_success_records_cleanup(tmp_path):
+    client = MagicMock()
+    client.unassign.side_effect = _colab_error(500, '{"error": "backend unavailable"}')
+    orch = _orch(tmp_path, client=client)
+    orch.env.endpoint = "m-s-abc"
+    orch.env.workload = Workload.SUCCEEDED
+
+    orch.cleanup()
+
+    assert orch.env.phase is Phase.CLEANUP
+    assert orch.env.failed_phase is Phase.CLEANUP
+
+
+def test_a_failed_release_after_a_failed_run_keeps_run(tmp_path):
+    client = MagicMock()
+    client.unassign.side_effect = _colab_error(500, '{"error": "backend unavailable"}')
+    orch = _orch(tmp_path, client=client)
+    orch.env.endpoint = "m-s-abc"
+    orch._absorb_result({"workload": "failed", "exit_code": 1})
+
+    orch.cleanup()
+
+    assert orch.env.failed_phase is Phase.RUN
+
+
+# --------------------------------------------------------------------------
+# apply --timeout: cancel the runner and release, never leave the VM billing
+# --------------------------------------------------------------------------
+
+
+def _cancel_transport(results):
+    """result.json answers from `results` in order (last repeats); the
+    runner identity and watchdog say it is alive. Records cancel writes."""
+    transport = _poll_transport(
+        {
+            "result.json": list(results),
+            "launch.json": [{"pid": 7, "starttime": "1", "boot_id": "b"}],
+            "watchdog.json": [{"runner_alive": True, "elapsed": 1000}],
+        }
+    )
+    transport.written = []
+    transport.write_json.side_effect = lambda path, value: transport.written.append((path, value)) or FakeStatus.OK
+    return transport
+
+
+def test_a_passed_deadline_cancels_the_runner_and_keeps_its_result(tmp_path, monkeypatch):
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+    orch = _orch(tmp_path)
+    orch.env.supervisor = Supervisor.INTERRUPTED
+    transport = _cancel_transport([None, {"workload": "cancelled", "signal": 15, "cancel_intent": "cancelled"}])
+
+    orch.cancel_after_deadline(transport, budget=900)
+
+    path, intent = transport.written[0]
+    assert path.endswith("/cancel.json") and intent["by"] == "job apply --timeout"
+    assert orch.env.workload is Workload.CANCELLED
+    assert orch.env.supervisor is Supervisor.FINISHED
+    assert orch.env.failed_phase is Phase.RUN
+    assert "--timeout of 900s" in orch.env.reason
+    assert orch.env.retry_class is RetryClass.RETRY_SAME
+
+
+def test_a_passed_deadline_without_a_result_still_ends_the_job(tmp_path, monkeypatch):
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+    orch = _orch(tmp_path)
+    orch.env.supervisor = Supervisor.INTERRUPTED
+    transport = _cancel_transport([None])
+
+    orch.cancel_after_deadline(transport, budget=900, wait=10)
+
+    assert orch.env.workload is Workload.UNKNOWN
+    assert orch.env.supervisor is Supervisor.FINISHED
+    assert orch.env.offload.terminal
+    assert "--timeout of 900s" in orch.env.reason
+    assert "no result.json within 10s" in orch.env.reason
+
+
+def test_an_absorbed_result_replaces_earlier_local_reasons(tmp_path):
+    """A reason written while the verdict was unknown (an interruption, a
+    degraded transport) is stale once the runner's result arrives."""
+    orch = _orch(tmp_path)
+    orch.env.reason = "interrupted locally after the runner was launched"
+    orch.env.retry_class = RetryClass.RETRY_SAME
+
+    orch._absorb_result({"workload": "succeeded", "exit_code": 0})
+
+    assert orch.env.reason is None
+    assert orch.env.retry_class is None
+
+
+def test_detach_closes_the_local_kernel_client(tmp_path):
+    """Its websocket threads are not daemons: left open, they keep the
+    interrupted apply process from exiting."""
+    rt = MagicMock()
+    orch = _orch(tmp_path, runtime=rt)
+    orch.session_state = SimpleNamespace(url="https://u", token="t")
+    orch._runtime_handle()
+
+    orch.detach()
+
+    rt.stop.assert_called_once()

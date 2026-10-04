@@ -35,6 +35,17 @@ mc() {
     uv run mighty-colab --auth=adc --config "$SESSION_FILE" "$@"
 }
 
+# Assignment checks parse `--json sessions` instead of matching its text.
+endpoint_listed() {
+    SESSIONS="$(mc --json sessions 2>/dev/null)" ENDPOINT="$1" uv run python -c \
+        'import json, os; listed = {s.get("endpoint") for s in json.loads(os.environ["SESSIONS"])["sessions"]}; raise SystemExit(0 if os.environ["ENDPOINT"] in listed else 1)'
+}
+
+no_sessions() {
+    SESSIONS="$(mc --json sessions 2>/dev/null)" uv run python -c \
+        'import json, os; raise SystemExit(0 if not json.loads(os.environ["SESSIONS"])["sessions"] else 1)'
+}
+
 cleanup() {
     if [ -n "$JOB_ID" ]; then
         mc --json job destroy "$JOB_ID" --wait 0 >/dev/null 2>&1 || true
@@ -77,7 +88,7 @@ check() {
     ENDPOINT=$(uv run python -c \
         "import json; print(json.load(open('$TMP_DIR/$1.json'))['job']['endpoint'])")
     JOB_ID=""
-    if mc sessions | grep -q "$ENDPOINT"; then
+    if endpoint_listed "$ENDPOINT"; then
         mc sessions
         echo "case $1 left $ENDPOINT listed" >&2
         exit 1

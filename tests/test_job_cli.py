@@ -3079,3 +3079,306 @@ def test_apply_checks_the_credential_file_when_the_launch_reply_was_lost(
     )
 
     assert "cleanup_secret_channel" in calls
+
+
+def test_apply_records_the_phase_that_failed_not_cleanup(
+    tmp_path, monkeypatch, mock_common_state
+):
+    from colab_cli.job.models import Phase, RetryClass
+    from colab_cli.job.orchestrator import PhaseError
+
+    def install(self):
+        self._set_phase(Phase.INSTALL)
+        raise PhaseError(Phase.INSTALL, "dependency install failed (resolution)", RetryClass.FIX_CODE)
+
+    result, _calls = _apply_with(monkeypatch, tmp_path, mock_common_state, install=install)
+
+    job = _envelope(result.output)["job"]
+    assert job["failed_phase"] == "install"
+
+
+def test_apply_catch_all_records_the_phase_it_was_in(tmp_path, monkeypatch, mock_common_state):
+    def verify(self):
+        from colab_cli.job.models import Phase
+
+        self._set_phase(Phase.VERIFY)
+        raise KeyError("missing_field")
+
+    result, _calls = _apply_with(monkeypatch, tmp_path, mock_common_state, verify=verify)
+
+    assert _envelope(result.output)["job"]["failed_phase"] == "verify"
+
+
+def test_status_records_run_for_a_dead_runner(monkeypatch, mock_common_state):
+    store = _persist_running_job(mock_common_state, job_id="dead-runner")
+    events = []
+    vm = _RunningVM(events, results=[None], runner_alive=False)
+    _use_vm(monkeypatch, mock_common_state, vm, events)
+
+    result = runner.invoke(app, ["job", "status", "dead-runner", "--poll"])
+
+    assert result.exit_code == 0, result.output
+    assert store.read_envelope("dead-runner").failed_phase.value == "run"
+
+
+def test_destroy_of_a_running_job_is_not_a_failure(monkeypatch, mock_common_state):
+    store = _persist_running_job(mock_common_state)
+    events = []
+    vm = _RunningVM(events, results=[None])
+    _use_vm(monkeypatch, mock_common_state, vm, events)
+
+    result = runner.invoke(app, ["job", "destroy", "destroy-me", "--wait", "0"])
+
+    assert result.exit_code == 0, result.output
+    assert store.read_envelope("destroy-me").failed_phase is None
+
+
+def test_status_output_names_the_failed_phase(mock_common_state):
+    from colab_cli.commands.job import _store
+    from colab_cli.job.models import Cleanup, JobEnvelope, Phase, Supervisor
+
+    _store().write_envelope(
+        JobEnvelope(
+            job_id="failed-install",
+            phase=Phase.CLEANUP,
+            failed_phase=Phase.INSTALL,
+            workload=Workload.FAILED,
+            offload=Offload.NOT_REQUIRED,
+            cleanup=Cleanup.RELEASED,
+            supervisor=Supervisor.FINISHED,
+        )
+    )
+
+    result = runner.invoke(app, ["job", "status", "failed-install"])
+
+    assert result.exit_code == 0, result.output
+    assert "failed in:  install" in result.output
+
+
+
+def _launch_running(self, _path):
+    self.env.workload = Workload.RUNNING
+    return 4242
+
+
+def test_ctrl_c_before_launch_releases_the_vm(tmp_path, monkeypatch, mock_common_state):
+    """Nothing runs on the VM before launch: an interruption there must not
+    leave it billing."""
+    from colab_cli.job.models import Cleanup
+
+    released = []
+
+    def install(_self):
+        raise KeyboardInterrupt
+
+    def cleanup(self, force_leave_up=False):
+        released.append(force_leave_up)
+        self.env.cleanup = Cleanup.RELEASED
+
+    result, _calls = _apply_with(
+        monkeypatch, tmp_path, mock_common_state, install=install, cleanup=cleanup
+    )
+
+    job = _envelope(result.output)["job"]
+    assert released == [False]
+    assert job["workload"] == "cancelled"
+    assert job["supervisor"] == "finished"
+    assert job["cleanup"] == "released"
+    assert "before the runner was launched" in job["reason"]
+    assert job["failed_phase"] is None
+
+
+def test_ctrl_c_after_launch_keeps_the_job_recoverable(tmp_path, monkeypatch, mock_common_state):
+    """The detached run continues, but cleanup stays pending so `job status
+    --poll` collects the result and releases the VM."""
+    released = []
+
+    def poll(_self, _transport, deadline):
+        raise KeyboardInterrupt
+
+    detached = []
+    result, _calls = _apply_with(
+        monkeypatch, tmp_path, mock_common_state,
+        launch=_launch_running, poll=poll,
+        cleanup=lambda self, force_leave_up=False: released.append(True),
+        detach=lambda self: detached.append(True),
+    )
+
+    assert detached == [True], "the local kernel client must be closed so apply can exit"
+    payload = _envelope(result.output)
+    job = payload["job"]
+    assert released == []
+    assert job["cleanup"] == "pending"
+    assert job["supervisor"] == "interrupted"
+    assert payload["done"] is False
+    assert "keeps running" in job["reason"]
+    assert any(f"job status {job['job_id']} --poll" in h for h in job["hints"])
+    assert any(f"job destroy {job['job_id']}" in h for h in job["hints"])
+
+
+def test_a_passed_timeout_cancels_and_releases(tmp_path, monkeypatch, mock_common_state):
+    from colab_cli.job.models import Cleanup, Supervisor
+
+    calls = []
+
+    def poll(self, _transport, deadline):
+        self.env.supervisor = Supervisor.INTERRUPTED
+        self.env.reason = "local supervisor deadline reached before a verdict"
+
+    def cancel_after_deadline(self, _transport, budget, wait=None):
+        calls.append(("cancel", budget))
+        self.env.workload = Workload.UNKNOWN
+        self.env.supervisor = Supervisor.FINISHED
+
+    def cleanup(self, force_leave_up=False):
+        calls.append(("cleanup", force_leave_up))
+        self.env.cleanup = Cleanup.RELEASED
+
+    result, _ = _apply_with(
+        monkeypatch, tmp_path, mock_common_state,
+        launch=_launch_running, poll=poll,
+        cancel_after_deadline=cancel_after_deadline, cleanup=cleanup,
+    )
+
+    job = _envelope(result.output)["job"]
+    assert calls[0][0] == "cancel" and calls[1] == ("cleanup", False)
+    assert job["cleanup"] == "released"
+
+
+
+def test_status_poll_drops_the_interrupt_text_once_the_vm_is_released(
+    monkeypatch, mock_common_state
+):
+    store = _persist_running_job(mock_common_state, job_id="interrupted")
+    env = store.read_envelope("interrupted")
+    env.reason = "interrupted locally after the runner was launched; the job keeps running"
+    env.hints = [
+        "the VM is still billing: `mighty-colab job status interrupted --poll` collects the result",
+        "the VM is still billing: `mighty-colab job destroy interrupted` stops the job now",
+    ]
+    store.write_envelope(env)
+    events = []
+    vm = _RunningVM(events, results=[{"workload": "succeeded", "exit_code": 0}])
+    _use_vm(monkeypatch, mock_common_state, vm, events)
+
+    result = runner.invoke(app, ["job", "status", "interrupted", "--poll"])
+
+    assert result.exit_code == 0, result.output
+    final = store.read_envelope("interrupted")
+    assert final.cleanup.value == "released"
+    assert final.reason is None
+    assert not any("still billing" in h for h in final.hints)
+
+
+def test_sigterm_before_launch_releases_the_vm(tmp_path, monkeypatch, mock_common_state):
+    """An agent harness ends a tool call that ran too long with SIGTERM;
+    Python's default for it exits with no cleanup at all."""
+    import os
+    import signal
+
+    from colab_cli.job.models import Cleanup
+
+    released = []
+
+    def install(_self):
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    def cleanup(self, force_leave_up=False):
+        released.append(True)
+        self.env.cleanup = Cleanup.RELEASED
+
+    result, _ = _apply_with(monkeypatch, tmp_path, mock_common_state, install=install, cleanup=cleanup)
+
+    job = _envelope(result.output)["job"]
+    assert released == [True]
+    assert job["workload"] == "cancelled"
+    assert "SIGTERM" in job["reason"] and "before the runner was launched" in job["reason"]
+
+
+def test_sigterm_after_launch_hands_off_to_a_detached_poll(
+    tmp_path, monkeypatch, mock_common_state
+):
+    """An agent that hit its tool-call limit may never come back: a detached
+    `job status --poll` collects the result and releases the VM."""
+    import os
+    import signal
+
+    from colab_cli.commands import job as job_command
+
+    spawned, released = [], []
+
+    def spawn_status_poll(**kwargs):
+        store = job_command._store()
+        spawned.append(
+            (kwargs["job_id"], kwargs["log_path"], store.supervisor_identity(kwargs["job_id"]))
+        )
+        return 4343
+
+    monkeypatch.setattr(job_command, "spawn_status_poll", spawn_status_poll)
+
+    def poll(_self, _transport, deadline):
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    result, _ = _apply_with(
+        monkeypatch, tmp_path, mock_common_state,
+        launch=_launch_running, poll=poll,
+        cleanup=lambda self, force_leave_up=False: released.append(True),
+        detach=lambda self: None,
+    )
+
+    job = _envelope(result.output)["job"]
+    assert released == []
+    assert len(spawned) == 1
+    job_id, log_path, identity_at_spawn = spawned[0]
+    assert job_id == job["job_id"] and log_path.endswith("status-poll.log")
+    assert identity_at_spawn is None, "a live supervisor identity would stop the poll releasing"
+    assert job["cleanup"] == "pending"
+    assert "SIGTERM" in job["reason"] and "detached `job status --poll`" in job["reason"]
+    assert any("status-poll.log" in h for h in job["hints"])
+
+
+def test_sighup_after_launch_also_hands_off(tmp_path, monkeypatch, mock_common_state):
+    import os
+    import signal
+
+    from colab_cli.commands import job as job_command
+
+    spawned = []
+    monkeypatch.setattr(job_command, "spawn_status_poll", lambda **kw: spawned.append(kw) or 1)
+
+    def poll(_self, _transport, deadline):
+        os.kill(os.getpid(), signal.SIGHUP)
+
+    result, _ = _apply_with(
+        monkeypatch, tmp_path, mock_common_state,
+        launch=_launch_running, poll=poll, detach=lambda self: None,
+    )
+
+    assert len(spawned) == 1
+    assert "SIGHUP" in _envelope(result.output)["job"]["reason"]
+
+
+def test_ctrl_c_after_launch_does_not_hand_off(tmp_path, monkeypatch, mock_common_state):
+    """A person who pressed Ctrl-C comes back; the job stays recoverable."""
+    from colab_cli.commands import job as job_command
+
+    spawned = []
+    monkeypatch.setattr(job_command, "spawn_status_poll", lambda **kw: spawned.append(kw) or 1)
+
+    def poll(_self, _transport, deadline):
+        raise KeyboardInterrupt
+
+    _apply_with(
+        monkeypatch, tmp_path, mock_common_state,
+        launch=_launch_running, poll=poll, detach=lambda self: None,
+    )
+
+    assert spawned == []
+
+
+def test_apply_restores_the_signal_handlers_it_installed(tmp_path, monkeypatch, mock_common_state):
+    import signal
+
+    before = (signal.getsignal(signal.SIGTERM), signal.getsignal(signal.SIGHUP))
+    _apply_with(monkeypatch, tmp_path, mock_common_state)
+    assert (signal.getsignal(signal.SIGTERM), signal.getsignal(signal.SIGHUP)) == before

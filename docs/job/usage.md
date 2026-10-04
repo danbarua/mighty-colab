@@ -1,13 +1,3 @@
----
-log:
-2026-10-03: Documented the copy of VM records before every release, `destroy --wait`, artifact failure detail, and unbuffered consumer output; `apply` releases the VM when the runner is dead or never started; live repros for a never-started runner, a VM lost mid-run, and a run past the token boundary; dependency installs with uv then pip, and what a failed install reports.
-2026-09-16: Added `docs/job/mcp.md`: the MCP notification layer that lets an agent driving `job apply --async` learn a job finished without polling.
-2026-09-15: Split `jobs list`/`jobs prune` out of `job` into a new sibling group. Moved this guide into `docs/job/usage.md`.
-2026-09-13: Pointed spec authors to `docs/job/spec.md` for the field list, signed-URL prerequisites, and everyday examples.
-2026-09-12: Fixed GCS control-result URL pairing and automatic fallback (#27), added result/envelope provenance under schema 2 (#26, later hardened), and fixed CLI help/error/exit-code consistency (#24).
-2026-09-11: First version, written the same day `job` was implemented and live-verified end to end: CPU and T4 GPU runs, install/restart/verify, workload failure with cleanup, signed GCS data/artifact/control-result paths, launch-kernel restart, cancel-only termination, and job-owned keep-alive (#17). Also closed secret handling (#18), crash recovery (#16), source-file locking (#20), exclusive job-ID claims (#19), transport deadlines (#22), URL validation (#25), descendant cleanup (#23), and transfer streaming (#21).
----
-
 # Running a job
 
 `job` exists for one situation: **you want to start a long computation on a
@@ -26,13 +16,13 @@ link that makes anything longer than a couple of minutes unusable, and the
 failure looks like `[colab] Error: Connection lost.` with no verdict at all.
 
 `job` makes **one short kernel call** that starts a detached process and
-returns. The kernel then goes idle and is no longer load-bearing. Your run's
-outcome is read back by polling files over the Contents API. Dropping the connection after launch does not kill the consumer; recovery
-and cleanup still have the limits below.
+returns. The kernel then goes idle and the run no longer depends on it. Your
+run's outcome is read back by polling files over the Contents API. Dropping
+the connection after launch does not kill the consumer.
 
-That is the whole idea. The detached consumer survives a dropped launch-kernel connection, but the current v0 supervisor has important limits:
+The steps before launch still depend on the connection:
 
-- Source staging is not resumable and has weaker timeout/token-refresh handling than result polling.
+- Source staging is not resumable. A transport failure during stage fails the job with `retry_same`, or `retry_different` when the assignment is gone.
 - Caller-owned source specs and generated owner-mode `.mighty-colab-secrets.json` sidecars contain full signed URLs. Generated records, remote manifests, diagnostics, and kernel history contain only canonical identities and credential references.
 
 Use `mighty-colab sessions` after every interrupted run and explicitly destroy any endpoint you no longer need.
@@ -41,11 +31,11 @@ Use `mighty-colab sessions` after every interrupted run and explicitly destroy a
 
 ```bash
 mighty-colab job plan SPEC_FILE [--out PATH] [--no-probe]
-mighty-colab job apply [PLAN_FILE] [--job-id ID] [--timeout S] [--leave-up]
+mighty-colab job apply [PLAN_FILE] [--job-id ID] [--timeout S] [--leave-up] [--async]
 mighty-colab job status JOB_ID [--poll] [--interval S]
 mighty-colab job destroy JOB_ID [--cancel-only] [--wait S]
 
-mighty-colab jobs list
+mighty-colab jobs list [--running | --done]
 mighty-colab jobs prune [--dry-run]
 ```
 
@@ -55,7 +45,11 @@ local record collection as a whole, and doesn't touch the VM.
 
 `plan` never allocates a VM. It writes redacted `spec.json` and `plan.json` records, writes a redacted explicit `--out` path, and creates an adjacent mode-0600 `.mighty-colab-secrets.json` sidecar when query credentials exist. Keep that sidecar beside the plan: `apply` validates and hydrates it before allocation. By default planning also performs one-byte ranged GET probes of declared data URLs; `--no-probe` disables those reads. Plans are written even with warnings or errors; `apply` refuses errors and refuses warnings unless the spec sets `ignore_warnings: true`.
 
-`apply` accepts either a plan-file positional argument or `--job-id`. `--timeout` bounds the local supervisor, not the watchdog wall clock. `--leave-up` keeps the VM after completion. `destroy --cancel-only` writes cancellation intent that runner and watchdog consume, but deliberately does not unassign the VM; failure to write the intent is an error. A full `destroy` of a running job writes the same intent and waits up to `--wait` seconds (default 300) for the runner to stop the job, upload artifacts and write its result before release. If the job's `job apply` is still running, `destroy` waits for that supervisor to release the VM instead of releasing it a second time. `jobs list` reads local job records. `jobs prune` deletes the ones that are unambiguously safe (unapplied plans, confirmed-terminal-and-released) and reports what it skipped and why; see `docs/job/store-and-cleanup.md` for the exact rule and the on-disk layout.
+`apply` accepts either a plan-file positional argument or `--job-id`. `--timeout` bounds the local supervisor (default: `wall_clock` + 600 seconds). When it passes with no verdict, apply cancels the job, waits up to 300 seconds for its result, and releases the VM; the watchdog's `wall_clock` kill still applies on the VM. `--leave-up` keeps the VM after completion. `--async` starts `apply` as a detached background process and returns at once with the job ID, the process ID and the path of its log (`apply.log` in the job directory); follow it with `job status --poll`.
+
+`destroy --cancel-only` writes cancellation intent that runner and watchdog consume, but deliberately does not unassign the VM; failure to write the intent is an error. A full `destroy` of a running job writes the same intent and waits up to `--wait` seconds (default 300) for the runner to stop the job, upload artifacts and write its result before release. If the job's `job apply` is still running, `destroy` waits for that supervisor to release the VM instead of releasing it a second time.
+
+`jobs list` reads local job records; `--running` and `--done` filter on `done`. `jobs prune` deletes the ones that are safe to delete (unapplied plans, confirmed-terminal-and-released) and reports what it skipped and why; see `docs/job/store-and-cleanup.md` for the exact rule, its one known gap, and the on-disk layout.
 
 Under `--json`, every job command emits a validated envelope for normal results and expected errors. Job state is nested under `.job` and the convenience `.done`/`.ok` fields are copied to the outer wrapper. Outer `status` and `exit_code` describe the CLI invocation; nested job fields describe the workload. Thus a failed apply exits one with outer `exit_code: 1`, while a successful status query reporting that failed workload exits zero with outer `status: ok` and nested `ok: false`.
 
@@ -155,6 +149,12 @@ Examples:
 - `workload: succeeded` + `cleanup: failed` means the result may be fine, but release was not confirmed and the VM may still bill. Run `job destroy` and check `sessions`.
 - `workload: failed` + `cleanup: released` is a cleanly reported workload failure with no confirmed allocation left behind.
 
+### Where it failed: `failed_phase`
+
+`failed_phase` names the phase whose failure decided the outcome: `provision`, `install`, `restart`, `verify`, `stage`, `run`, `offload` or `cleanup`. It is null when nothing failed, including a cancelled job, a job still running, and an interrupted local supervisor. `phase` is only the last phase reached, which is `cleanup` once the VM has been released, so do not read `phase` as the failure. `run` covers a failed workload, a runner that died or never started, and a lost assignment; `offload` means the workload succeeded and an upload failed; `cleanup` means everything before it succeeded and the release failed. The full rule is in `docs/job/design.md`. `job status` prints it as `failed in:`.
+
+Decide what to do next from `failed_phase` and `retry_class`. `reason` is text for a person and its wording changes; do not parse it.
+
 ### `retry_class` tells you what to do next
 
 When present, treat it as advice for the next action, not an automatic retry promise:
@@ -168,7 +168,7 @@ When present, treat it as advice for the next action, not an automatic retry pro
 | `refresh_urls` | re-sign URLs and re-plan |
 | `do_not_retry` | do not retry unchanged |
 
-v0 performs one attempt. Planning rejects non-default `retry.when`, `max_attempts`, and `mode` values until retry/recreate/resume exist. Unexpected supervisor exceptions receive `do_not_retry`; some cancellation, offload, and cleanup failures still have no `retry_class`.
+`apply` makes one attempt and never retries by itself. Planning rejects non-default `retry.when`, `max_attempts`, and `mode` values. Unexpected supervisor exceptions receive `do_not_retry`. A cancelled workload, and a failed release after a successful workload, have no `retry_class`.
 
 ## Data and artifacts
 
@@ -187,7 +187,7 @@ artifacts:
 
 Use a full 64-hex-character SHA-256 digest. Relative destinations resolve below `/content/jobs/<id>`; absolute destinations must remain below `/content`.
 
-Source staging still uses the Contents API. `kind: bundle` uploads each included file separately, not as one archive. The 250 MB check is per source file, runs during apply after VM allocation, and has no aggregate bundle ceiling. `kind: file` uploads only the entry. Data GET and artifact PUT currently buffer each complete object in VM memory; size datasets and checkpoints accordingly.
+Source staging uses the Contents API. `kind: bundle` uploads each included file separately, not as one archive. `plan` reports an error for any source file over 250 MB and a warning when the whole source tree exceeds 250 MB; `apply` refuses an oversized source file again before assigning a VM. `kind: file` uploads only the entry. The runner streams each data GET and artifact PUT to and from disk in chunks, so object size is limited by disk, not memory; `verify` refuses a job whose declared source, input and output sizes exceed 80% of free disk.
 
 Signed URLs never enter generated spec/plan records, remote data/artifact manifests, validation diagnostics, kernel source/history, or the consumer process's environment and argv. Full URLs remain in the caller-owned source spec and the mode-0600 plan sidecar. Apply uploads them only after public payload staging into a mode-0600 handoff; seal, launch, and the isolated runner fail closed when a declared transfer requires a missing handoff. The launch kernel opens and unlinks it, and `python -I -S -c` consumes the inherited descriptor before starting the consumer. Interrupted recovery confirms deletion or forcibly releases the assignment. Keep source specs and sidecars private. Requirements, install hooks, existing same-UID processes, and the single-user VM must be trusted: these protections prevent persistence and accidental inheritance, not deliberate credential theft by code that runs before upload.
 
@@ -235,7 +235,7 @@ producer fields; unknown result schemas are rejected rather than relabeled.
 Absorption validates a copy first, so an invalid terminal field leaves the
 persisted envelope unchanged.
 
-**Artifacts are attempted even when your run fails.** `on_run_fail: offload_anyway` is the only implemented value; planning rejects `skip` rather than silently ignoring it. A missing optional artifact does not fail offload, but a failed PUT currently fails scalar offload even when that artifact is optional.
+**Artifacts are attempted even when your run fails.** `on_run_fail: offload_anyway` is the only implemented value; planning rejects `skip` rather than silently ignoring it. A missing optional artifact does not fail offload, but a failed PUT fails scalar offload even when that artifact is optional.
 
 A failed artifact says why. Its record in the envelope's `artifacts[]` carries `error`:
 
@@ -254,13 +254,19 @@ The plan records each source file's relative path, size, and SHA-256. Apply refu
 
 ## Things that will bite you
 
-**The ~60 minute wall.** The runtime-proxy token expires about an hour in, and
-expiry shows up as `401`/`404` — which looks exactly like "the VM is gone." It
-is not. We confirmed this by direct experiment: at t+61min a job's files 404'd,
-the assignment was still listed, and re-adopting made the *same files* readable
-again. They had been intact the whole time. `job status` refreshes the token
-for you. If you are writing your own polling loop against `exec`, you must do
-the same, or you will conclude a healthy VM died.
+**Runtime-proxy token expiry.** The token that Contents requests use expires
+about an hour after it is issued, and expiry shows up as `401`/`404` — which
+looks exactly like "the VM is gone." It is not: the VM and its files are
+intact. `job apply`, `job status` and `job destroy` re-resolve the assignment
+on a 401/404, take the fresh token, and retry, so a job runs past the
+boundary without intervention. If you write your own polling loop against
+`exec` or the Contents API, you must do the same, or you will conclude a
+healthy VM died.
+
+**Signed URLs that expire during a long install.** `apply` checks that data
+and artifact URLs stay valid for `wall_clock` plus 15 minutes, counted from
+before provisioning. Installing `deps` can take up to about 53 minutes before
+the run starts. Sign URLs with enough extra time to cover install.
 
 **A GPU you asked for and did not get.** Upstream `new` maps an unrecognised
 accelerator name onto A100, and capacity pressure can hand back a CPU box.
@@ -285,6 +291,10 @@ the local job directory has the full output. An installer that runs past its
 is a version with a prebuilt wheel. A lost kernel connection during install, or a kernel
 interrupted, restarted or shut down while it installs, is `retry_same`.
 
+**`restart-kernel` during install.** `mighty-colab restart-kernel -s job-<id>`
+cannot reach the job's kernel while install runs; the session record learns
+the kernel's id only after the install call returns.
+
 **`retry.when`, not `retry.on`.** YAML 1.1 resolves a bare `on:` key to boolean
 `true`, so the field is named `when`.
 
@@ -295,7 +305,7 @@ process survives the reap.
 
 ## If the supervisor dies
 
-Closing the laptop after the launch RPC normally leaves the detached consumer running, but v0 does not implement full supervisor takeover.
+Closing the laptop after the launch RPC normally leaves the detached consumer running, but `job` does not implement full supervisor takeover. This section covers an `apply` process that was killed or died, or was stopped with Ctrl-C after the runner was launched: each leaves `cleanup` non-terminal, so the commands below can finish the job.
 
 ```bash
 mighty-colab job status <id> --poll
@@ -303,11 +313,20 @@ mighty-colab job status <id> --poll
 
 This command observes remote result, launch, and watchdog records. With `--poll` it continues until a remote verdict, a dead runner, a lost assignment, or a never-started orphan can be classified. For an orphaned supervisor it then finishes pending cleanup; a live runner or a healthy concurrent supervisor remains untouched. The returned envelope can therefore still have `done: false` when the job is legitimately running.
 
-After an interrupted apply, run `status --poll`; it uses the control-result GET fallback when the VM result is unavailable. Then inspect the account and destroy the allocation explicitly.
+The keep-alive daemon that stops Colab reclaiming the idle VM can die with a killed `job apply`. Every `job status` call on a job whose cleanup is still pending respawns the daemon if it is dead and adds a hint saying so. Nothing else respawns it, so poll an orphaned job with `job status` until it finishes.
+
+After a killed apply, run `status --poll`; it uses the control-result GET fallback when the VM result is unavailable. Then inspect the account and destroy the allocation explicitly.
 
 ## Cost discipline
 
-Normal apply paths attempt cleanup in a `finally` block, including unexpected exceptions before and during run. Before any release, by `apply`, `destroy` or `status --poll`, the VM's `runner.log`, `install.log`, `result.json`, `watchdog.json`, `launch.json`, `exception.json`, `cancel.json` and manifests are copied into `~/.config/colab-cli/jobs/<id>/`. The envelope's `hints` name what was copied. Read those files after a failure; the VM is gone. `apply` does not wait out its deadline for a runner that cannot finish: when the watchdog reports the runner dead with no result, or no `launch.json` has appeared 120 seconds after launch and none for 90 seconds of polling, it records `workload: unknown` with the reason and releases the VM. `--leave-up`, an interrupted local supervisor, and `on_offload_fail: leave_up` can leave an allocation. Hard process death can also leave a non-terminal record; local state is not proof of release.
+Normal apply paths attempt cleanup in a `finally` block, including unexpected exceptions before and during run. Before any release, by `apply`, `destroy` or `status --poll`, the VM's `runner.log`, `install.log`, `result.json`, `watchdog.json`, `launch.json`, `exception.json`, `cancel.json` and manifests are copied into `~/.config/colab-cli/jobs/<id>/`. The envelope's `hints` name what was copied. Read those files after a failure; the VM is gone. `apply` does not wait out its deadline for a runner that cannot finish: when the watchdog reports the runner dead with no result, or no `launch.json` has appeared 120 seconds after launch and none for 90 seconds of polling, it records `workload: unknown` with the reason and releases the VM.
+
+These leave a VM running and billing:
+
+- `--leave-up`.
+- `on_offload_fail: leave_up` (the default) when an artifact upload failed.
+- Ctrl-C after the runner was launched. The run continues and the VM stays assigned and billing until the job is released: run `job status <id> --poll` to collect the result and release it when the job ends, or `job destroy <id>` to stop it now. SIGTERM (an agent harness ending a long tool call) or SIGHUP after launch does this for you: `apply` starts a detached `job status --poll` on its way out, which releases the VM when the job ends. (`--timeout`, and any of these signals before launch, release the VM themselves.) A SIGKILL cannot be handled, so drive long jobs with `job apply --async` and `job status --poll`.
+- Hard process death of `apply`, which can also leave a non-terminal record; local state is not proof of release.
 
 When in doubt:
 
@@ -322,10 +341,9 @@ mighty-colab sessions            # server-side assignment inventory
 
 Be aware of these before trusting a long run:
 
-- No GPU run has yet outlived the approximately 60-minute proxy refresh boundary.
-- Caller-owned source specs and generated `.mighty-colab-secrets.json` sidecars still contain full signed URLs and require credential handling.
 - Retry/recreate/resume and `control.log` are not implemented; planning rejects non-default policy values.
+- Caller-owned source specs and generated `.mighty-colab-secrets.json` sidecars still contain full signed URLs and require credential handling.
+- The longest recorded runs are 96 minutes (A100) and 70 minutes (CPU); no recorded run has crossed a second token expiry, at about two hours.
+- A platform-initiated kernel replacement or crash is unverified; the explicit `restart-kernel` path is verified.
 
-Verified live on 2026-09-11: CPU and T4 GPU runs end to end; install/restart/verify with a real dependency pin; the workload failure path with cleanup; proxy access recovery after the approximately 60-minute failure; explicit public launch-kernel restart while a detached consumer continued; cancel-only termination while the assignment remained live, followed by full teardown; signed GCS data GET, artifact PUT, and control-result PUT; job-owned TFE keep-alive through idle leave-up and destroy; and supervisor crash recovery via `status --poll` after killing apply during run. These runs do not verify platform-initiated kernel replacement or the gaps above.
-
-Verified live on 2026-10-03 with CPU jobs: a failed install copying `install.log` before release; `destroy` of a running job waiting for its live `apply --async` supervisor, and, after that supervisor was killed, waiting for the runner's result itself, each reporting the runner's `cancelled` verdict and copying the VM records before release; and a failed artifact PUT through a Cloudflare-proxied destination recording `http_status: 404` and the response body. Also verified that day: a stage failure with a required artifact declared records `offload: skipped` and releases the VM, and a runner SIGKILLed mid-run is classified dead from the watchdog 30 seconds later, with the VM released 52 seconds after `apply` started. Three regression scripts under `integration/` also verify, on CPU VMs: a runner that exits before writing `launch.json` is declared never started and its VM released about four minutes after launch (`repro_job_never_started`); a VM released out of band mid-run is recorded as `cleanup: already_absent` after its unassign 404 is confirmed by the assignment listing (`repro_job_vm_gone`); and a 70-minute job runs past the runtime-proxy token expiry under `apply`, succeeds, and is released only afterwards (`repro_job_token_boundary`). The early-413 recovery for a body over Cloudflare's 100 MB limit is verified against loopback TLS servers only.
+`docs/job/design.md` lists every known gap, and `docs/job/chronology.md` lists what has been verified live and when.

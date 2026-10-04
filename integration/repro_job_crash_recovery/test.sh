@@ -29,6 +29,17 @@ mc() {
     uv run mighty-colab --auth=adc --config "$SESSION_FILE" "$@"
 }
 
+# Assignment checks parse `--json sessions` instead of matching its text.
+endpoint_listed() {
+    SESSIONS="$(mc --json sessions 2>/dev/null)" ENDPOINT="$1" uv run python -c \
+        'import json, os; listed = {s.get("endpoint") for s in json.loads(os.environ["SESSIONS"])["sessions"]}; raise SystemExit(0 if os.environ["ENDPOINT"] in listed else 1)'
+}
+
+no_sessions() {
+    SESSIONS="$(mc --json sessions 2>/dev/null)" uv run python -c \
+        'import json, os; raise SystemExit(0 if not json.loads(os.environ["SESSIONS"])["sessions"] else 1)'
+}
+
 cleanup() {
     if [ -n "$APPLY_PID" ]; then
         kill "$APPLY_PID" >/dev/null 2>&1 || true
@@ -146,7 +157,7 @@ assert payload.get("done") is True, payload
 PY
 JOB_ID=""
 
-if ! mc sessions | grep -q "No active sessions"; then
+if ! no_sessions; then
     mc sessions
     echo "crash recovery left an active session" >&2
     exit 1
