@@ -206,6 +206,63 @@ def pay():
     webbrowser.open(url)
 
 
+def usage():
+    """Show the account's compute-unit balance and hourly consumption"""
+    from colab_cli.client import response_body_if_json
+    from colab_cli.common import build_envelope, emit_json, state
+    from colab_cli.envelopes import UsageEnvelope
+    from colab_cli.utils import get_status_code
+
+    try:
+        ccu = state.client.get_ccu_info()
+    except Exception as e:
+        body = response_body_if_json(e, limit=500)
+        message = f"{type(e).__name__}: {e}" + (
+            f"; response body: {' '.join(body.split())}" if body else ""
+        )
+        if state.json_output:
+            emit_json(
+                build_envelope(
+                    "error",
+                    "usage",
+                    exit_code=1,
+                    reason="usage_unavailable",
+                    http_status=get_status_code(e),
+                    message=message,
+                )
+            )
+        typer.echo(f"[colab] Could not read compute-unit usage: {message}", err=True)
+        raise typer.Exit(1) from None
+
+    typer.echo(f"Current balance: {ccu.current_balance:.2f} compute units")
+    typer.echo(f"Usage rate: {ccu.consumption_rate_hourly:.2f}/hr")
+    typer.echo(f"Active assignments: {ccu.assignments_count}")
+    accelerators = {
+        "eligible_gpus": ("Eligible GPUs", ccu.eligible_gpus),
+        "ineligible_gpus": ("Ineligible GPUs", ccu.ineligible_gpus),
+        "eligible_tpus": ("Eligible TPUs", ccu.eligible_tpus),
+    }
+    for label, names in accelerators.values():
+        if names is not None:
+            typer.echo(f"{label}: {', '.join(names) or 'none'}")
+    if state.json_output:
+        emit_json(
+            build_envelope(
+                "ok",
+                "usage",
+                current_balance=ccu.current_balance,
+                consumption_rate_hourly=ccu.consumption_rate_hourly,
+                assignments_count=ccu.assignments_count,
+                **{
+                    key: names
+                    for key, (_label, names) in accelerators.items()
+                    if names is not None
+                },
+            ),
+            model=UsageEnvelope,
+        )
+
+
 def url(
     session: Annotated[
         Optional[str], typer.Option("-s", "--session", help="Session name")
@@ -699,6 +756,7 @@ def skill():
 
 def register(app: typer.Typer):
     app.command()(pay)
+    app.command()(usage)
     app.command()(log)
     app.command(name="url")(url)
     app.command(name="version")(version_command)

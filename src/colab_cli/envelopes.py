@@ -168,6 +168,18 @@ class StopEnvelope(EnvelopeBase):
     session: str
 
 
+class UsageEnvelope(EnvelopeBase):
+    """`usage --json`. The accelerator lists are left out when Colab did
+    not send them."""
+
+    current_balance: float
+    consumption_rate_hourly: float
+    assignments_count: int
+    eligible_gpus: Optional[List[str]] = None
+    ineligible_gpus: Optional[List[str]] = None
+    eligible_tpus: Optional[List[str]] = None
+
+
 class SessionInfo(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

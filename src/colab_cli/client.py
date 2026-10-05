@@ -22,7 +22,7 @@ from urllib.parse import urljoin, urlparse
 import uuid
 
 from colab_cli.utils import get_status_code
-from pydantic import BaseModel, Field, TypeAdapter
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 import requests
 
 # Standard Colab Headers
@@ -167,6 +167,24 @@ class Assignment(BaseModel):
     runtime_proxy_info: RuntimeProxyInfo = Field(..., alias="runtimeProxyInfo")
 
 
+class CcuInfo(BaseModel):
+    """`GET /tun/m/ccu-info`: the account's compute-unit balance, what its
+    assignments consume per hour, and which accelerators it may request.
+
+    The accelerator lists are None when Colab leaves them out, so "not
+    sent" stays distinct from "none eligible".
+    """
+
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
+    current_balance: float = Field(..., alias="currentBalance")
+    consumption_rate_hourly: float = Field(..., alias="consumptionRateHourly")
+    assignments_count: int = Field(..., alias="assignmentsCount")
+    eligible_gpus: Optional[List[str]] = Field(None, alias="eligibleGpus")
+    ineligible_gpus: Optional[List[str]] = Field(None, alias="ineligibleGpus")
+    eligible_tpus: Optional[List[str]] = Field(None, alias="eligibleTpus")
+
+
 XSSI_PREFIX = ")]}'\n"
 TUN_ENDPOINT = "/tun/m"
 
@@ -291,6 +309,13 @@ class Client:
             kwargs["timeout"] = timeout
         assignments = self._issue_request(url, schema=ListedAssignments, **kwargs)
         return assignments.assignments
+
+    def get_ccu_info(
+        self,
+        timeout: tuple[float, float] | float = ASSIGNMENT_REQUEST_TIMEOUT,
+    ) -> CcuInfo:
+        url = urljoin(self.colab_domain, f"{TUN_ENDPOINT}/ccu-info")
+        return self._issue_request(url, schema=CcuInfo, timeout=timeout)
 
     def unassign(self, endpoint: str):
         url = urljoin(self.colab_domain, f"{TUN_ENDPOINT}/unassign/{endpoint}")
