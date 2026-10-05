@@ -1784,7 +1784,7 @@ def test_poll_does_not_end_the_job_when_liveness_is_unknown(tmp_path):
     assert orch.env.workload is not Workload.UNKNOWN
     assert orch.env.supervisor is Supervisor.INTERRUPTED
     assert orch.env.hints == [
-        "t=95s remaining=505s gpu=none (nvidia-smi exited 9: Unknown Error) "
+        "watchdog: t=95s remaining=505s gpu=none (nvidia-smi exited 9: Unknown Error) "
         "disk_free=None runner_alive=None (launch.json unreadable: JSONDecodeError: x)"
     ]
 
@@ -2246,7 +2246,9 @@ def test_a_passed_deadline_cancels_the_runner_and_keeps_its_result(tmp_path, mon
         ]
     )
 
-    orch.cancel_after_deadline(transport, budget=900)
+    orch.cancel_after_deadline(
+        transport, "apply's --timeout of 900s passed before a verdict", "job apply --timeout"
+    )
 
     path, intent = transport.written[0]
     assert path.endswith("/cancel.json") and intent["by"] == "job apply --timeout"
@@ -2270,7 +2272,9 @@ def test_a_passed_deadline_with_a_result_that_finished_first_keeps_the_cancel_no
     orch.env.supervisor = Supervisor.INTERRUPTED
     transport = _cancel_transport([None, {"workload": "succeeded", "exit_code": 0}])
 
-    orch.cancel_after_deadline(transport, budget=900)
+    orch.cancel_after_deadline(
+        transport, "apply's --timeout of 900s passed before a verdict", "job apply --timeout"
+    )
 
     assert orch.env.reason == (
         "apply's --timeout of 900s passed before a verdict; cancel requested"
@@ -2284,7 +2288,10 @@ def test_a_passed_deadline_without_a_result_still_ends_the_job(tmp_path, monkeyp
     orch.env.supervisor = Supervisor.INTERRUPTED
     transport = _cancel_transport([None])
 
-    orch.cancel_after_deadline(transport, budget=900, wait=10)
+    orch.cancel_after_deadline(
+        transport, "apply's --timeout of 900s passed before a verdict",
+        "job apply --timeout", wait=10,
+    )
 
     assert orch.env.workload is Workload.UNKNOWN
     assert orch.env.supervisor is Supervisor.FINISHED
@@ -2587,3 +2594,36 @@ def test_cleanup_releases_when_told_to_even_after_a_failed_upload(tmp_path):
 
     client.unassign.assert_called_once_with("m-s-abc")
     assert orch.env.cleanup is Cleanup.RELEASED
+
+
+# -- a watchdog that stops writing ---------------------------------------------
+
+
+def test_a_watchdog_that_stops_writing_is_reported_as_stalled(tmp_path, monkeypatch):
+    clock = iter(range(0, 10**6, 100))
+    monkeypatch.setattr("colab_cli.job.orchestrator.time.monotonic", lambda: float(next(clock)))
+    orch = _orch(tmp_path)
+    orch.env.hints = ["verified device=None source=1 input=0 output=0 free=9"]
+    transport = _poll_transport(
+        {"watchdog.json": [{"runner_alive": True, "ts": 5.0, "elapsed": 30, "remaining": 30}]}
+    )
+
+    orch.poll(transport, deadline=time.time() + 0.3, interval=0)
+
+    stalled = [h for h in orch.env.hints if h.startswith("watchdog stalled: ")]
+    assert len(stalled) == 1
+    assert "watchdog.json has not changed for" in stalled[0]
+    assert "(ts=5.0)" in stalled[0]
+    # Earlier hints survive the poll; the telemetry line is replaced in place.
+    assert orch.env.hints[0].startswith("verified device=")
+    assert sum(h.startswith("watchdog: ") for h in orch.env.hints) == 1
+
+
+def test_a_changing_watchdog_is_not_stalled():
+    from colab_cli.job.orchestrator import WatchdogStaleness
+
+    ticks = iter([0.0, 400.0, 800.0])
+    tracker = WatchdogStaleness(clock=lambda: next(ticks))
+    assert tracker.observe({"ts": 1.0}) is None
+    assert tracker.observe({"ts": 31.0}) is None
+    assert tracker.observe({"ts": 61.0}) is None

@@ -3042,13 +3042,14 @@ def _apply_with(monkeypatch, tmp_path, mock_common_state, **overrides):
         "cleanup": lambda self, leave_up=False: setattr(self.env, "cleanup", Cleanup.RELEASED),
     }
     stage = overrides.pop("_stage_payload", lambda _orch, _plan: None)
+    extra_args = overrides.pop("_args", [])
     defaults.update(overrides)
     for name, fn in defaults.items():
         monkeypatch.setattr(Orchestrator, name, fn)
     monkeypatch.setattr(job_command, "_stage_payload", stage)
     _json_mode(mock_common_state)
     mock_common_state.debug = False
-    result = runner.invoke(app, ["job", "apply", str(out)])
+    result = runner.invoke(app, ["job", "apply", str(out), *extra_args])
     return result, calls
 
 
@@ -3247,8 +3248,8 @@ def test_a_passed_timeout_cancels_and_releases(tmp_path, monkeypatch, mock_commo
         self.env.supervisor = Supervisor.INTERRUPTED
         self.env.reason = "local supervisor deadline reached before a verdict"
 
-    def cancel_after_deadline(self, _transport, budget, wait=None):
-        calls.append(("cancel", budget))
+    def cancel_after_deadline(self, _transport, passed, requester, wait=None):
+        calls.append(("cancel", passed, requester))
         self.env.workload = Workload.UNKNOWN
         self.env.supervisor = Supervisor.FINISHED
 
@@ -3264,7 +3265,63 @@ def test_a_passed_timeout_cancels_and_releases(tmp_path, monkeypatch, mock_commo
 
     job = _envelope(result.output)["job"]
     assert calls[0][0] == "cancel" and calls[1] == ("cleanup", False)
+    assert calls[0][2] == "job apply deadline"
+    assert calls[0][1] == "no verdict within 4200s of launch (wall_clock 3600s + 600s)"
     assert job["cleanup"] == "released"
+
+
+def _fake_clock(monkeypatch, start=1000.0):
+    import colab_cli.commands.job as job_command
+
+    clock = {"now": start}
+    monkeypatch.setattr(job_command.time, "time", lambda: clock["now"])
+    return clock
+
+
+def test_the_default_deadline_starts_at_launch(tmp_path, monkeypatch, mock_common_state):
+    """A long install must not eat into the run's wall_clock."""
+    clock = _fake_clock(monkeypatch)
+    seen = {}
+
+    def install(_self):
+        clock["now"] += 3000  # a 50-minute install
+
+    def poll(_self, _transport, deadline):
+        seen["deadline"] = deadline
+
+    result, _ = _apply_with(monkeypatch, tmp_path, mock_common_state, install=install, poll=poll)
+
+    assert result.exit_code in (0, 1), result.output
+    assert seen["deadline"] == 1000.0 + 3000 + 3600 + 600
+
+
+def test_an_explicit_timeout_still_bounds_the_whole_call(tmp_path, monkeypatch, mock_common_state):
+    from colab_cli.job.models import Supervisor
+
+    clock = _fake_clock(monkeypatch)
+    seen = {}
+
+    def install(_self):
+        clock["now"] += 3000
+
+    def poll(self, _transport, deadline):
+        seen["deadline"] = deadline
+        self.env.supervisor = Supervisor.INTERRUPTED
+
+    def cancel_after_deadline(self, _transport, passed, requester, wait=None):
+        seen["cancel"] = (passed, requester)
+        self.env.workload = Workload.UNKNOWN
+        self.env.supervisor = Supervisor.FINISHED
+
+    _apply_with(
+        monkeypatch, tmp_path, mock_common_state, install=install, poll=poll,
+        cancel_after_deadline=cancel_after_deadline, _args=["--timeout", "5000"],
+    )
+
+    assert seen["deadline"] == 1000.0 + 5000
+    assert seen["cancel"] == (
+        "apply's --timeout of 5000s passed before a verdict", "job apply --timeout"
+    )
 
 
 
@@ -3588,3 +3645,35 @@ def test_apply_refuses_with_the_plan_errors_before_checking_the_source_lock(
     envelope = json.loads(_clean(result.output).strip().splitlines()[-1])
     assert [d["code"] for d in envelope["diagnostics"]] == ["source_unreadable"]
     assert "no source lock" not in result.output
+
+
+def test_status_poll_cancels_an_orphan_past_its_deadline_and_releases(
+    monkeypatch, mock_common_state
+):
+    import datetime as dt
+
+    store = _persist_running_job(mock_common_state, job_id="overdue")
+    env = store.read_envelope("overdue")
+    env.started_at = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=1000)).isoformat()
+    store.write_envelope(env)
+    events = []
+    cancelled = {
+        "workload": "cancelled", "signal": 15, "signal_name": "SIGTERM",
+        "cancel_intent": {"intent": "cancelled", "by": "job status --poll"},
+    }
+    vm = _RunningVM(events, results=[None, cancelled])
+    _use_vm(monkeypatch, mock_common_state, vm, events)
+
+    result = runner.invoke(app, ["job", "status", "overdue", "--poll"])
+
+    assert result.exit_code == 0, result.output
+    final = store.read_envelope("overdue")
+    assert "write cancel.json" in events
+    assert events.index("write cancel.json") < events.index("unassign")
+    assert final.workload.value == "cancelled"
+    assert final.cleanup.value == "released"
+    assert final.failed_phase.value == "run"
+    assert final.reason.startswith(
+        "no verdict within 660s of launch (wall_clock 60s + 600s); the job's supervisor "
+        "is gone, so job status --poll cancelled it; cancelled by job status --poll"
+    )

@@ -62,14 +62,21 @@ from colab_cli.job.models import (
 from colab_cli.job.orchestrator import (
     Orchestrator,
     PhaseError,
+    RUN_DEADLINE_MARGIN_SECONDS,
     RUNNER_RESULT_POLL_SECONDS,
     RUNNER_STOP_WAIT_SECONDS,
+    WATCHDOG_STALLED_PREFIX,
+    WatchdogStaleness,
     _now,
     await_runner_result,
     copy_vm_records,
+    deadline_reason,
     observe_remote,
     raw_verdict,
     release_assignment,
+    replace_hint,
+    request_cancel,
+    run_deadline_seconds,
     stop_session_keep_alive,
 )
 from colab_cli.job.runtime_payload import ident
@@ -717,8 +724,10 @@ def apply(
     )
 
 
-    budget = timeout or (p.spec.budgets.wall_clock + 600)
-    deadline = time.time() + budget
+    # An explicit --timeout bounds this whole call from now (an agent's
+    # tool-call limit). The default bounds the run: it starts at launch, so
+    # provisioning and a long install do not eat into the run's wall_clock.
+    deadline = time.time() + timeout if timeout else None
     secret_handoff = False
     previous_handlers = {}
     hand_off_log = None
@@ -744,10 +753,21 @@ def apply(
         # credential handoff file; otherwise cleanup checks for it.
         secret_handoff = launched_pid is not None
         transport = orch.job_transport()
+        if deadline is None:
+            deadline = time.time() + run_deadline_seconds(p.spec)
+            passed = (
+                f"no verdict within {run_deadline_seconds(p.spec)}s of launch "
+                f"(wall_clock {p.spec.budgets.wall_clock}s + "
+                f"{RUN_DEADLINE_MARGIN_SECONDS}s)"
+            )
+            requester = "job apply deadline"
+        else:
+            passed = f"apply's --timeout of {timeout}s passed before a verdict"
+            requester = "job apply --timeout"
         orch.poll(transport, deadline=deadline)
         if orch.env.supervisor is Supervisor.INTERRUPTED:
             # poll's deadline passed with no verdict.
-            orch.cancel_after_deadline(transport, budget)
+            orch.cancel_after_deadline(transport, passed, requester)
     except PhaseError as e:
         orch.env.record_failure(e.phase)
         orch.env.finished_at = orch.env.finished_at or _now()
@@ -1150,6 +1170,74 @@ def _finalize_hints(env) -> None:
     env.hints = deduped
 
 
+def _status_poll_deadline(env, store, job_id: str):
+    """(epoch, description) of an orphaned job's run deadline: launch plus
+    wall_clock plus the margin, as apply's default. None when the job has no
+    launch time (it was orphaned before launch) or no readable plan; that
+    is logged."""
+    if not env.started_at:
+        _logger.warning(
+            "job status %s: no launch time recorded, so status --poll has no deadline",
+            job_id,
+        )
+        return None
+    try:
+        plan = store.read_plan(job_id)
+    except ValueError as error:
+        _logger.warning(
+            "job status %s: plan unreadable (%s), so status --poll has no deadline",
+            job_id,
+            error,
+        )
+        return None
+    if plan is None:
+        _logger.warning("job status %s: no plan, so status --poll has no deadline", job_id)
+        return None
+    try:
+        launched = datetime.datetime.fromisoformat(env.started_at).timestamp()
+    except ValueError:
+        _logger.warning(
+            "job status %s: launch time %r unparseable, so status --poll has no deadline",
+            job_id,
+            env.started_at,
+        )
+        return None
+    seconds = run_deadline_seconds(plan.spec)
+    return launched + seconds, (
+        f"no verdict within {seconds}s of launch "
+        f"(wall_clock {plan.spec.budgets.wall_clock}s + {RUN_DEADLINE_MARGIN_SECONDS}s); "
+        "the job's supervisor is gone, so job status --poll cancelled it"
+    )
+
+
+def _cancel_orphan_after_deadline(env, store, job_id: str, transport, passed: str) -> None:
+    """status --poll's counterpart to apply's deadline cancel, for a job
+    nobody supervises: cancel, wait for the result, and end the job so the
+    orphan release that follows can act."""
+    requester = "job status --poll"
+    note, confirmed = request_cancel(transport, job_id, requester)
+    kind, outcome = await_runner_result(transport, job_id, RUNNER_STOP_WAIT_SECONDS)
+    if kind == "result":
+        try:
+            _absorb_remote_result(env, store, job_id, outcome)
+        except Exception as error:  # noqa: BLE001 - the release must still happen
+            env.hints.append(
+                f"runner result could not be absorbed ({describe_error(error)}); "
+                f"raw result: {raw_verdict(outcome)}"
+            )
+        env.reason = deadline_reason(passed, note, confirmed, requester, outcome, env.reason)
+    else:
+        env.workload = Workload.UNKNOWN
+        if not env.offload.terminal:
+            env.offload = Offload.SKIPPED
+        env.reason = f"{passed}; {note}; {outcome}"
+    env.record_failure(Phase.RUN)
+    if env.retry_class is None:
+        env.retry_class = RetryClass.RETRY_SAME
+    env.supervisor = Supervisor.FINISHED
+    env.finished_at = env.finished_at or _now()
+
+
 def _release_orphaned_job(env, session, state, store, transport) -> None:
     _copy_before_release(env, transport, store)
     stop_session_keep_alive(session)
@@ -1259,7 +1347,14 @@ def status(
                 _emit(env, "status")
                 return
             if not env.workload.terminal:
+                staleness = WatchdogStaleness()
+                deadline = _status_poll_deadline(env, store, job_id) if orphaned else None
                 while True:
+                    if deadline is not None and time.time() > deadline[0]:
+                        _cancel_orphan_after_deadline(
+                            env, store, job_id, transport, deadline[1]
+                        )
+                        break
                     keep_alive_hint = _ensure_keep_alive(session, state)
                     if keep_alive_hint:
                         env.hints.append(keep_alive_hint)
@@ -1297,6 +1392,7 @@ def status(
                         env.workload = Workload.UNKNOWN
                         env.record_failure(Phase.RUN)
                         env.reason = "the assignment is gone from the server"
+                        env.retry_class = RetryClass.RETRY_SAME
                         env.supervisor = Supervisor.FINISHED
                         break
                     if kind == "runner_dead":
@@ -1323,6 +1419,20 @@ def status(
                             "transport failing; the assignment is still listed, "
                             "so the job is not known dead"
                         )
+                    if kind == "launch_invalid":
+                        identity = {
+                            key: (payload or {}).get(key)
+                            for key in ("pid", "starttime", "boot_id")
+                        }
+                        env.reason = (
+                            "launch.json on the VM has no valid runner identity: "
+                            f"{identity}"
+                        )
+                    if kind == "runner_alive" and payload:
+                        stalled = staleness.observe(payload)
+                        replace_hint(env.hints, WATCHDOG_STALLED_PREFIX, stalled)
+                        if stalled:
+                            env.reason = stalled
                     if not poll:
                         break
                     time.sleep(interval)

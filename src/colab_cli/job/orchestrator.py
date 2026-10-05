@@ -310,6 +310,7 @@ class Orchestrator:
         # poll(): whether the runner's own records have ever been read, and
         # since when launch.json has been continuously absent.
         self._runner_seen = False
+        self._watchdog_staleness = WatchdogStaleness()
         self._launch_absent_since: Optional[float] = None
 
     # -- envelope bookkeeping -------------------------------------------
@@ -1064,7 +1065,11 @@ class Orchestrator:
                 wd, wd_status = transport.read_json(f"{self.remote_dir}/watchdog.json")
                 if wd_status.name == "OK" and wd:
                     self._runner_seen = True
-                    self.env.hints = [watchdog_hint(wd)]
+                    replace_hint(self.env.hints, WATCHDOG_HINT_PREFIX, watchdog_hint(wd))
+                    stalled = self._watchdog_staleness.observe(wd)
+                    replace_hint(self.env.hints, WATCHDOG_STALLED_PREFIX, stalled)
+                    if stalled:
+                        self.env.reason = stalled
                     if wd.get("runner_alive") is False:
                         if self._absorb_late_result(transport):
                             return
@@ -1138,45 +1143,29 @@ class Orchestrator:
         return False
 
     def cancel_after_deadline(
-        self, transport, budget: float, wait: float = RUNNER_STOP_WAIT_SECONDS
+        self,
+        transport,
+        passed: str,
+        requester: str,
+        wait: float = RUNNER_STOP_WAIT_SECONDS,
     ) -> None:
-        """apply's --timeout passed with no verdict: cancel the runner, wait
-        up to `wait` seconds for its result, and end the job so cleanup
-        releases the VM. Reaching the deadline is a failure of the run to
-        produce a verdict in time, whatever the runner reports after."""
-        timed_out = f"apply's --timeout of {budget:.0f}s passed before a verdict"
-        requester = "job apply --timeout"
-        try:
-            intent = transport.write_json(
-                f"{self.remote_dir}/cancel.json",
-                {"intent": "cancelled", "by": requester, "at": _now()},
-            )
-            intent_note = (
-                "cancel requested"
-                if getattr(intent, "name", "") == "OK"
-                else f"cancel intent not confirmed ({getattr(intent, 'name', intent)})"
-            )
-        except Exception as error:  # noqa: BLE001 - release must still happen
-            intent_note = f"cancel intent not written ({describe_error(error)})"
+        """A deadline passed with no verdict: cancel the runner, wait up to
+        `wait` seconds for its result, and end the job so cleanup releases
+        the VM. Reaching the deadline is a failure of the run to produce a
+        verdict in time, whatever the runner reports after. `passed` says
+        which deadline, `requester` names the canceller in cancel.json."""
+        note, confirmed = request_cancel(transport, self.job_id, requester)
         kind, outcome = await_runner_result(transport, self.job_id, wait)
         if kind == "result":
             self._absorb_or_keep(outcome, transport)
             self.env.record_failure(Phase.RUN)
-            # A result cancelled by this request already says so.
-            received = verdict.cancel_source(outcome.get("cancel_intent")) == requester
-            self.env.reason = "; ".join(
-                part
-                for part in (
-                    timed_out,
-                    None if received else intent_note,
-                    self.env.reason,
-                )
-                if part
+            self.env.reason = deadline_reason(
+                passed, note, confirmed, requester, outcome, self.env.reason
             )
             if self.env.retry_class is None:
                 self.env.retry_class = RetryClass.RETRY_SAME
         else:
-            self._finish_without_result(f"{timed_out}; {intent_note}; {outcome}", transport)
+            self._finish_without_result(f"{passed}; {note}; {outcome}", transport)
         self.env.hints.append(
             "if the work needs longer, raise apply's --timeout or budgets.wall_clock"
         )
@@ -1560,19 +1549,106 @@ def observe_remote(transport, job_id: str):
         or not isinstance(starttime, str)
         or not isinstance(boot_id, str)
     ):
-        return "degraded", None
+        return "launch_invalid", launch
     watchdog, watchdog_status = transport.read_json(
         f"/content/jobs/{job_id}/watchdog.json"
     )
     if watchdog_status.name == "SESSION_LOST":
         return "session_lost", None
-    if (
-        watchdog_status.name == "OK"
-        and watchdog is not None
-        and watchdog.get("runner_alive") is False
-    ):
-        return "runner_dead", launch
-    return "runner_alive", launch
+    record = watchdog if watchdog_status.name == "OK" and watchdog else None
+    if record is not None and record.get("runner_alive") is False:
+        return "runner_dead", record
+    return "runner_alive", record
+
+
+# A run's local deadline, after launch: its wall_clock plus this margin
+# for the runner's own escalation, offload and result write.
+RUN_DEADLINE_MARGIN_SECONDS = 600
+
+
+def run_deadline_seconds(spec: JobSpec) -> int:
+    return spec.budgets.wall_clock + RUN_DEADLINE_MARGIN_SECONDS
+
+
+# A healthy watchdog rewrites watchdog.json every 30 seconds.
+WATCHDOG_STALE_SECONDS = 300
+WATCHDOG_HINT_PREFIX = "watchdog: "
+WATCHDOG_STALLED_PREFIX = "watchdog stalled: "
+
+
+class WatchdogStaleness:
+    """Whether watchdog.json has stopped changing. Compares successive `ts`
+    values for equality and times the gap with this machine's monotonic
+    clock: the VM's clock is never compared with this one. Only
+    successful reads count."""
+
+    def __init__(self, clock: Optional[Callable[[], float]] = None) -> None:
+        self._clock = clock or (lambda: time.monotonic())
+        self._ts = None
+        self._since: Optional[float] = None
+
+    def observe(self, record: dict) -> Optional[str]:
+        """The stall, in words, when `ts` has not changed for
+        WATCHDOG_STALE_SECONDS; otherwise None."""
+        ts = record.get("ts")
+        now = self._clock()
+        if self._since is None or ts != self._ts:
+            self._ts, self._since = ts, now
+            return None
+        unchanged = now - self._since
+        if unchanged < WATCHDOG_STALE_SECONDS:
+            return None
+        return (
+            f"watchdog.json has not changed for {unchanged:.0f}s (ts={ts}): the "
+            "watchdog has stopped, or cannot write its record (for example a "
+            "full disk), so whether the runner is alive is unknown"
+        )
+
+
+def replace_hint(hints: List[str], prefix: str, text: Optional[str]) -> None:
+    """Replace the hint starting with `prefix` in place (or drop it when
+    `text` is None), leaving every other hint as it was."""
+    kept = [h for h in hints if not h.startswith(prefix)]
+    if text is not None:
+        kept.append(prefix + text)
+    hints[:] = kept
+
+
+def request_cancel(transport, job_id: str, requester: str) -> Tuple[str, bool]:
+    """Write the cancel intent. Returns a note saying what happened and
+    whether the write was confirmed."""
+    try:
+        intent = transport.write_json(
+            f"/content/jobs/{job_id}/cancel.json",
+            {"intent": "cancelled", "by": requester, "at": _now()},
+        )
+    except Exception as error:  # noqa: BLE001 - release must still happen
+        return f"cancel intent not written ({describe_error(error)})", False
+    if getattr(intent, "name", "") == "OK":
+        return "cancel requested", True
+    return f"cancel intent not confirmed ({getattr(intent, 'name', intent)})", False
+
+
+def deadline_reason(
+    passed: str,
+    note: str,
+    confirmed: bool,
+    requester: str,
+    result: Optional[dict],
+    absorbed_reason: Optional[str],
+) -> str:
+    """The reason after a deadline cancel that got a result: what passed,
+    the cancel note unless the result shows this cancel arrived, and the
+    result's own reason."""
+    received = (
+        result is not None
+        and verdict.cancel_source(result.get("cancel_intent")) == requester
+    )
+    return "; ".join(
+        part
+        for part in (passed, None if (received and confirmed) else note, absorbed_reason)
+        if part
+    )
 
 
 def watchdog_hint(wd: dict) -> str:
@@ -1602,6 +1678,7 @@ def await_runner_result(transport, job_id: str, wait: int):
     started, the assignment is gone, or reading the VM failed.
     """
     polls = math.ceil(wait / RUNNER_RESULT_POLL_SECONDS) if wait > 0 else 0
+    unreadable = 0
     for _ in range(polls):
         time.sleep(RUNNER_RESULT_POLL_SECONDS)
         try:
@@ -1616,6 +1693,13 @@ def await_runner_result(transport, job_id: str, wait: int):
             return None, "the runner never started (no launch.json)"
         if kind == "session_lost":
             return None, "the assignment disappeared while waiting for the runner"
+        if kind in ("degraded", "launch_invalid"):
+            unreadable += 1
+    if polls and unreadable == polls:
+        return None, (
+            f"no result.json could be read within {wait}s of the cancel request: "
+            f"every one of {polls} reads of the runner's records failed"
+        )
     return None, f"the runner wrote no result.json within {wait}s of the cancel request"
 
 
