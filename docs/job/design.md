@@ -156,7 +156,7 @@ Contents requests go through the runtime proxy with a token that expires about 6
 
 `JobTransport` handles expiry for every Contents operation `job` makes. On a 401 or 404 it lists assignments. If the endpoint is absent, the result is `session_lost`. If it is present, the transport takes the fresh token and proxy URL from the listing, rebuilds its Contents client, persists the session record, and retries once. A 404 on a read triggers this refresh at most once a minute, and a 404 after a successful refresh means the path is absent. When the listing itself fails, the result is `degraded`, never `session_lost`. Taking both the token and the URL covers both token expiry and a changed proxy URL; the live evidence has not separated the two (see `chronology.md`).
 
-`control.result` is a second copy of the verdict for the case where the VM really is gone; it is not a substitute for the refresh. The keep-alive daemon, not the watchdog, keeps the idle VM assigned.
+`control.result` is a second copy of the verdict for the case where the VM really is gone; it is not a substitute for the refresh. Its GET (`fetch_control_result`) follows the same public-destination policy as the plan's probe and the runner's transfers (`urlopen_public`). The keep-alive daemon, not the watchdog, keeps the idle VM assigned.
 
 ## Data plane
 

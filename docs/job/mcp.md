@@ -16,9 +16,30 @@ again.
 | `jobs://done` | finished records, same rows as `jobs list --done --json` | no |
 | `job://<id>` | that job's local `envelope.json`, the same object as `.job` in `job status --json` | yes |
 | `job://<id>/logs` | the locally synced `runner.log` for that job | no |
+| `job://<id>/files/<name>` | one record file in the job directory: `install.log`, `result.json`, `exception.json`, `watchdog.json`, `launch.json`, `cancel.json`, `events.jsonl`, `apply.log`, `status-poll.log`, `plan.json`, `spec.json` and the rest that exist | no |
 
 All resources read local records only; none of them asks the VM. `job
 status` is the call that reads the VM.
+
+`job://<id>/files/<name>` lists every regular file in the job directory
+except the envelope and `runner.log` (which have their own URIs),
+`apply.lock`, and the plan's `.mighty-colab-secrets.json` sidecar and the
+temp files records are written through: those can hold signed URLs and are
+never listed or readable. Only listed names can be read; `plan.json` and
+`spec.json` carry URL identities, not signed URLs.
+
+## Tool results
+
+Each tool call runs its command once, in-process. A command that has a
+`--json` envelope (`exec`, `run`, `exec-async`, `log`, `new`, `stop`,
+`sessions`, `status`, and the `job` and `jobs` groups) runs in JSON mode:
+the result's `structured_content` is that envelope, the same object
+`--json` prints, and its text `content` is the human lines the command
+prints (which `--json` moves to stderr) followed by a reading of the
+envelope: the `job status` rendering for job envelopes, cell outputs for
+`exec` and `run`, diagnostics, list rows, log content, or otherwise the
+envelope's fields. Any other tool returns its output as text. A tool that
+raises returns its exception type and message, and the traceback is logged.
 
 The three `jobs://*` resources share one row-building function with the CLI
 (`_job_list_rows`), so they show the same fields as `jobs list` and each
@@ -40,6 +61,11 @@ nothing has been copied yet.
 ## Notifications
 
 Two independent mechanisms:
+
+A watch survives a bad read: an envelope or job list that cannot be read is
+logged and read again on the next poll. A notification that cannot be sent
+(the client has gone) is logged and ends that watch; the job-list watch can
+then be started again.
 
 **`notifications/resources/list_changed`** (`JobListWatcher`, one instance
 per server connection, polling the job store every 5 seconds). It fires
