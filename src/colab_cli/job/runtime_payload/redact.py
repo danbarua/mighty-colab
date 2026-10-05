@@ -29,10 +29,11 @@ def redact_credentials(text: str) -> str:
 
 def redact_url(text: str, url: str | None, identity: str) -> str:
     """`redact_credentials`, after replacing `url` with `identity` and its
-    query string with `<redacted>` wherever they appear. An error body can
-    echo a signed URL's query parameters without the leading `?` (a GCS
-    SignatureDoesNotMatch body quotes the canonical request), which the
-    general pattern does not match."""
+    query string with `<redacted>` wherever either appears verbatim, for
+    example in an exception message or a server that echoes the request
+    target. A GCS SignatureDoesNotMatch body quotes the canonical request,
+    re-encoded and without the signature, so neither replace matches it
+    there; the signature itself is never echoed."""
 
     if url:
         text = text.replace(url, identity)

@@ -41,7 +41,16 @@ mc() {
     uv run mighty-colab --auth=adc --config "$SESSION_FILE" "$@"
 }
 
-trap 'rm -rf "$TMP_DIR"' EXIT
+JOB_ID=""
+# Apply must refuse before assignment; if a regression let it through,
+# release whatever it assigned.
+cleanup() {
+    if [ -n "$JOB_ID" ]; then
+        mc --json job destroy "$JOB_ID" --wait 0 >/dev/null 2>&1 || true
+    fi
+    rm -rf "$TMP_DIR"
+}
+trap cleanup EXIT
 cd "$REPO_ROOT"
 
 mkdir -p "$TMP_DIR/src"

@@ -268,7 +268,7 @@ Work through this list when plan exits non-zero.
 5. `prefer` names only known accelerators.
 6. `retry` uses the defaults above, or you omit the block.
 7. `control.log` is absent. `on_run_fail` is `offload_anyway` or omitted.
-8. Every URL is `https`, and its host resolves to a public address.
+8. Every URL is `https`, parses (`url_malformed` otherwise, for example a port out of range), and its host resolves to a public address.
 9. Data objects exist, accept a GET-signed ranged read, and match any declared `size_bytes`, unless `--no-probe`.
 10. Signed expiry covers the budgets plus 15 minutes, and install when `deps` is not empty.
 11. GCS control PUT and GET name one object.

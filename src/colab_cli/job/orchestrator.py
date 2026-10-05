@@ -813,7 +813,7 @@ class Orchestrator:
         took longer than that allowance."""
         from colab_cli.job.planner import revalidate_expiry
 
-        problems = revalidate_expiry(self.plan, install_allowance=False)
+        problems = revalidate_expiry(self.plan, after_install=True)
         if problems:
             raise PhaseError(
                 Phase.VERIFY,

@@ -47,6 +47,7 @@ ACCELERATOR_UNKNOWN = "accelerator_unknown"
 URL_SCHEME_NOT_HTTPS = "url_scheme_not_https"
 URL_HOST_NOT_PUBLIC = "url_host_not_public"
 URL_HOST_UNRESOLVED = "url_host_unresolved"
+URL_MALFORMED = "url_malformed"
 DESTINATION_OUTSIDE_JOB_DIR = "destination_outside_job_dir"
 RESERVED_PATH = "reserved_path"
 DUPLICATE_DESTINATION = "duplicate_destination"
@@ -74,6 +75,7 @@ DIAGNOSTIC_CODES = frozenset(
         URL_SCHEME_NOT_HTTPS,
         URL_HOST_NOT_PUBLIC,
         URL_HOST_UNRESOLVED,
+        URL_MALFORMED,
         DESTINATION_OUTSIDE_JOB_DIR,
         RESERVED_PATH,
         DUPLICATE_DESTINATION,
@@ -155,9 +157,9 @@ def _url_items(spec: JobSpec) -> Iterator[tuple[str, str, str]]:
 
 
 # What one DNS lookup of a URL's host found: "public", "blocked" (it
-# resolves to a non-public address) or "unresolved" (DNS failed), with the
-# detail for a diagnostic. A URL whose host cannot be parsed is "public"
-# here; the scheme check reports it.
+# resolves to a non-public address), "unresolved" (DNS failed) or
+# "malformed" (no host, or a host or port that does not parse), with the
+# detail for a diagnostic.
 HostCheck = tuple[str, str]
 
 
@@ -166,10 +168,10 @@ def _check_host(url: str) -> HostCheck:
         parts = urlsplit(url)
         host = parts.hostname
         port = parts.port or 443
-    except ValueError:
-        return "public", ""
+    except ValueError as error:
+        return "malformed", str(error)
     if not host:
-        return "public", ""
+        return "malformed", "no host"
     try:
         resolve_public_addresses(host, port)
     except BlockedDestination as error:
@@ -310,9 +312,9 @@ def _path_diagnostics(spec: JobSpec, job_id: str) -> list[Diagnostic]:
 
 
 def _duration(seconds: int) -> str:
-    seconds = max(0, int(seconds))
-    hours, remainder = divmod(seconds, 3600)
-    minutes = (remainder + 59) // 60
+    """Whole minutes, rounded up, as `1h15m`, `2h` or `45m`."""
+    total_minutes = (max(0, int(seconds)) + 59) // 60
+    hours, minutes = divmod(total_minutes, 60)
     if hours and minutes:
         return f"{hours}h{minutes}m"
     if hours:
@@ -324,7 +326,7 @@ def expiry_problems(
     spec: JobSpec,
     now: datetime,
     *,
-    install_allowance: bool,
+    after_install: bool,
     stored_expiry: Optional[Dict[str, Optional[str]]] = None,
 ) -> list[Diagnostic]:
     """An error for each signed URL that expires before the time it must
@@ -332,20 +334,24 @@ def expiry_problems(
 
     Data and artifact URLs must cover `wall_clock` plus 15 minutes for
     staging and offload, plus the install allowance when `deps` is not
-    empty and install has not run yet. Control URLs must cover the later
-    of `retry.budget_seconds` plus 15 minutes and that same deadline,
-    because the runner PUTs the result at the end of the run.
+    empty and install has not run yet. Before install, control URLs must
+    cover the later of `retry.budget_seconds` plus 15 minutes and that same
+    deadline, because the runner PUTs the result at the end of the run.
+    After install, what remains for every URL is staging, the run and
+    offload, so control URLs get the data deadline only.
     `stored_expiry` is a plan's recorded expiry per field, used when the
     current URL parser cannot read one from the URL.
     """
 
     data_parts = [f"wall_clock {spec.budgets.wall_clock}s", "15 min for staging and offload"]
     data_seconds = spec.budgets.wall_clock + _URL_SLACK_SECONDS
-    if install_allowance and spec.deps:
+    if spec.deps and not after_install:
         data_seconds += INSTALL_ALLOWANCE_SECONDS
         data_parts.append(f"{_duration(INSTALL_ALLOWANCE_SECONDS)} for installing deps")
     budget_seconds = spec.retry.budget_seconds + _URL_SLACK_SECONDS
-    if budget_seconds >= data_seconds:
+    if after_install:
+        control_seconds, control_parts = data_seconds, data_parts
+    elif budget_seconds >= data_seconds:
         control_seconds = budget_seconds
         control_parts = [f"retry.budget_seconds {spec.retry.budget_seconds}s", "15 min"]
     else:
@@ -420,6 +426,7 @@ def _url_diagnostics(spec: JobSpec, hosts: _HostChecks) -> list[Diagnostic]:
                     "Use an https URL signed for the required HTTP method.",
                 )
             )
+            continue
         kind, detail = hosts(url)
         if kind == "blocked":
             diagnostics.append(
@@ -429,6 +436,16 @@ def _url_diagnostics(spec: JobSpec, hosts: _HostChecks) -> list[Diagnostic]:
                     f"{field} targets a link-local or private address ({detail})",
                     RetryClass.FIX_HUMAN,
                     "Use a public storage endpoint; private and link-local hosts are blocked.",
+                )
+            )
+        elif kind == "malformed":
+            diagnostics.append(
+                _diagnostic(
+                    "error",
+                    URL_MALFORMED,
+                    f"{field} ({url_id(url)}) is not a usable URL: {detail}",
+                    RetryClass.FIX_CODE,
+                    f"Correct {field}.",
                 )
             )
         elif kind == "unresolved":
@@ -569,15 +586,14 @@ def _bundle_entry_diagnostics(spec: JobSpec) -> list[Diagnostic]:
     ]
 
 
-def revalidate_expiry(plan: Plan, *, install_allowance: bool = True) -> list[Diagnostic]:
+def revalidate_expiry(plan: Plan, *, after_install: bool = False) -> list[Diagnostic]:
     """URL expiry failures for a durable plan, measured from now: before
-    assignment (with the install allowance) and again after install
-    (without it)."""
+    assignment, and again after install."""
 
     return expiry_problems(
         plan.spec,
         datetime.now(timezone.utc),
-        install_allowance=install_allowance,
+        after_install=after_install,
         stored_expiry=plan.url_expiry,
     )
 
@@ -777,7 +793,7 @@ def build_plan(
         )
 
     now = datetime.now(timezone.utc)
-    diagnostics.extend(expiry_problems(spec, now, install_allowance=True))
+    diagnostics.extend(expiry_problems(spec, now, after_install=False))
 
     for index, artifact in enumerate(spec.artifacts):
         if getattr(artifact, "size_bytes", None) is None:

@@ -210,20 +210,29 @@ def test_every_probe_failure_is_an_error_classified_by_the_transfer_table(
     assert f"HTTP Error {status}: Reason" in diagnostic.message
 
 
-def test_a_probe_error_body_is_kept_without_the_signed_query(tmp_path, monkeypatch):
-    url = "https://storage.example.test/bucket/o?X-Goog-Algorithm=GOOG4&X-Goog-Signature=SECRET"
-    query = url.split("?", 1)[1]
-    body = (
-        "<Error><Code>SignatureDoesNotMatch</Code><CanonicalRequest>GET /bucket/o "
-        f"{query}</CanonicalRequest></Error>"
-    ).encode()
-    monkeypatch.setattr("colab_cli.job.spec_io.urlopen_public", _http_error(403, body))
+def test_a_real_gcs_403_body_is_kept_without_the_signature(monkeypatch):
+    """The body GCS returned on 2026-10-05 for a GOOG4 URL with a wrong
+    signature (tests/fixtures/gcs_signature_does_not_match_403.xml). It
+    quotes the canonical request, but never the signature."""
+    fixture = Path(__file__).parent / "fixtures" / "gcs_signature_does_not_match_403.xml"
+    url = (
+        "https://storage.googleapis.com/gcp-public-data-landsat/index.csv.gz"
+        "?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Credential=nobody%40example.iam."
+        "gserviceaccount.com%2F20261005%2Fauto%2Fstorage%2Fgoog4_request&X-Goog-Date="
+        "20261005T000000Z&X-Goog-Expires=604800&X-Goog-SignedHeaders=host"
+        "&X-Goog-Signature=SENTINEL0123"
+    )
+    monkeypatch.setattr(
+        "colab_cli.job.spec_io.urlopen_public", _http_error(403, fixture.read_bytes())
+    )
 
     result = probe_get_url(url)
 
-    assert "SignatureDoesNotMatch" in result.error.body
-    assert "SECRET" not in json.dumps(result.error.model_dump())
+    assert result.error.body.startswith(
+        "<?xml version='1.0' encoding='UTF-8'?><Error><Code>SignatureDoesNotMatch</Code>"
+    )
     assert len(result.error.body) <= 300
+    assert "SENTINEL0123" not in json.dumps(result.error.model_dump())
 
 
 def test_a_probe_with_no_response_is_retry_same(tmp_path, monkeypatch):
@@ -332,7 +341,7 @@ def test_after_install_the_allowance_is_not_counted(tmp_path):
     plan = build_plan(spec, JOB_ID, probe=False)
 
     assert revalidate_expiry(plan)
-    assert revalidate_expiry(plan, install_allowance=False) == []
+    assert revalidate_expiry(plan, after_install=True) == []
 
 
 def test_a_control_url_must_last_as_long_as_the_data_deadline(tmp_path):
@@ -393,3 +402,51 @@ def test_build_plan_records_the_source_lock(tmp_path):
     plan = build_plan(_spec(tmp_path, data=[]), JOB_ID, probe=False)
 
     assert [f.path for f in plan.source_files] == ["entry.py"]
+
+
+def test_after_install_a_control_url_needs_only_the_rest_of_the_run(tmp_path):
+    """retry.budget_seconds is counted from apply; after install, the result
+    PUT is due at the end of the run."""
+    put = _signed(60 * 3).replace("input.bin", "result.json")
+    get = put.replace("Signature=SECRET", "Signature=SECRET2")
+    spec = _spec(
+        tmp_path,
+        budgets=Budgets(wall_clock=3600),
+        retry=Retry(budget_seconds=4 * 3600),
+        control=Control(result=ControlChannel(put_url=put, get_url=get)),
+        data=[],
+    )
+    plan = build_plan(spec, JOB_ID, probe=False)
+
+    before = [d for d in revalidate_expiry(plan) if d.message.startswith("control.result")]
+    assert before, "a 3-hour URL does not cover a 4-hour budget"
+    assert revalidate_expiry(plan, after_install=True) == []
+
+
+@pytest.mark.parametrize("url", ["https://storage.example.test:99999/x", "https:///x"])
+def test_a_malformed_url_is_a_spec_error_and_is_not_probed(tmp_path, monkeypatch, url):
+    probed = []
+    monkeypatch.setattr(
+        "colab_cli.job.planner.probe_get_url", lambda u: probed.append(u) or ProbeResult(206, 3)
+    )
+
+    plan = build_plan(_spec(tmp_path, data=[DataItem(url=url, dest="in.bin", size_bytes=3)]), JOB_ID)
+
+    [diagnostic] = [d for d in plan.diagnostics if d.code == "url_malformed"]
+    assert diagnostic.retry_class is RetryClass.FIX_CODE
+    assert probed == []
+
+
+def test_a_non_https_url_is_reported_once(tmp_path):
+    plan = build_plan(_spec(tmp_path, data=[DataItem(url="not a url", dest="in.bin", size_bytes=3)]),
+                      JOB_ID, probe=False)
+
+    assert [d.code for d in plan.diagnostics if d.code.startswith("url_")] == ["url_scheme_not_https"]
+
+
+def test_durations_never_show_sixty_minutes():
+    from colab_cli.job.planner import _duration
+
+    assert _duration(7199) == "2h"
+    assert _duration(7260) == "2h1m"
+    assert _duration(2700) == "45m"
