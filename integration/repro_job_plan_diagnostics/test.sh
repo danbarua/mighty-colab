@@ -135,7 +135,7 @@ with_deps = json.load(open(os.environ["WITH_DEPS"]))
 assert no_deps["status"] == "ok", no_deps["diagnostics"]
 [expiry] = [d for d in with_deps["diagnostics"] if d["code"] == "url_expiry_too_soon"]
 assert "55m for installing deps" in expiry["message"], expiry
-print("allowance: without deps ok; with deps:", expiry["message"][:200])
+print("allowance: without deps ok; with deps:", expiry["message"])
 PY
 
 # The fabricated signature is in the secrets sidecars and nowhere else.
