@@ -163,6 +163,15 @@ def test_run_schema_types(tools_and_commands):
     assert by_name["run"].input_schema["required"] == ["script"]
 
 
+@pytest.mark.parametrize("tool", ["new", "run"])
+def test_no_keepalive_is_a_boolean_tool_parameter(tools_and_commands, tool):
+    tools, _ = tools_and_commands
+    props = {t.name: t for t in tools}[tool].input_schema["properties"]
+
+    assert props["no_keepalive"]["type"] == "boolean"
+    assert props["no_keepalive"]["default"] is False
+
+
 def test_run_variadic_and_repeatable_params_are_arrays(tools_and_commands):
     """click-mcp's own schema builder mis-typed `multiple=True` options and
     variadic (nargs=-1) arguments as plain strings; make sure ours doesn't."""

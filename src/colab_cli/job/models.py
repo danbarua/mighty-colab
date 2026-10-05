@@ -609,6 +609,9 @@ class JobEnvelope(BaseModel):
     # `job apply --leave-up` was given, so whoever finishes the job keeps
     # the VM; left out when false.
     leave_up: bool = Field(default=False, exclude_if=lambda value: not value)
+    # `job apply --no-keepalive` was given: no keep-alive daemon pinged the
+    # assignment, and `job status` does not respawn one; left out when false.
+    keep_alive_disabled: bool = Field(default=False, exclude_if=lambda value: not value)
     attempt: int = 1
     next_poll_after: int = 15
 

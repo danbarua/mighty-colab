@@ -179,3 +179,28 @@ def test_new_without_json_unaffected(mock_common_state, mock_spawn_keep_alive, c
 
     out = capsys.readouterr().out
     assert "{" not in out
+
+
+def test_new_no_keepalive_records_the_session_and_starts_no_daemon(
+    mock_common_state, mock_spawn_keep_alive
+):
+    mock_res = MagicMock()
+    mock_res.__class__ = PostAssignmentResponse
+    mock_res.runtime_proxy_info.token = "tok"
+    mock_res.runtime_proxy_info.url = "http://runtime"
+    mock_res.endpoint = "ep-1"
+    mock_common_state.client.assign.return_value = mock_res
+
+    new(session="s1", no_keepalive=True)
+
+    mock_spawn_keep_alive.assert_not_called()
+    mock_common_state.client.keep_alive_assignment.assert_not_called()
+    stored = mock_common_state.store.add.call_args.args[0]
+    assert stored.endpoint == "ep-1"
+    assert stored.keep_alive_disabled is True
+    assert stored.keep_alive_pid is None
+    created = [
+        c.args for c in mock_common_state.history.log_event.call_args_list
+        if c.args[1] == "session_created"
+    ]
+    assert created[0][2]["keep_alive_disabled"] is True

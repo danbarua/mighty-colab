@@ -600,6 +600,62 @@ def test_provision_persists_the_endpoint_before_keep_alive(tmp_path, keep_alive_
     assert orch.env.endpoint == "m-s-job"
 
 
+def test_provision_without_keep_alive_stores_the_session_and_starts_no_daemon(
+    tmp_path, keep_alive_spawn
+):
+    client = MagicMock()
+    client.assign.return_value = _cpu_assignment("m-s-job")
+    stored = []
+    session_store = MagicMock()
+    session_store.add.side_effect = lambda s: stored.append(
+        (s.keep_alive_disabled, s.keep_alive_pid)
+    )
+    orch = _orch(
+        tmp_path,
+        spec=_spec(accelerator=Accelerator(prefer=[], accept_cpu=True)),
+        client=client,
+        session_store=session_store,
+    )
+    orch.env.keep_alive_disabled = True
+
+    orch.provision()
+
+    # `job status`, `destroy` and the transport find the VM through this record.
+    assert stored == [(True, None)]
+    client.keep_alive_assignment.assert_not_called()
+    keep_alive_spawn.assert_not_called()
+    assert orch.env.endpoint == "m-s-job"
+
+
+def test_keep_alive_disabled_is_in_the_envelope_only_when_set():
+    env = JobEnvelope(job_id="j")
+    assert "keep_alive_disabled" not in env.model_dump(mode="json")
+    env.keep_alive_disabled = True
+    assert env.model_dump(mode="json")["keep_alive_disabled"] is True
+
+
+def test_a_lost_assignment_without_keep_alive_says_keep_alive_was_off(tmp_path):
+    transport = MagicMock()
+    transport.read_json.return_value = (None, FakeStatus.SESSION_LOST)
+    orch = _orch(tmp_path)
+    orch.env.keep_alive_disabled = True
+
+    orch.poll(transport, deadline=time.time() + 5, interval=0)
+
+    assert orch.env.reason.startswith("the assignment is gone from the server")
+    assert "keep-alive was off (--no-keepalive)" in orch.env.reason
+    assert orch.env.retry_class is RetryClass.RETRY_SAME
+
+
+def test_a_lost_assignment_with_keep_alive_has_the_plain_reason(tmp_path):
+    transport = MagicMock()
+    transport.read_json.return_value = (None, FakeStatus.SESSION_LOST)
+    orch = _orch(tmp_path)
+
+    orch.poll(transport, deadline=time.time() + 5, interval=0)
+
+    assert "keep-alive" not in orch.env.reason
+
 
 def test_provision_scope_error_releases_the_vm_without_a_daemon(
     tmp_path, keep_alive_spawn

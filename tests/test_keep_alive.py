@@ -629,3 +629,19 @@ def test_keep_alive_logs_error_events_and_last_error(mock_common_state):
     assert payload["reason"] == "consecutive_4xx_errors"
     assert payload["last_error"]["status_code"] == 404
     assert payload["last_error"]["error_type"] == "ColabRequestError"
+
+
+def test_a_session_created_with_no_keepalive_reports_keep_alive_disabled():
+    state = SessionState(
+        name="test", token="t", url="u", endpoint="e1", keep_alive_disabled=True
+    )
+
+    assert _keep_alive_summary(state)["keep_alive_health"] == "disabled"
+
+
+def test_a_session_record_without_the_field_reads_as_keep_alive_enabled():
+    state = SessionState.model_validate(
+        {"name": "test", "token": "t", "url": "u", "endpoint": "e1"}
+    )
+
+    assert state.keep_alive_disabled is False

@@ -38,6 +38,7 @@ from colab_cli.job.models import (
     CodeSpec,
     Control,
     ControlChannel,
+    JobEnvelope,
     JobSpec,
     Offload,
     Phase,
@@ -3932,7 +3933,7 @@ def test_a_keep_alive_respawn_quotes_why_the_daemon_stopped(mock_common_state, m
     ]
     monkeypatch.setattr("colab_cli.commands.session.spawn_keep_alive", lambda *a, **k: 4321)
 
-    hint = _ensure_keep_alive(session, mock_common_state)
+    hint = _ensure_keep_alive(session, mock_common_state, JobEnvelope(job_id="x"))
 
     assert hint == (
         "keep-alive had died (stopped: consecutive_4xx_errors, last error HTTP 401); "
@@ -3953,7 +3954,7 @@ def test_a_keep_alive_that_cannot_be_respawned_is_a_hint_not_a_crash(mock_common
 
     monkeypatch.setattr("colab_cli.commands.session.spawn_keep_alive", fail)
 
-    hint = _ensure_keep_alive(session, mock_common_state)
+    hint = _ensure_keep_alive(session, mock_common_state, JobEnvelope(job_id="x"))
 
     assert hint.startswith("keep-alive had died (it logged no stop reason) and could not be respawned (OSError")
 
@@ -3998,3 +3999,119 @@ def test_a_plain_status_reports_an_overdue_orphan_without_cancelling_it(
         and "`job status overdue-check --poll` cancels it" in h
         for h in final.hints
     ), final.hints
+
+
+# --------------------------------------------------------------------------
+# --no-keepalive
+# --------------------------------------------------------------------------
+
+
+def _orphaned_running_job(mock_common_state, job_id, *, keep_alive_disabled):
+    import os
+
+    from colab_cli.job.models import Supervisor
+    from colab_cli.job.runtime_payload import ident
+
+    store = _persist_running_job(mock_common_state, job_id=job_id)
+    env = store.read_envelope(job_id)
+    env.supervisor = Supervisor.RUNNING
+    env.keep_alive_disabled = keep_alive_disabled
+    store.write_envelope(env)
+    store.write_supervisor_identity(
+        job_id,
+        pid=os.getpid(),
+        starttime=ident.starttime(os.getpid()),
+        boot_id=ident.boot_id(),
+    )
+    session = mock_common_state.store.get.return_value
+    session.keep_alive_pid = None
+    session.endpoint = "m-s-endpoint"
+    session.name = "job-session"
+    return store
+
+
+def test_status_never_respawns_keep_alive_for_a_job_applied_with_no_keepalive(
+    monkeypatch, mock_common_state
+):
+    from colab_cli.job.transport import ReadStatus
+
+    store = _orphaned_running_job(mock_common_state, "no-keepalive", keep_alive_disabled=True)
+    spawn_calls = []
+    monkeypatch.setattr(
+        "colab_cli.commands.session.spawn_keep_alive",
+        lambda *a, **k: spawn_calls.append((a, k)) or 1,
+    )
+    transport = MagicMock()
+    transport.read_json.return_value = (None, ReadStatus.NOT_FOUND)
+    monkeypatch.setattr("colab_cli.job.transport.JobTransport", lambda *_args: transport)
+
+    result = runner.invoke(app, ["job", "status", "no-keepalive"])
+
+    assert result.exit_code == 0, result.output
+    assert spawn_calls == []
+    env = store.read_envelope("no-keepalive")
+    assert not any("keep-alive" in h for h in env.hints)
+
+
+def test_status_says_keep_alive_was_off_when_the_assignment_is_lost(
+    monkeypatch, mock_common_state
+):
+    import colab_cli.commands.job as job_command
+    from colab_cli.job.models import RetryClass
+
+    store = _orphaned_running_job(mock_common_state, "lost-no-keepalive", keep_alive_disabled=True)
+    monkeypatch.setattr("colab_cli.job.transport.JobTransport", lambda *_args: MagicMock())
+    monkeypatch.setattr(job_command, "pull_runner_log", lambda *_a: None)
+    monkeypatch.setattr(job_command, "observe_remote", lambda *_a: ("session_lost", None))
+    monkeypatch.setattr(job_command, "_recover_off_vm_result", lambda *_a: None)
+
+    result = runner.invoke(app, ["job", "status", "lost-no-keepalive"])
+
+    assert result.exit_code == 0, result.output
+    env = store.read_envelope("lost-no-keepalive")
+    assert env.reason.startswith("the assignment is gone from the server")
+    assert "keep-alive was off (--no-keepalive)" in env.reason
+    assert env.retry_class is RetryClass.RETRY_SAME
+
+
+def test_apply_records_no_keepalive_before_the_first_envelope_write(
+    tmp_path, monkeypatch, mock_common_state
+):
+    from colab_cli.commands.job import _store
+
+    seen = {}
+
+    def provision(self):
+        self._persist()
+        seen["first"] = _store().read_envelope(self.job_id).keep_alive_disabled
+        from types import SimpleNamespace
+
+        self.session_state = SimpleNamespace(name="phases", url="https://vm", token="x")
+        self.env.endpoint = "m-test"
+
+    _apply_with(monkeypatch, tmp_path, mock_common_state, provision=provision, _args=["--no-keepalive"])
+
+    assert seen["first"] is True
+
+
+@pytest.mark.parametrize("keep_alive, flag_present", [(False, True), (True, False)])
+def test_async_apply_passes_no_keepalive_to_the_detached_apply(
+    monkeypatch, keep_alive, flag_present
+):
+    import colab_cli.commands.job as job_command
+
+    seen = {}
+    monkeypatch.setattr(
+        job_command, "_spawn_detached", lambda args, *_a: seen.setdefault("args", args) and 7
+    )
+
+    job_command.spawn_apply_async(
+        plan_file="plan.json",
+        job_id_opt=None,
+        timeout=None,
+        leave_up=False,
+        keep_alive=keep_alive,
+        log_path="apply.log",
+    )
+
+    assert ("--no-keepalive" in seen["args"]) is flag_present

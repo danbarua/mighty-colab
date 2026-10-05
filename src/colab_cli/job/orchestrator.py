@@ -489,7 +489,7 @@ class Orchestrator:
         )
 
     def _start_keep_alive(self) -> None:
-        """Own the TFE daemon for this assignment.
+        """Store the session and own the TFE daemon for this assignment.
 
         Persist the session first so the detached child cannot observe an
         empty store and exit with `session_not_found`.
@@ -503,6 +503,13 @@ class Orchestrator:
         from colab_cli.utils import get_status_code
 
         session = self.session_state
+        if self.env.keep_alive_disabled:
+            # `--no-keepalive`: no pre-flight ping and no daemon. The session
+            # is still stored: `job status`, `destroy` and the transport
+            # reach the VM through it.
+            session.keep_alive_disabled = True
+            self.session_store.add(session)
+            return
         try:
             self.client.keep_alive_assignment(session.endpoint)
         except ColabRequestError as exc:
@@ -1055,9 +1062,7 @@ class Orchestrator:
                 self._absorb_or_keep(result, transport)
                 return
             if status.name == "SESSION_LOST":
-                self._finish_without_result(
-                    "the assignment is gone from the server", transport
-                )
+                self._finish_without_result(lost_assignment_reason(self.env), transport)
                 return
             if status.name == "DEGRADED":
                 consecutive_degraded += 1
@@ -1649,6 +1654,19 @@ class WatchdogStaleness:
             "watchdog has stopped, or cannot write its record (for example a "
             "full disk), so whether the runner is alive is unknown"
         )
+
+
+def lost_assignment_reason(env: JobEnvelope) -> str:
+    """Why the job ended when its assignment disappeared, saying when no
+    keep-alive daemon was pinging it (`job apply --no-keepalive`)."""
+    reason = "the assignment is gone from the server"
+    if env.keep_alive_disabled:
+        reason += (
+            "; keep-alive was off (--no-keepalive), so nothing pinged the "
+            "assignment while the job ran: if this recurs, apply without "
+            "--no-keepalive"
+        )
+    return reason
 
 
 def degraded_reason(transport, polls: Optional[int] = None) -> str:
