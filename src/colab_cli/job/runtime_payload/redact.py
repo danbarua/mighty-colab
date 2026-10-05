@@ -14,6 +14,7 @@ in the text is replaced.
 from __future__ import annotations
 
 import re
+from urllib.parse import urlsplit
 
 _QUERY = re.compile(r"\?(?=[^\s'\"<>,)]*=)[^\s'\"<>,)]*")
 _USERINFO = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^\s/@'\"<>]+@")
@@ -24,6 +25,25 @@ def redact_credentials(text: str) -> str:
     URL's `user:password@` with `***@`."""
 
     return _QUERY.sub("?<redacted>", _USERINFO.sub(r"\1***@", text))
+
+
+def redact_url(text: str, url: str | None, identity: str) -> str:
+    """`redact_credentials`, after replacing `url` with `identity` and its
+    query string with `<redacted>` wherever either appears verbatim, for
+    example in an exception message or a server that echoes the request
+    target. A GCS SignatureDoesNotMatch body quotes the canonical request,
+    re-encoded and without the signature, so neither replace matches it
+    there; the signature itself is never echoed."""
+
+    if url:
+        text = text.replace(url, identity)
+        try:
+            query = urlsplit(url).query
+        except ValueError:
+            query = ""
+        if query:
+            text = text.replace(query, "<redacted>")
+    return redact_credentials(text)
 
 
 def describe_error(error: BaseException) -> str:

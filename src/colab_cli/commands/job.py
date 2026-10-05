@@ -44,6 +44,7 @@ from typing_extensions import Annotated
 from colab_cli.common import build_envelope, emit_json
 from colab_cli.envelopes import (
     JobApplyAsyncStarted,
+    JobApplyRefusedEnvelope,
     JobEnvelopeWrapper,
     JobListEnvelope,
     JobPlanEnvelope,
@@ -73,7 +74,7 @@ from colab_cli.job.orchestrator import (
 )
 from colab_cli.job.runtime_payload import ident
 from colab_cli.job.runtime_payload.redact import describe_error
-from colab_cli.job.spec_io import fetch_control_result
+from colab_cli.job.spec_io import fetch_control_result, validation_messages
 from colab_cli.job.store import (
     ApplyInProgress,
     JobStore,
@@ -312,40 +313,19 @@ def _human(env: JobEnvelope) -> str:
 # --------------------------------------------------------------------------
 
 
-def _safe_error_location(parts) -> str:
-    safe = []
-    for part in parts:
-        if isinstance(part, int):
-            safe.append(str(part))
-        elif (
-            isinstance(part, str)
-            and part.isascii()
-            and part.isidentifier()
-            and len(part) <= 64
-        ):
-            safe.append(part)
-        else:
-            safe.append("<field>")
-    return ".".join(safe) or "<spec>"
-
-
 def _emit_spec_errors(exc) -> None:
     """Render pydantic validation failures without reflecting spec values."""
     from colab_cli.common import state
-    diags = []
-    for err in exc.errors(
-        include_input=False, include_context=False, include_url=False
-    ):
-        loc = _safe_error_location(err.get("loc", ()))
-        diags.append(
-            {
-                "severity": "error",
-                "code": "spec_invalid",
-                "message": f"{loc}: {err.get('msg')}",
-                "retry_class": "fix_code",
-                "hint": None,
-            }
-        )
+    diags = [
+        {
+            "severity": "error",
+            "code": "spec_invalid",
+            "message": message,
+            "retry_class": "fix_code",
+            "hint": None,
+        }
+        for message in validation_messages(exc)
+    ]
     if state.json_output:
         emit_json(
             build_envelope(
@@ -362,6 +342,31 @@ def _emit_spec_errors(exc) -> None:
             typer.echo(f"  ERROR {d['code']}: {d['message']}", err=True)
 
 
+def _refuse_plan(job_id: str, message: str, diagnostics) -> None:
+    """Refuse to apply before assignment, with the diagnostics that decided
+    it in the `--json` envelope or on stderr."""
+    from colab_cli.common import state
+
+    if state.json_output:
+        emit_json(
+            build_envelope(
+                status="error",
+                command="job apply",
+                exit_code=1,
+                reason="plan_refused",
+                message=message,
+                job_id=job_id,
+                diagnostics=[json.loads(d.model_dump_json()) for d in diagnostics],
+            ),
+            JobApplyRefusedEnvelope,
+        )
+    else:
+        for d in diagnostics:
+            typer.echo(f"  {d.severity.upper()} {d.code}: {d.message}", err=True)
+        typer.echo(message, err=True)
+    raise typer.Exit(1)
+
+
 def plan(
     spec_file: Annotated[str, typer.Argument(help="Path to the job spec (YAML or JSON)")],
     out: Annotated[
@@ -375,7 +380,6 @@ def plan(
     from colab_cli.common import state
     from pydantic import ValidationError
 
-    from colab_cli.job.payload_bundle import collect_source_files
     from colab_cli.job.planner import build_plan
     from colab_cli.job.spec_io import load_spec, plan_hash
 
@@ -390,10 +394,19 @@ def plan(
         # agent reading this output cannot parse a stack trace into a fix.
         _emit_spec_errors(e)
         raise typer.Exit(1) from None
-    except (OSError, ValueError) as e:
+    except OSError as e:
         _emit_command_message(
             "plan",
-            f"[colab] Could not read spec {spec_file!r} ({type(e).__name__}).",
+            f"[colab] Could not read spec {spec_file!r}: {describe_error(e)}",
+            reason="spec_unreadable",
+        )
+        raise typer.Exit(1) from None
+    except ValueError as e:
+        # load_spec's own messages: the YAML problem and its position, a
+        # non-mapping top level, a redacted record used as a spec.
+        _emit_command_message(
+            "plan",
+            f"[colab] Could not read spec {spec_file!r}: {e}",
             reason="spec_unreadable",
         )
         raise typer.Exit(1) from None
@@ -405,11 +418,6 @@ def plan(
         probe=not no_probe,
         source_spec_path=source_spec_path,
     )
-    p.source_spec_path = source_spec_path
-    try:
-        p.source_files = collect_source_files(spec, p.source_spec_path)
-    except (FileNotFoundError, ValueError):
-        p.source_files = []
     p.spec_hash = plan_hash(p.spec, p.source_spec_path, p.source_files)
 
     store = _store()
@@ -440,11 +448,11 @@ def plan(
             typer.echo(f"  {d.severity.upper():5s} {d.code}: {d.message}")
             if d.hint:
                 typer.echo(f"        hint: {d.hint}")
-        if not p.diagnostics:
-            typer.echo("  no diagnostics; ready to apply")
-        elif not errors:
+        if warnings and not errors:
             typer.echo(f"  {len(warnings)} warning(s); apply will refuse without "
                        "`ignore_warnings: true` in the spec")
+        elif not errors:
+            typer.echo("  no errors or warnings; ready to apply")
     if errors:
         raise typer.Exit(1)
 
@@ -505,7 +513,7 @@ def apply(
             except ValueError as e:
                 _emit_command_message(
                     "apply",
-                    f"[colab] Could not load protected plan ({type(e).__name__}).",
+                    f"[colab] Could not load protected plan: {e}",
                     reason="plan_unreadable",
                 )
                 raise typer.Exit(1) from None
@@ -564,9 +572,10 @@ def apply(
             )
             raise typer.Exit(1)
     except ValueError as e:
+        # The store's messages name the problem without plan values.
         _emit_command_message(
             "apply",
-            f"[colab] Could not load protected plan ({type(e).__name__}).",
+            f"[colab] Could not load protected plan: {e}",
             reason="plan_unreadable",
         )
         raise typer.Exit(1) from None
@@ -605,6 +614,24 @@ def apply(
         )
         raise typer.Exit(1)
 
+    # The plan's own errors first: they already say why, for example why
+    # the source lock could not be built, which the source check below
+    # would only report as a missing lock.
+    if p.has_errors:
+        _refuse_plan(
+            p.job_id,
+            "[colab] This plan has errors and will not be applied. "
+            "Fix the spec and re-plan.",
+            [d for d in p.diagnostics if d.severity == "error"],
+        )
+    if p.has_warnings and not p.spec.ignore_warnings:
+        _refuse_plan(
+            p.job_id,
+            "[colab] This plan has warnings. Set ignore_warnings: true in the "
+            "spec to accept them explicitly.",
+            [d for d in p.diagnostics if d.severity == "warn"],
+        )
+
     from colab_cli.job.payload_bundle import CONTENTS_UPLOAD_CEILING, verify_source_files
 
     try:
@@ -612,6 +639,15 @@ def apply(
     except ValueError as error:
         _emit_command_message(
             "apply", f"[colab] {error}", reason="plan_refused"
+        )
+        raise typer.Exit(1) from None
+    except OSError as error:
+        # A locked source file that is gone or unreadable since planning.
+        _emit_command_message(
+            "apply",
+            f"[colab] A source file in the plan cannot be read: {describe_error(error)}. "
+            "Restore it, or re-run job plan.",
+            reason="plan_refused",
         )
         raise typer.Exit(1) from None
     oversized = [
@@ -630,43 +666,17 @@ def apply(
         raise typer.Exit(1)
 
 
-    if p.has_errors:
-        message = (
-            "[colab] This plan has errors and will not be applied. "
-            "Fix the spec and re-plan."
-        )
-        if not state.json_output:
-            for d in p.diagnostics:
-                if d.severity == "error":
-                    typer.echo(f"  ERROR {d.code}: {d.message}", err=True)
-        _emit_command_message("apply", message, reason="plan_refused")
-        raise typer.Exit(1)
-    if p.has_warnings and not p.spec.ignore_warnings:
-        message = (
-            "[colab] This plan has warnings. Set ignore_warnings: true in the "
-            "spec to accept them explicitly."
-        )
-        if not state.json_output:
-            for d in p.diagnostics:
-                if d.severity == "warn":
-                    typer.echo(f"  WARN {d.code}: {d.message}", err=True)
-        _emit_command_message("apply", message, reason="plan_refused")
-        raise typer.Exit(1)
-
     # Expiry is revalidated here, not trusted from plan time: a plan is
     # durable and may be applied long after its signatures were minted.
     # Checked BEFORE assign, because failing after costs a VM.
     expired = revalidate_expiry(p)
     if expired:
-        message = (
+        _refuse_plan(
+            p.job_id,
             "[colab] Signed URLs in this plan have expired or will expire before "
-            "the job's budget elapses. Re-sign and re-plan."
+            "the job needs them. Re-sign and re-plan.",
+            expired,
         )
-        if not state.json_output:
-            for error in expired:
-                typer.echo(f"  {error}", err=True)
-        _emit_command_message("apply", message, reason="plan_refused")
-        raise typer.Exit(1)
 
     from colab_cli.runtime import ColabRuntime
 
@@ -1209,9 +1219,11 @@ def status(
     store = _store()
     env = store.read_envelope(job_id)
     if env is None:
+        detail = _apply_log_note(store, job_id)
         _emit_command_message(
             "status",
-            f"[colab] No local record of job {job_id!r}.",
+            f"[colab] No local record of job {job_id!r}"
+            + (f"; {detail}" if detail else "."),
             reason="job_not_found",
         )
         raise typer.Exit(1)
@@ -1541,6 +1553,28 @@ def destroy(
         raise typer.Exit(1)
 
 
+# Characters of apply.log's last line quoted when a job has no envelope.
+APPLY_LOG_LINE_CHARS = 300
+
+
+def _apply_log_note(store, job_id: str) -> Optional[str]:
+    """For a job with no envelope: `apply --async` writes its output to
+    apply.log, and a refusal or crash before the envelope exists is only
+    there. Points at the file and quotes its last line."""
+    path = store.job_dir(job_id) / "apply.log"
+    try:
+        lines = [line for line in path.read_text(errors="replace").splitlines() if line.strip()]
+    except OSError:
+        return None
+    if not lines:
+        return None
+    last = " ".join(lines[-1].split())
+    if len(last) > APPLY_LOG_LINE_CHARS:
+        omitted = len(last) - APPLY_LOG_LINE_CHARS
+        last = last[:APPLY_LOG_LINE_CHARS] + f" [... {omitted} characters omitted]"
+    return f"apply wrote no envelope; its output is in {path}, ending: {last}"
+
+
 def _job_list_rows(store) -> List[Dict[str, Any]]:
     """One row per local job record -- the single source of truth for
     `jobs list --json`, the plain-text `jobs list` rendering, and the
@@ -1563,7 +1597,9 @@ def _job_list_rows(store) -> List[Dict[str, Any]]:
                     "cleanup": None,
                     "done": False,
                     "endpoint": None,
-                    "reason": problem or "planned, not applied",
+                    "reason": problem
+                    or _apply_log_note(store, jid)
+                    or "planned, not applied",
                 }
             )
             continue

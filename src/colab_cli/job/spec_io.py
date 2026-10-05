@@ -28,8 +28,13 @@ from typing import Any
 
 import yaml
 
-from colab_cli.job.models import JobSpec
+from colab_cli.job.models import JobSpec, TransferError
 from colab_cli.job.runtime_payload.netpolicy import BlockedDestination, urlopen_public
+from colab_cli.job.runtime_payload.redact import redact_url
+
+# Bytes of an HTTP error body a probe keeps, as the runner does for a
+# failed transfer.
+PROBE_ERROR_BODY_BYTES = 300
 
 
 SECRET_FRAGMENT_PREFIX = "mighty-colab-secret-sha256="
@@ -68,7 +73,7 @@ class ProbeResult:
 
     status: int | None
     size_bytes: int | None = None
-    error: str | None = None
+    error: TransferError | None = None
     range_honored: bool = False
 
     @property
@@ -93,13 +98,7 @@ def load_spec(path: str | Path) -> JobSpec:
     try:
         data = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
     except yaml.YAMLError as error:
-        mark = getattr(error, "problem_mark", None)
-        location = (
-            f" at line {mark.line + 1}, column {mark.column + 1}"
-            if mark is not None
-            else ""
-        )
-        raise ValueError(f"invalid YAML{location}") from None
+        raise ValueError(_yaml_error_text(error)) from None
     if not isinstance(data, dict):
         raise ValueError("job spec must contain a mapping at the top level")
     if _contains_redacted_url(data):
@@ -110,6 +109,55 @@ def load_spec(path: str | Path) -> JobSpec:
         root = spec_path.parent / root
     spec.code.root = str(root.resolve(strict=False))
     return spec
+
+
+def _yaml_error_text(error: yaml.YAMLError) -> str:
+    """PyYAML's problem and context with their position. Not `str(error)`:
+    that quotes the offending source line, which can be a signed URL."""
+
+    mark = getattr(error, "problem_mark", None)
+    location = (
+        f" at line {mark.line + 1}, column {mark.column + 1}" if mark is not None else ""
+    )
+    parts = [
+        text
+        for text in (getattr(error, "context", None), getattr(error, "problem", None))
+        if text
+    ]
+    return f"invalid YAML{location}" + (f": {'; '.join(parts)}" if parts else "")
+
+
+def safe_error_location(parts) -> str:
+    """A validation error's location with any key that is not a plain
+    identifier shown as `<field>`, so a spec value used as a key is never
+    echoed."""
+
+    safe = []
+    for part in parts:
+        if isinstance(part, int):
+            safe.append(str(part))
+        elif (
+            isinstance(part, str)
+            and part.isascii()
+            and part.isidentifier()
+            and len(part) <= 64
+        ):
+            safe.append(part)
+        else:
+            safe.append("<field>")
+    return ".".join(safe) or "<spec>"
+
+
+def validation_messages(error) -> list[str]:
+    """`location: message` for each pydantic validation error, without the
+    input values (a plan's input holds signed URLs)."""
+
+    return [
+        f"{safe_error_location(item.get('loc', ()))}: {item.get('msg')}"
+        for item in error.errors(
+            include_input=False, include_context=False, include_url=False
+        )
+    ]
 
 
 def canonical_url(url: str) -> str:
@@ -341,12 +389,24 @@ def fetch_control_result(
     return result
 
 
+def _probe_error(error: BaseException, url: str, category: str, *, status=None, body=None):
+    return TransferError(
+        exception=type(error).__name__,
+        reason=redact_url(str(error), url, url_id(url)),
+        http_status=status,
+        body=redact_url(body, url, url_id(url)) if body else None,
+        category=category,
+    )
+
+
 def probe_get_url(url: str, timeout: float = 10) -> ProbeResult:
     """Probe an input URL with a bounded ranged GET.
 
-    The response status is inspected before touching the body. In particular,
-    a server which ignores ``Range`` (200) is closed immediately because
-    draining a large object would defeat the purpose of planning.
+    The response status is inspected before touching the body. A server
+    which ignores ``Range`` (200) is closed immediately, because draining a
+    large object would defeat the purpose of planning. An error response's
+    first bytes are kept: a storage service's error code there tells an
+    expired signature from a missing object or a denied grant.
     """
 
     request = urllib.request.Request(url, headers={"Range": "bytes=0-0"}, method="GET")
@@ -364,21 +424,34 @@ def probe_get_url(url: str, timeout: float = 10) -> ProbeResult:
             return ProbeResult(status=200, size_bytes=None, range_honored=False)
         if status == 416:
             return ProbeResult(status=416, size_bytes=0, range_honored=True)
-        return ProbeResult(status=status, error=f"unexpected HTTP status {status}")
+        return ProbeResult(
+            status=status,
+            error=TransferError(
+                exception="UnexpectedStatus",
+                reason=f"unexpected HTTP status {status}",
+                http_status=status,
+                category="http",
+            ),
+        )
     except urllib.error.HTTPError as error:
-        # HTTPError is also a response object. Close it without reading any
-        # body, including for 403/404/416 responses.
         response = error
         status = int(error.code)
         if status == 416:
             return ProbeResult(status=416, size_bytes=0, range_honored=True)
-        if status in {403, 404}:
-            return ProbeResult(status=status, error=f"HTTP {status}")
-        return ProbeResult(status=status, error=f"HTTP {status}")
+        try:
+            raw = error.read(PROBE_ERROR_BODY_BYTES)
+        except Exception:  # noqa: BLE001 - the status alone still explains it
+            raw = b""
+        body = raw.decode("utf-8", "replace") if raw else None
+        return ProbeResult(
+            status=status, error=_probe_error(error, url, "http", status=status, body=body)
+        )
     except BlockedDestination as error:
-        return ProbeResult(status=None, error=str(error))
-    except (OSError, TimeoutError, ValueError) as error:
-        return ProbeResult(status=None, error=type(error).__name__)
+        return ProbeResult(status=None, error=_probe_error(error, url, "blocked"))
+    except (OSError, TimeoutError) as error:
+        return ProbeResult(status=None, error=_probe_error(error, url, "network"))
+    except ValueError as error:
+        return ProbeResult(status=None, error=_probe_error(error, url, "error"))
     finally:
         if response is not None:
             response.close()

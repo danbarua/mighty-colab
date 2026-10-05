@@ -3448,3 +3448,143 @@ def test_status_output_names_the_input_that_failed_to_stage(mock_common_state):
     assert "input:      b.bin -> failed: HTTP Error 403: Forbidden" in result.output
     assert "response body: <Error> AccessDenied</Error>" in result.output
     assert "a.bin" not in result.output
+
+
+# --------------------------------------------------------------------------
+# Apply refusals carry their cause
+# --------------------------------------------------------------------------
+
+
+def _plan_cpu_job(tmp_path, extra=""):
+    (tmp_path / "train.py").write_text("print(1)\n")
+    spec = tmp_path / "job.yaml"
+    spec.write_text(
+        "name: refuse\naccelerator:\n  prefer: []\n  accept_cpu: true\n"
+        "code:\n  kind: file\n  entry: train.py\n" + extra
+    )
+    planned = runner.invoke(app, ["job", "plan", str(spec), "--no-probe"])
+    return json.loads(_clean(planned.output).strip().splitlines()[-1])
+
+
+def test_apply_json_refusal_carries_the_plan_errors(tmp_path, mock_common_state):
+    _json_mode(mock_common_state)
+    planned = _plan_cpu_job(tmp_path, "retry:\n  max_attempts: 3\n")
+
+    result = runner.invoke(app, ["job", "apply", "--job-id", planned["job_id"]])
+
+    assert result.exit_code == 1
+    payload = json.loads(_clean(result.output).strip().splitlines()[-1])
+    assert payload["reason"] == "plan_refused"
+    assert payload["job_id"] == planned["job_id"]
+    assert [d["code"] for d in payload["diagnostics"]] == ["retry_not_implemented"]
+
+
+def test_apply_json_refusal_names_each_url_that_expires_too_soon(
+    tmp_path, mock_common_state, monkeypatch
+):
+    import datetime as dt
+
+    _json_mode(mock_common_state)
+    soon = int((dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=1)).timestamp())
+    planned = _plan_cpu_job(
+        tmp_path,
+        f"data:\n  - url: https://storage.example/in?Expires={soon}&Signature=SENTINEL\n"
+        "    dest: in.bin\n    size_bytes: 1\n",
+    )
+    # A day passes between plan and apply.
+    real_now = dt.datetime.now
+    monkeypatch.setattr(
+        "colab_cli.job.planner.datetime",
+        type("Later", (dt.datetime,), {"now": staticmethod(lambda tz=None: real_now(tz) + dt.timedelta(days=1))}),
+    )
+
+    result = runner.invoke(app, ["job", "apply", "--job-id", planned["job_id"]])
+
+    payload = json.loads(_clean(result.output).strip().splitlines()[-1])
+    assert payload["reason"] == "plan_refused"
+    [diagnostic] = payload["diagnostics"]
+    assert diagnostic["code"] == "url_expiry_too_soon"
+    assert diagnostic["retry_class"] == "refresh_urls"
+    assert diagnostic["message"].startswith("data[0].url (https://storage.example/in#")
+    assert "SENTINEL" not in result.output
+
+
+def test_apply_names_an_invalid_plan_field_without_echoing_signatures(tmp_path, mock_common_state):
+    _json_mode(mock_common_state)
+    planned = _plan_cpu_job(tmp_path)
+    from pathlib import Path
+
+    plan_path = Path(planned["plan_path"])
+    payload = json.loads(plan_path.read_text())
+    payload["spec"]["budgets"]["wall_clock"] = "https://storage.example/x?signature=SENTINEL"
+    plan_path.write_text(json.dumps(payload))
+
+    result = runner.invoke(app, ["job", "apply", str(plan_path)])
+
+    envelope = json.loads(_clean(result.output).strip().splitlines()[-1])
+    assert envelope["reason"] == "plan_unreadable"
+    assert "plan file is invalid: spec.budgets.wall_clock:" in envelope["message"]
+    assert "SENTINEL" not in result.output
+
+
+def test_apply_refuses_cleanly_when_a_locked_source_file_is_gone(tmp_path, mock_common_state):
+    _json_mode(mock_common_state)
+    planned = _plan_cpu_job(tmp_path)
+    (tmp_path / "train.py").unlink()
+
+    result = runner.invoke(app, ["job", "apply", "--job-id", planned["job_id"]])
+
+    envelope = json.loads(_clean(result.output).strip().splitlines()[-1])
+    assert result.exit_code == 1
+    assert envelope["reason"] == "plan_refused"
+    assert envelope["message"].startswith(
+        "[colab] A source file in the plan cannot be read: FileNotFoundError: "
+        "code entry does not exist:"
+    )
+
+
+def test_status_without_an_envelope_points_at_apply_log(tmp_path, mock_common_state):
+    from colab_cli.commands.job import _store
+
+    store = _store()
+    job_dir = store.job_dir("early-fail")
+    job_dir.mkdir(parents=True)
+    (job_dir / "apply.log").write_text("starting\n[colab] This plan has warnings.\n")
+
+    result = runner.invoke(app, ["job", "status", "early-fail"])
+
+    assert result.exit_code == 1
+    assert "apply wrote no envelope; its output is in" in _clean(result.output)
+    assert "ending: [colab] This plan has warnings." in _clean(result.output)
+
+    from colab_cli.commands.job import _job_list_rows
+
+    [row] = [r for r in _job_list_rows(store) if r["job_id"] == "early-fail"]
+    assert row["reason"].startswith("apply wrote no envelope")
+
+
+def test_apply_refuses_with_the_plan_errors_before_checking_the_source_lock(
+    tmp_path, mock_common_state
+):
+    """A plan whose source lock failed already says why; apply's own check
+    would only say the lock is missing."""
+    _json_mode(mock_common_state)
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "train.py").write_text("print(1)\n")
+    (src / "alias.py").symlink_to(src / "train.py")
+    spec = tmp_path / "job.yaml"
+    spec.write_text(
+        "name: lock\naccelerator:\n  prefer: []\n  accept_cpu: true\n"
+        f"code:\n  kind: bundle\n  root: {src}\n  entry: train.py\n"
+    )
+    planned = json.loads(
+        _clean(runner.invoke(app, ["job", "plan", str(spec), "--no-probe"]).output)
+        .strip().splitlines()[-1]
+    )
+
+    result = runner.invoke(app, ["job", "apply", "--job-id", planned["job_id"]])
+
+    envelope = json.loads(_clean(result.output).strip().splitlines()[-1])
+    assert [d["code"] for d in envelope["diagnostics"]] == ["source_unreadable"]
+    assert "no source lock" not in result.output

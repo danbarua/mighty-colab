@@ -33,6 +33,7 @@ from colab_cli.job.models import (
     DataItem,
     JobSpec,
     Retry,
+    TransferError,
 )
 from colab_cli.job.planner import (
     ACCELERATOR_UNKNOWN,
@@ -260,7 +261,8 @@ def test_probe_get_url_forbidden_or_missing_is_error(monkeypatch, status):
     result = probe_get_url(PUBLIC_URL)
 
     assert result.status == status
-    assert result.error
+    assert result.error.http_status == status
+    assert result.error.category == "http"
 
 
 def test_fetch_control_result_rejects_oversized_body(monkeypatch):
@@ -525,7 +527,13 @@ def test_revalidate_expiry_reparses_current_spec_urls(tmp_path):
 
 
 def test_ranged_get_failure_diagnostic(tmp_path, monkeypatch):
-    monkeypatch.setattr("colab_cli.job.planner.probe_get_url", lambda url: ProbeResult(403, None, "HTTP 403"))
+    error = TransferError(
+        exception="HTTPError", reason="HTTP Error 403: Forbidden", http_status=403,
+        category="http",
+    )
+    monkeypatch.setattr(
+        "colab_cli.job.planner.probe_get_url", lambda url: ProbeResult(403, None, error)
+    )
     plan = build_plan(make_spec(tmp_path), JOB_ID)
     assert RANGED_GET_FAILED in diagnostic_codes(plan)
 

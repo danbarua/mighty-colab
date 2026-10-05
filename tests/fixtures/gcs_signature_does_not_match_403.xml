@@ -1,0 +1,10 @@
+<?xml version='1.0' encoding='UTF-8'?><Error><Code>SignatureDoesNotMatch</Code><Message>Access denied.</Message><Details>The request signature we calculated does not match the signature you provided. Check your Google secret key and signing method.</Details><StringToSign>GOOG4-RSA-SHA256
+20261005T000000Z
+20261005/auto/storage/goog4_request
+60a067f7f2990375f3728ca1d4cb722ebb2ea2b371c32bd5ee0117e2c145dec4</StringToSign><CanonicalRequest>GET
+/gcp-public-data-landsat/index.csv.gz
+X-Goog-Algorithm=GOOG4-RSA-SHA256&amp;X-Goog-Credential=nobody%40example.iam.gserviceaccount.com%2F20261005%2Fauto%2Fstorage%2Fgoog4_request&amp;X-Goog-Date=20261005T000000Z&amp;X-Goog-Expires=604800&amp;X-Goog-SignedHeaders=host
+host:storage.googleapis.com
+
+host
+UNSIGNED-PAYLOAD</CanonicalRequest></Error>

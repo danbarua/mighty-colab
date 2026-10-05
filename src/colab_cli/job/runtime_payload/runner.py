@@ -32,7 +32,7 @@ from .netpolicy import (
     put_public,
     urlopen_public,
 )
-from .redact import redact_credentials
+from .redact import redact_credentials, redact_url
 
 HTTP_TIMEOUT_SECONDS = 30
 # How many bytes of an HTTP error response body a transfer record keeps.
@@ -443,15 +443,7 @@ def _transfer_error(error, url):
     """
 
     def redact(text):
-        if url:
-            text = text.replace(url, _url_id(url))
-            try:
-                query = urlsplit(url).query
-            except ValueError:
-                query = ""
-            if query:
-                text = text.replace(query, "<redacted>")
-        return redact_credentials(text)
+        return redact_url(text, url, _url_id(url) if url else "")
 
     http_status = None
     body = None

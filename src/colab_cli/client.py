@@ -180,7 +180,13 @@ class ColabRequestError(Exception):
 
 
 class TooManyAssignmentsError(Exception):
-    pass
+    """Colab's 412: the account is at its concurrent-assignment limit. Keeps
+    the response, like ColabRequestError, so its body can be reported."""
+
+    def __init__(self, message, response=None, response_body=None):
+        super().__init__(message)
+        self.response = response
+        self.response_body = response_body
 
 
 def response_body_if_json(e: Exception, limit: int = 1000) -> Optional[str]:
@@ -319,7 +325,9 @@ class Client:
             )
         except ColabRequestError as e:
             if get_status_code(e) == 412:
-                raise TooManyAssignmentsError(str(e))
+                raise TooManyAssignmentsError(
+                    str(e), response=e.response, response_body=e.response_body
+                ) from e
             raise e
 
         return res

@@ -352,7 +352,9 @@ class JobSpec(BaseModel):
 class Diagnostic(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    severity: Literal["error", "warn"]
+    # `info` reports what plan measured or assumed; only `error` and `warn`
+    # stop apply.
+    severity: Literal["error", "warn", "info"]
     code: str
     message: str
     retry_class: Optional[RetryClass] = None
@@ -406,6 +408,11 @@ class Plan(BaseModel):
     # re-probing. A durable plan applied hours later may carry URLs that
     # have since expired -- cheaper to catch before `assign` than after.
     url_expiry: Dict[str, Optional[str]] = Field(default_factory=dict)
+    # Sizes the plan's ranged GET measured for inputs with no declared
+    # `size_bytes`, keyed `data[i]`. Used for disk planning only: staging
+    # checks declared sizes, so an object replaced after planning is not a
+    # failure.
+    probed_size_bytes: Dict[str, int] = Field(default_factory=dict)
     source_spec_path: Optional[str] = None
     source_files: List[SourceFileLock] = Field(default_factory=list)
 
@@ -416,6 +423,16 @@ class Plan(BaseModel):
     @property
     def has_warnings(self) -> bool:
         return any(d.severity == "warn" for d in self.diagnostics)
+
+    def input_bytes(self) -> int:
+        """Bytes the declared inputs will stage: each `size_bytes`, or the
+        size the plan measured when none is declared."""
+        return sum(
+            item.size_bytes
+            if item.size_bytes is not None
+            else self.probed_size_bytes.get(f"data[{index}]", 0)
+            for index, item in enumerate(self.spec.data)
+        )
 
 
 # --------------------------------------------------------------------------
@@ -484,6 +501,37 @@ class InputResult(BaseModel):
     error: Optional[TransferError] = None
 
 
+class ProvisionAttempt(BaseModel):
+    """One accelerator candidate tried during provision."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    accelerator: str
+    # `refused_cpu`: a GPU request answered with a CPU VM, released because
+    # the spec does not accept CPU.
+    outcome: Literal["granted", "failed", "refused_cpu"]
+    granted: Optional[str] = None
+    http_status: Optional[int] = None
+    # Exception type and message, query strings and URL userinfo removed.
+    error: Optional[str] = None
+    # A JSON response body's first characters, or a note saying a body of
+    # another type was not kept (Colab answers some failures with an HTML
+    # page that carries no detail).
+    body: Optional[str] = None
+    retry_class: Optional[RetryClass] = None
+
+    @property
+    def summary(self) -> str:
+        if self.outcome == "granted":
+            return f"{self.accelerator}: granted as {self.granted}"
+        if self.outcome == "refused_cpu":
+            return (
+                f"{self.accelerator}: granted as {self.granted} and released, "
+                "because accept_cpu is false"
+            )
+        return f"{self.accelerator}: {self.error}"
+
+
 InstallFailure = Literal["resolution", "build", "auth", "transient", "timeout", "unknown"]
 
 
@@ -548,6 +596,11 @@ class JobEnvelope(BaseModel):
     # Left out when empty, so envelopes of jobs whose install succeeded on
     # the first try stay readable by older CLIs sharing the job store.
     install_attempts: List[InstallAttempt] = Field(
+        default_factory=list, exclude_if=lambda attempts: not attempts
+    )
+    # Each accelerator tried, kept when any of them was not granted;
+    # left out when the first candidate was granted.
+    provision_attempts: List[ProvisionAttempt] = Field(
         default_factory=list, exclude_if=lambda attempts: not attempts
     )
     retry_class: Optional[RetryClass] = None

@@ -22,6 +22,10 @@ applies them. The policy:
   fix_code. A cancel by a person or tool carries no class.
 * A runner that could not reach a verdict (an exception in its own loop,
   no escapee detection) -> do_not_retry: the fault is in the supervisor.
+* A failed Colab assign for one accelerator: 400, 401 and 403 ->
+  fix_human; 408 and 429 -> retry_same; 5xx and any other status ->
+  retry_different; no response -> retry_same; anything else ->
+  do_not_retry. When every candidate fails, the job takes the strongest.
 """
 
 from __future__ import annotations
@@ -61,6 +65,7 @@ _STRENGTH = (
     RetryClass.DO_NOT_RETRY,
     RetryClass.FIX_HUMAN,
     RetryClass.FIX_CODE,
+    RetryClass.RETRY_DIFFERENT,
     RetryClass.REFRESH_URLS,
     RetryClass.RETRY_SAME,
 )
@@ -86,6 +91,22 @@ def transfer_retry_class(error: TransferError, method: Method) -> RetryClass:
             error.reason,
         )
     return _CATEGORY_RETRY.get(error.category, RetryClass.RETRY_SAME)
+
+
+def assign_retry_class(http_status: Optional[int], network: bool) -> RetryClass:
+    """A failed Colab assign for one accelerator. 400 is Colab's answer for
+    an accelerator the account has no quota or entitlement for; 401 and
+    403 are the account's credentials or scope. A 5xx is taken as capacity,
+    where another accelerator is usually granted sooner. A failure with no
+    HTTP response and no network error is a fault in mighty-colab's client."""
+
+    if http_status is not None:
+        if http_status in (400, 401, 403):
+            return RetryClass.FIX_HUMAN
+        if http_status in (408, 429):
+            return RetryClass.RETRY_SAME
+        return RetryClass.RETRY_DIFFERENT
+    return RetryClass.RETRY_SAME if network else RetryClass.DO_NOT_RETRY
 
 
 def strongest(classes: Iterable[Optional[RetryClass]]) -> Optional[RetryClass]:

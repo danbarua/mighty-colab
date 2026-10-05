@@ -9,6 +9,37 @@ request and `issue #N` an issue in `danbarua/mighty-colab`.
 The other documents in `docs/job/` describe the current system. This one
 records what changed and what each claim rests on.
 
+### 2026-10-05: Plan, apply's preflight and provision say why they refuse; URL expiry counts install
+
+Plan reported a host that does not resolve as a private address, flagged
+only 403 and 404 from the data probe (as `fix_human`, with no body),
+discarded the size the probe measured, and turned an unbuildable source lock
+into an empty one that apply then refused with "re-run job plan". A spec or
+plan that would not load gave only an exception type, and `apply --json`
+refusals carried no diagnostics. Provision kept each failed accelerator as
+`str(e)[:200]`, which included the assign URL's query, dropped earlier
+failures when a later candidate was granted, and called every failure
+`retry_different`. Now each of these names its cause: `url_host_unresolved`;
+every probe result classified by the transfer table with the response body;
+`data_size_mismatch` and a measured size used for disk planning;
+`source_unreadable` naming the file; the YAML problem and position; the
+invalid plan field without its value; refusal envelopes with diagnostics;
+`provision_attempts` with each assign classified by status.
+
+URL expiry was checked against `wall_clock` + 15 minutes before
+provisioning, though install can take 55 minutes first. With `deps`, plan
+and apply now add that allowance, `verify` checks again after install, and
+control URLs must cover the data deadline as well as `retry.budget_seconds`.
+
+Evidence: `integration/repro_job_plan_diagnostics` (real URLs, no VM: a
+size mismatch, a measured size, a 404 and a GCS 403 `SignatureDoesNotMatch`
+with their bodies, an unresolvable host, an expired signature, a symlink in
+a bundle, the install allowance). Its first run found that apply checked
+the source lock before the plan's own errors, hiding `source_unreadable`
+behind "plan has no source lock"; fixed in the same change. Provision
+classification is covered by unit tests built from the assign failure
+recorded on 2026-10-04; there is no on-demand trigger for a failed assign.
+
 ### 2026-10-04: Finding: a websocket drop during `verify`, seen live, is `retry_same` and releases the VM
 
 In a run of `repro_job_timeout_and_interrupt`, the kernel websocket dropped
