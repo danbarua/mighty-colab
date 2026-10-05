@@ -161,7 +161,10 @@ check '
 # writes its own verdict.
 assert env["workload"] == "cancelled", env
 assert env["failed_phase"] == "run", env
-assert "--timeout of 150s" in env["reason"], env
+assert env["reason"].endswith(
+    "--timeout of 150s passed before a verdict; cancelled by job apply "
+    "--timeout; the workload was stopped by SIGTERM (15)"
+), env
 assert env["cleanup"] == "released", env
 print("timeout:", env["workload"], "|", env["reason"][:200])
 '
@@ -216,8 +219,10 @@ assert_released "detached poll"
 WALL_CLOCK=60 plan wall-clock 600
 mc --json job apply --job-id "$JOB_ID" >"$TMP_DIR/wall-clock.json" || true
 check '
-assert env["workload"] in ("cancelled", "failed"), f"no runner verdict after the wall_clock kill: {env}"
-assert "runner is dead" not in (env["reason"] or ""), env
+assert env["workload"] == "cancelled", f"no runner verdict after the wall_clock kill: {env}"
+assert env["reason"] == "wall_clock budget of 60s reached; the workload was stopped by SIGTERM (15)", env
+assert env["retry_class"] == "fix_code", env
+assert env["failed_phase"] == "run", env
 assert env["cleanup"] == "released", env
 print("wall_clock:", env["workload"], "signal", env["signal"], "|", env["reason"])
 '

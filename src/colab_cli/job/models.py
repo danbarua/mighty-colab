@@ -423,8 +423,21 @@ class Plan(BaseModel):
 # --------------------------------------------------------------------------
 
 
+# What kind of failure a transfer hit, as the runner classified it on the
+# VM: `http` (a response with a non-2xx status), `network` (no response:
+# DNS, refused, reset, timeout, TLS, upload cut short), `checksum` and
+# `size` (the bytes received do not match the plan), `local` (a file or
+# disk error on the VM), `blocked` (the URL resolved to a non-public
+# address), `setup` (the runner's own manifest or credential channel is
+# unusable) and `error` (anything else).
+TransferCategory = Literal[
+    "http", "network", "checksum", "size", "local", "blocked", "setup", "error"
+]
+
+
 class TransferError(BaseModel):
-    """Why one artifact upload failed, as the runner observed it."""
+    """Why one data download or artifact upload failed, as the runner
+    observed it."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -433,6 +446,7 @@ class TransferError(BaseModel):
     http_status: Optional[int] = None
     # First 300 bytes of the response body, query strings removed.
     body: Optional[str] = None
+    category: Optional[TransferCategory] = None
 
     @property
     def summary(self) -> str:
@@ -451,6 +465,20 @@ class ArtifactResult(BaseModel):
     # stable, non-secret handle for the same object.
     url_id: str
     status: Literal["ok", "failed", "missing"]
+    sha256: Optional[str] = None
+    bytes: Optional[int] = None
+    error: Optional[TransferError] = None
+
+
+class InputResult(BaseModel):
+    """One `data[]` input as the runner staged it: the bytes the run
+    consumed, or why staging stopped there."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    dest: str
+    url_id: str
+    status: Literal["ok", "failed"]
     sha256: Optional[str] = None
     bytes: Optional[int] = None
     error: Optional[TransferError] = None
@@ -512,6 +540,10 @@ class JobEnvelope(BaseModel):
     exception: Optional[Dict[str, str]] = None
     surviving_descendants: List[int] = Field(default_factory=list)
 
+    # Staged inputs up to the first failure; left out when empty.
+    inputs: List[InputResult] = Field(
+        default_factory=list, exclude_if=lambda inputs: not inputs
+    )
     artifacts: List[ArtifactResult] = Field(default_factory=list)
     # Left out when empty, so envelopes of jobs whose install succeeded on
     # the first try stay readable by older CLIs sharing the job store.

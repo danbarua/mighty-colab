@@ -168,7 +168,14 @@ When present, treat it as advice for the next action, not an automatic retry pro
 | `refresh_urls` | re-sign URLs and re-plan |
 | `do_not_retry` | do not retry unchanged |
 
-`apply` makes one attempt and never retries by itself. Planning rejects non-default `retry.when`, `max_attempts`, and `mode` values. Unexpected supervisor exceptions receive `do_not_retry`. A cancelled workload, and a failed release after a successful workload, have no `retry_class`.
+`apply` makes one attempt and never retries by itself. Planning rejects non-default `retry.when`, `max_attempts`, and `mode` values. Unexpected supervisor exceptions receive `do_not_retry`. A workload cancelled by `job destroy`, and a failed release after a successful workload, have no `retry_class`.
+
+Some outcomes you will see:
+
+- a run killed at `budgets.wall_clock` is `fix_code`: raise the budget, checkpoint, or make it faster. The reason starts `wall_clock budget of <n>s reached`.
+- a run killed by a signal nobody requested is `fix_code`. When the kernel's out-of-memory killer did it, the reason says so and quotes the kernel's `Killed process` line.
+- a failed data download or artifact upload: 401 or 403 is `refresh_urls`; 404 is `fix_code` for a download and `refresh_urls` for an upload; 408, 429 and 5xx are `retry_same`; other 4xx (413 included) and a size or sha256 mismatch are `fix_code`; no response at all is `retry_same`.
+- when the run failed and an upload failed too, the run's class decides, and the reason names both.
 
 ## Data and artifacts
 
@@ -243,10 +250,13 @@ A failed artifact says why. Its record in the envelope's `artifacts[]` carries `
 {"exception": "HTTPStatusError",
  "reason": "HTTP 413 Payload Too Large (upload cut short: BrokenPipeError: [Errno 32] Broken pipe)",
  "http_status": 413,
- "body": "<html><head><title>413 Request Entity Too Large</title>..."}
+ "body": "<html><head><title>413 Request Entity Too Large</title>...",
+ "category": "http"}
 ```
 
-`body` is the first 300 bytes of the response. When the server closes the connection before its response can be read, `exception` is `UploadCutShort`, `http_status` is `null`, and `reason` names the send error and the error from reading the response. The envelope's `reason` names each failed artifact with its cause, and `job status` prints each artifact's error and response body. `runner.log` gets one `[runner] artifact upload failed` line per failure. A destination behind Cloudflare rejects any request body over 100 MB with 413.
+`body` is the first 300 bytes of the response; `category` is `http` when there was a response, otherwise `network`, `checksum`, `size`, `local`, `blocked`, `setup` or `error` (see `design.md`). When the server closes the connection before its response can be read, `exception` is `UploadCutShort`, `http_status` is `null`, and `reason` names the send error and the error from reading the response. The envelope's `reason` names each failed artifact with its cause, and `job status` prints each artifact's error and response body. `runner.log` gets one `[runner] artifact upload failed` line per failure. A destination behind Cloudflare rejects any request body over 100 MB with 413.
+
+A failed input says why the same way. The envelope's `inputs[]` lists each input staged before the failure, with its `bytes` and `sha256`, and then the one that failed, with `error`. The reason names it, for example `staging failed at inputs/x.npz (https://storage.googleapis.com/bucket/x.npz#1a2b3c4d5e6f): HTTP Error 403: Forbidden. The consumer never started.`, and `job status` prints it as an `input:` line.
 
 `sha256` must be exactly 64 hexadecimal characters. It is worth the trouble: it is the only thing that distinguishes your dataset from a truncated copy, and a silently truncated input produces a result that looks plausible and is wrong.
 

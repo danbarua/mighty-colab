@@ -152,6 +152,8 @@ assert envelope["done"] is True, envelope
 assert envelope["ok"] is False, envelope
 assert envelope["job"]["workload"] == "cancelled", envelope
 assert envelope["job"]["cleanup"] == "left_up", envelope
+assert envelope["job"]["reason"].startswith("cancelled by job destroy; the workload"), envelope
+assert envelope["job"]["retry_class"] is None, envelope
 PY
 
 DESTROY_JSON=$(mc --json job destroy "$JOB_ID")

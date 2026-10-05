@@ -9,6 +9,56 @@ request and `issue #N` an issue in `danbarua/mighty-colab`.
 The other documents in `docs/job/` describe the current system. This one
 records what changed and what each claim rests on.
 
+### 2026-10-04: Finding: a websocket drop during `verify`, seen live, is `retry_same` and releases the VM
+
+In a run of `repro_job_timeout_and_interrupt`, the kernel websocket dropped
+15 seconds after provisioning (the websocket client logged `'NoneType'
+object has no attribute 'sock' - goodbye`). `apply` recorded `failed_phase:
+verify`, `retry_class: retry_same` and the reason `kernel connection failed
+during verify: RuntimeError: Connection was lost.`, and released the VM.
+This is the first recorded occurrence of the transport-failure path that PR
+#76 covers with unit tests; there is still no on-demand trigger for it.
+
+Evidence: a recorded live run on 2026-10-04.
+
+### 2026-10-04: Every runner-side failure says what happened, and its retry class follows from it
+
+A `wall_clock` kill reported `signal 15` with `reason: null`: nothing read the
+result's `cancel_intent` or `runner_error`. An unrequested SIGKILL, a plain
+exception and a runner fault had no reason either. Every staging failure was
+`fix_human` with a generic hint, because the runner kept only a category word
+for the failed input, and every upload failure was `retry_same`. Now
+`colab_cli/job/verdict.py` derives both from the result: a `wall_clock` kill
+names the budget and is `fix_code`; a signal nobody requested is `fix_code`
+with the kernel's OOM evidence; an exception gives its module-qualified type
+and message; a transfer is classified by HTTP status (401/403
+`refresh_urls`, 404 `fix_code` on a GET and `refresh_urls` on a PUT,
+408/429/5xx `retry_same`, other 4xx `fix_code`) or, with no response, by the
+runner's category. The runner records each staged input in `inputs`, a
+category, status and redacted body for every failed transfer, the signal's
+name, and non-fatal problems as `runner_warnings`. The shim keeps the head of
+a long traceback as well as its tail. The watchdog says why it has no GPU
+reading, and reports liveness as unknown, not dead, when `launch.json` is
+unreadable.
+
+Evidence: `integration/repro_job_runtime_detail`;
+`integration/repro_job_timeout_and_interrupt` (case 4, which printed
+`cancelled signal 15 | None` before).
+
+### 2026-10-04: Finding: an OOM kill on Colab shows in `/proc/vmstat`, not in the job's cgroup
+
+On a CPU VM (13 GB, no swap) the Jupyter kernel and its children are in cgroup v2
+`/../../jupyter-children`, whose `memory.max` is `max`. A process
+allocating 256 MiB at a time was killed with SIGKILL at about 11 GB resident:
+`memory.events` `oom_kill` stayed 0 and `/proc/vmstat` `oom_kill` went from
+0 to 1. `dmesg` is readable and logged `Memory cgroup out of memory: Killed
+process <pid> (python3) ... anon-rss:11671412kB`, so the limit that fired
+belongs to an enclosing cgroup. The runner therefore counts OOM kills from
+`/proc/vmstat` and quotes the kernel's line.
+
+Evidence: `integration/repro_job_runtime_detail` (case 2); a probe run on
+2026-10-04.
+
 ### 2026-10-04: A local supervisor that stops early no longer leaves the VM billing
 
 `apply --timeout` passing with no verdict used to record `left_up` and leave

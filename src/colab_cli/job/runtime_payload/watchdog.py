@@ -15,10 +15,9 @@ import subprocess
 import sys
 import time
 
-from . import ident
+from . import GRACE_SECONDS, ident
 
 INTERVAL_SECONDS = 30
-GRACE_SECONDS = 5
 
 
 def _atomic_write_json(path, payload):
@@ -60,13 +59,33 @@ def _signal_escapees(job_dir, sig, runner_pid) -> None:
         exclude.add(runner_pid)
     try:
         ident.signal_tagged(job_id, sig, exclude=exclude)
-    except Exception:  # noqa: BLE001 - watchdog must keep polling
+    except Exception as error:  # noqa: BLE001 - watchdog must keep polling
+        _log(f"signalling tagged processes with {sig} failed: {type(error).__name__}: {error}")
+
+
+def _log(message):
+    """One line to runner.log, which the watchdog shares with the runner."""
+    try:
+        print(f"[watchdog] {message}", file=sys.stderr, flush=True)
+    except (OSError, ValueError):
         pass
+
+
+_logged = set()
+
+
+def _log_once(message):
+    """Log a condition the watchdog meets on every tick only the first time."""
+    if message not in _logged:
+        _logged.add(message)
+        _log(message)
 
 
 
 def _gpu_query():
-    """Return the nvidia-smi query output, or None when unavailable."""
+    """Return (nvidia-smi query output, None), or (None, why) when there is
+    no output: not installed, timed out, or a non-zero exit with its
+    stderr, which is where a driver fault shows up."""
     try:
         proc = subprocess.run(
             [
@@ -79,22 +98,25 @@ def _gpu_query():
             timeout=5,
             check=False,
         )
-    except (OSError, subprocess.SubprocessError):
-        return None
+    except FileNotFoundError:
+        return None, "nvidia-smi not found"
+    except (OSError, subprocess.SubprocessError) as error:
+        return None, f"nvidia-smi failed: {type(error).__name__}: {error}"
     if proc.returncode != 0:
-        return None
+        detail = (proc.stderr or proc.stdout).strip()[:300]
+        return None, f"nvidia-smi exited {proc.returncode}: {detail}"
     value = proc.stdout.strip()
-    return value or None
+    return (value, None) if value else (None, "nvidia-smi printed nothing")
 
 
-def _disk_free_bytes(job_dir):
-    try:
-        return shutil.disk_usage(job_dir).free
-    except OSError:
+def _disk_free(job_dir):
+    """(free bytes, the path measured): the job directory, else "/"."""
+    for path in (job_dir, "/"):
         try:
-            return shutil.disk_usage("/").free
-        except OSError:
-            return None
+            return shutil.disk_usage(path).free, path
+        except OSError as error:
+            _log_once(f"disk usage of {path} unavailable: {type(error).__name__}: {error}")
+    return None, None
 
 
 def _inactivity(job_dir, now):
@@ -110,7 +132,8 @@ def _inactivity(job_dir, now):
                 except OSError:
                     continue
                 newest = mtime if newest is None else max(newest, mtime)
-    except OSError:
+    except OSError as error:
+        _log(f"inactivity scan failed: {type(error).__name__}: {error}")
         return None
     if newest is None:
         return None
@@ -118,37 +141,63 @@ def _inactivity(job_dir, now):
 
 
 def _runner_identity(job_dir):
-    launch = _read_json(os.path.join(job_dir, "launch.json")) or {}
+    """(pid, starttime, boot_id, deadline, started_at, error). `error` says
+    why launch.json gave no usable pid; liveness is then unknown, not
+    dead."""
+    path = os.path.join(job_dir, "launch.json")
+    error = None
+    try:
+        with open(path) as f:
+            launch = json.load(f)
+    except (OSError, ValueError) as exc:
+        launch, error = {}, f"launch.json unreadable: {type(exc).__name__}: {exc}"
+    if not isinstance(launch, dict):
+        launch, error = {}, "launch.json is not an object"
     try:
         pid = int(launch.get("pid", -1))
     except (TypeError, ValueError):
         pid = -1
+    if pid <= 0 and error is None:
+        error = f"launch.json has no usable pid ({launch.get('pid')!r})"
     try:
         started = float(launch.get("started_at"))
     except (TypeError, ValueError):
         started = None
+        if error is None:
+            _log_once(
+                f"launch.json started_at {launch.get('started_at')!r} is not a "
+                "number; elapsed is measured from the watchdog's start"
+            )
     return (
         pid,
         launch.get("starttime", ""),
         launch.get("boot_id", ""),
         launch.get("deadline"),
         started,
+        error,
     )
 
 
-def _record(job_dir, runner_alive, deadline, now, started):
+def _record(job_dir, runner_alive, deadline, now, started, identity_error=None):
     # `elapsed`/`remaining` are derived here rather than by the supervisor:
     # the local clock may be minutes off the VM's, and "how long has this
     # been running" must be answered by the machine that is running it.
+    gpu, gpu_error = _gpu_query()
+    disk_free, disk_path = _disk_free(job_dir)
     _atomic_write_json(
         os.path.join(job_dir, "watchdog.json"),
         {
             "ts": now,
             "elapsed": round(now - started),
             "remaining": (round(deadline - now) if deadline is not None else None),
-            "disk_free_bytes": _disk_free_bytes(job_dir),
-            "gpu": _gpu_query(),
+            "disk_free_bytes": disk_free,
+            "disk_path": disk_path,
+            "gpu": gpu,
+            "gpu_error": gpu_error,
+            # None when launch.json gave no usable identity: unknown, which
+            # the supervisor must not read as a dead runner.
             "runner_alive": runner_alive,
+            "runner_identity_error": identity_error,
             "deadline": deadline,
             "inactivity": _inactivity(job_dir, now),
         },
@@ -162,7 +211,7 @@ def _cancel(job_dir, shim_pgid, now, runner_pid):
     if not os.path.exists(cancel_path):
         _atomic_write_json(
             cancel_path,
-            {"cancelled_by": "wall_clock", "at": now},
+            {"intent": "cancelled", "by": "wall_clock", "at": now},
         )
     _safe_killpg(shim_pgid, signal.SIGTERM)
     _signal_escapees(job_dir, signal.SIGTERM, runner_pid)
@@ -207,21 +256,38 @@ def main(argv):
     watchdog_started = time.time()
     while True:
         now = time.time()
-        pid, expected_start, expected_boot, deadline, launched_at = _runner_identity(
-            job_dir
+        (
+            pid,
+            expected_start,
+            expected_boot,
+            deadline,
+            launched_at,
+            identity_error,
+        ) = _runner_identity(job_dir)
+        runner_alive = (
+            None
+            if identity_error is not None
+            else ident.alive(pid, expected_start, expected_boot)
         )
-        runner_alive = ident.alive(pid, expected_start, expected_boot)
         try:
             deadline_value = float(deadline) if deadline is not None else None
         except (TypeError, ValueError):
             deadline_value = None
-        _record(
-            job_dir,
-            runner_alive,
-            deadline_value,
-            now,
-            launched_at if launched_at is not None else watchdog_started,
-        )
+            _log_once(
+                f"launch.json deadline {deadline!r} is not a number; the watchdog "
+                "enforces no deadline (the runner still enforces its own)"
+            )
+        try:
+            _record(
+                job_dir,
+                runner_alive,
+                deadline_value,
+                now,
+                launched_at if launched_at is not None else watchdog_started,
+                identity_error,
+            )
+        except Exception as error:  # noqa: BLE001 - the deadline kill below must still run
+            _log(f"watchdog.json not written: {type(error).__name__}: {error}")
 
         # A result means the runner has completed its durable work. Stop the
         # sibling rather than leave a detached process behind.

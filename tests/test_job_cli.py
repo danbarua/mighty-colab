@@ -805,9 +805,24 @@ def _orch(tmp_path, spec):
     )
 
 
-def test_a_stage_failure_is_not_classified_as_a_code_bug(tmp_path):
-    """Telling an agent to `fix_code` when a signed URL expired sends it
-    editing a script that was never wrong."""
+@pytest.mark.parametrize(
+    "error, retry",
+    [
+        (
+            {"exception": "HTTPError", "reason": "HTTP Error 403: Forbidden",
+             "http_status": 403, "category": "http"},
+            RetryClass.REFRESH_URLS,
+        ),
+        (
+            {"exception": "StagedMismatch",
+             "reason": "received sha256 aa, planned bb", "category": "checksum"},
+            RetryClass.FIX_CODE,
+        ),
+    ],
+)
+def test_a_stage_failure_is_classified_by_what_the_fetch_hit(tmp_path, error, retry):
+    """An expired signature needs new URLs, a wrong sha256 needs a spec
+    change; the runner's per-input record tells them apart."""
     spec = JobSpec(
         name="s",
         code=CodeSpec(kind="file", entry="t.py"),
@@ -815,14 +830,21 @@ def test_a_stage_failure_is_not_classified_as_a_code_bug(tmp_path):
     )
     orch = _orch(tmp_path, spec)
 
-    orch._absorb_result({"workload": "failed", "exit_code": 1, "phase": "stage"})
+    orch._absorb_result(
+        {
+            "workload": "failed",
+            "exit_code": 1,
+            "phase": "stage",
+            "inputs": [
+                {"dest": "in.bin", "url_id": "https://x/in.bin#abc", "status": "failed",
+                 "error": error},
+            ],
+        }
+    )
 
-    # `fix_human`, not `refresh_urls`: the runner redacts the error text
-    # (it can embed a signed query string), so the surviving evidence
-    # cannot separate an expired signature from a checksum mismatch --
-    # and re-signing does not fix the latter.
-    assert orch.env.retry_class is RetryClass.FIX_HUMAN
+    assert orch.env.retry_class is retry
     assert orch.env.phase is Phase.STAGE
+    assert orch.env.failed_phase is Phase.STAGE
     assert "consumer never started" in orch.env.reason
 
 
@@ -3382,3 +3404,47 @@ def test_apply_restores_the_signal_handlers_it_installed(tmp_path, monkeypatch, 
     before = (signal.getsignal(signal.SIGTERM), signal.getsignal(signal.SIGHUP))
     _apply_with(monkeypatch, tmp_path, mock_common_state)
     assert (signal.getsignal(signal.SIGTERM), signal.getsignal(signal.SIGHUP)) == before
+
+
+def test_status_output_names_the_input_that_failed_to_stage(mock_common_state):
+    from colab_cli.commands.job import _store
+    from colab_cli.job.models import (
+        Cleanup,
+        InputResult,
+        JobEnvelope,
+        Phase,
+        Supervisor,
+        TransferError,
+    )
+
+    _store().write_envelope(
+        JobEnvelope(
+            job_id="failed-stage",
+            phase=Phase.CLEANUP,
+            failed_phase=Phase.STAGE,
+            workload=Workload.FAILED,
+            offload=Offload.NOT_REQUIRED,
+            cleanup=Cleanup.RELEASED,
+            supervisor=Supervisor.FINISHED,
+            inputs=[
+                InputResult(dest="a.bin", url_id="https://x/a#1", status="ok", bytes=1),
+                InputResult(
+                    dest="b.bin",
+                    url_id="https://x/b#2",
+                    status="failed",
+                    error=TransferError(
+                        exception="HTTPError", reason="HTTP Error 403: Forbidden",
+                        http_status=403, body="<Error>\n  AccessDenied</Error>",
+                        category="http",
+                    ),
+                ),
+            ],
+        )
+    )
+
+    result = runner.invoke(app, ["job", "status", "failed-stage"])
+
+    assert result.exit_code == 0, result.output
+    assert "input:      b.bin -> failed: HTTP Error 403: Forbidden" in result.output
+    assert "response body: <Error> AccessDenied</Error>" in result.output
+    assert "a.bin" not in result.output

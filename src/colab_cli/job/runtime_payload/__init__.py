@@ -30,4 +30,7 @@ def _payload_version() -> str:
 
 SCHEMA_VERSION = "1"
 RESULT_SCHEMA_VERSION = "2"
+# Seconds between SIGTERM and SIGKILL when the runner or the watchdog stops
+# the workload.
+GRACE_SECONDS = 5
 RUNTIME_PAYLOAD_VERSION = _payload_version()
