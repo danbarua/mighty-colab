@@ -721,7 +721,7 @@ class Orchestrator:
         source_bytes = sum(
             item.size_bytes for item in (self.plan.source_files or [])
         )
-        input_bytes = sum(d.size_bytes or 0 for d in self.spec.data)
+        input_bytes = self.plan.input_bytes()
         output_bytes = sum(a.size_bytes or 0 for a in self.spec.artifacts)
         free = payload.get("free")
         self.env.hints.append(
@@ -730,7 +730,26 @@ class Orchestrator:
             f"output={output_bytes} free={free}"
         )
         self._check_disk(free, source_bytes, input_bytes, output_bytes)
+        self._check_url_expiry()
         self._persist()
+
+    def _check_url_expiry(self) -> None:
+        """Install has run, so the time left on each signed URL is checked
+        again against what remains: staging, the run and offload. Apply's
+        own check before assignment allowed for the longest install, so
+        this fails only when provisioning, install and restart together
+        took longer than that allowance."""
+        from colab_cli.job.planner import revalidate_expiry
+
+        problems = revalidate_expiry(self.plan, install_allowance=False)
+        if problems:
+            raise PhaseError(
+                Phase.VERIFY,
+                "signed URLs no longer last until the end of the run: "
+                + "; ".join(p.message for p in problems),
+                RetryClass.REFRESH_URLS,
+                ["re-sign the URLs with a longer expiry, re-plan and re-apply"],
+            )
 
     def _check_disk(
         self,

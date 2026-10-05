@@ -36,7 +36,16 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 from colab_cli.job.models import JobEnvelope, JobSpec, Plan
-from colab_cli.job.spec_io import has_url_query, is_redacted_url, redacted_url
+from colab_cli.job.spec_io import (
+    has_url_query,
+    is_redacted_url,
+    redacted_url,
+    validation_messages,
+)
+from colab_cli.job.runtime_payload.redact import describe_error
+
+# Validation problems named in a plan error before the rest are counted.
+PLAN_ERRORS_SHOWN = 5
 
 PLAN_FILE = "plan.json"
 ENVELOPE_FILE = "envelope.json"
@@ -156,18 +165,37 @@ def _read_secret_map(path: Path, markers: set[str]) -> dict[str, str]:
 
 
 def _validate_plan(payload) -> Plan:
+    """The plan, or a ValueError naming each invalid field without its
+    value: a hydrated plan's values include signed URLs."""
+    from pydantic import ValidationError
+
     try:
         return Plan.model_validate(payload)
-    except Exception:
-        raise ValueError("plan file is invalid") from None
+    except ValidationError as error:
+        problems = validation_messages(error)
+        shown = "; ".join(problems[:PLAN_ERRORS_SHOWN])
+        more = len(problems) - PLAN_ERRORS_SHOWN
+        if more > 0:
+            shown += f"; and {more} more"
+        raise ValueError(f"plan file is invalid: {shown}") from None
+    except Exception as error:  # noqa: BLE001 - its type is enough to report
+        raise ValueError(f"plan file is invalid ({type(error).__name__})") from None
 
 
 def load_plan_file(path: str | Path, *, hydrate: bool = False) -> Plan:
     plan_path = Path(path)
     try:
-        payload = json.loads(plan_path.read_text())
-    except (OSError, ValueError, TypeError, json.JSONDecodeError):
-        raise ValueError("plan file is unreadable or invalid") from None
+        text = plan_path.read_text()
+    except OSError as error:
+        raise ValueError(f"plan file cannot be read: {describe_error(error)}") from None
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as error:
+        # The message and position only: the document is the plan.
+        raise ValueError(
+            f"plan file {plan_path} is not valid JSON: {error.msg} at line "
+            f"{error.lineno}, column {error.colno}"
+        ) from None
     metadata = _validate_plan(payload)
     if not hydrate:
         return metadata
@@ -283,13 +311,13 @@ class JobStore:
         `(None, problem)` when the envelope exists but cannot be read: a
         truncated write, or fields from a newer CLI sharing this store.
         For listings, where one bad record must not hide the others."""
-        from colab_cli.job.runtime_payload.redact import describe_error
-
         try:
             return self.read_envelope(job_id), None
         except Exception as error:  # noqa: BLE001 - reported to the caller
             detail = " ".join(describe_error(error).split())
-            return None, f"envelope unreadable ({detail[:500]})"
+            if len(detail) > 500:
+                detail = detail[:500] + f" [... {len(detail) - 500} characters omitted]"
+            return None, f"envelope unreadable ({detail})"
 
     # -- supervisor liveness ---------------------------------------------
 

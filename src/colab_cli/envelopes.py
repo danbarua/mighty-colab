@@ -107,6 +107,15 @@ class JobPlanEnvelope(EnvelopeBase):
     diagnostics: List[Dict[str, Any]] = []
 
 
+class JobApplyRefusedEnvelope(EnvelopeBase):
+    """`job apply --json` refusing a plan before assignment: the plan's
+    errors or warnings, or the signed URLs that would expire too soon, as
+    the same diagnostics `job plan` emits."""
+
+    job_id: Optional[str] = None
+    diagnostics: List[Dict[str, Any]] = []
+
+
 class JobEnvelopeWrapper(EnvelopeBase):
     """`job apply|status|destroy --json`.
 

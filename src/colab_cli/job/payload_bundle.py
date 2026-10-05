@@ -100,13 +100,13 @@ def _upload_checked(
 
 def _validate_user_file(path: Path, root: Path) -> None:
     if path.is_symlink():
-        raise ValueError("code payload must not contain symbolic links")
+        raise ValueError(f"code payload must not contain symbolic links: {path}")
     try:
         path.resolve(strict=True).relative_to(root.resolve(strict=True))
     except (FileNotFoundError, ValueError):
-        raise ValueError("code payload file escapes its declared root") from None
+        raise ValueError(f"code payload file escapes its declared root {root}: {path}") from None
     if path.lstat().st_nlink != 1:
-        raise ValueError("code payload must not contain hard-linked files")
+        raise ValueError(f"code payload must not contain hard-linked files: {path}")
 
 
 _URL_DELIMITERS = frozenset(b" \t\r\n\"'<>(){}")
@@ -226,7 +226,7 @@ def _iter_user_files(spec, source_spec_path=None):
         if any(part in {".git", "__pycache__", ".venv"} for part in relative.parts):
             continue
         if path.is_symlink():
-            raise ValueError("code payload must not contain symbolic links")
+            raise ValueError(f"code payload must not contain symbolic links: {path}")
         if path.is_dir() or path.suffix == ".pyc":
             continue
         if path.resolve(strict=False) in excluded or (

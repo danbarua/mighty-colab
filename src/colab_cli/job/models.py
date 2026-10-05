@@ -352,7 +352,9 @@ class JobSpec(BaseModel):
 class Diagnostic(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    severity: Literal["error", "warn"]
+    # `info` reports what plan measured or assumed; only `error` and `warn`
+    # stop apply.
+    severity: Literal["error", "warn", "info"]
     code: str
     message: str
     retry_class: Optional[RetryClass] = None
@@ -406,6 +408,11 @@ class Plan(BaseModel):
     # re-probing. A durable plan applied hours later may carry URLs that
     # have since expired -- cheaper to catch before `assign` than after.
     url_expiry: Dict[str, Optional[str]] = Field(default_factory=dict)
+    # Sizes the plan's ranged GET measured for inputs with no declared
+    # `size_bytes`, keyed `data[i]`. Used for disk planning only: staging
+    # checks declared sizes, so an object replaced after planning is not a
+    # failure.
+    probed_size_bytes: Dict[str, int] = Field(default_factory=dict)
     source_spec_path: Optional[str] = None
     source_files: List[SourceFileLock] = Field(default_factory=list)
 
@@ -416,6 +423,16 @@ class Plan(BaseModel):
     @property
     def has_warnings(self) -> bool:
         return any(d.severity == "warn" for d in self.diagnostics)
+
+    def input_bytes(self) -> int:
+        """Bytes the declared inputs will stage: each `size_bytes`, or the
+        size the plan measured when none is declared."""
+        return sum(
+            item.size_bytes
+            if item.size_bytes is not None
+            else self.probed_size_bytes.get(f"data[{index}]", 0)
+            for index, item in enumerate(self.spec.data)
+        )
 
 
 # --------------------------------------------------------------------------

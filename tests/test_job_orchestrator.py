@@ -2313,3 +2313,35 @@ def test_detach_closes_the_local_kernel_client(tmp_path):
     orch.detach()
 
     rt.stop.assert_called_once()
+
+
+def test_verify_rechecks_url_expiry_once_install_has_run(tmp_path):
+    """Apply's preflight allows for the longest install; after install, a
+    URL must still cover staging, the run and offload."""
+    import datetime as dt
+
+    expires = int((dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=5)).timestamp())
+    spec = _spec(
+        data=[DataItem(url=f"https://storage.example/in?Expires={expires}&Signature=S",
+                       dest="in.bin", size_bytes=1)]
+    )
+    orch = _orch(tmp_path, spec=spec)
+
+    with pytest.raises(PhaseError) as caught:
+        orch._check_url_expiry()
+
+    assert caught.value.phase is Phase.VERIFY
+    assert caught.value.retry_class is RetryClass.REFRESH_URLS
+    assert "signed URLs no longer last until the end of the run: data[0].url" in caught.value.reason
+    assert "for installing deps" not in caught.value.reason
+
+
+def test_verify_accepts_urls_that_outlast_the_run(tmp_path):
+    import datetime as dt
+
+    expires = int((dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=2)).timestamp())
+    spec = _spec(
+        data=[DataItem(url=f"https://storage.example/in?Expires={expires}&Signature=S",
+                       dest="in.bin", size_bytes=1)]
+    )
+    _orch(tmp_path, spec=spec)._check_url_expiry()
