@@ -2733,3 +2733,21 @@ def test_the_write_that_finishes_a_job_appends_its_outcome_once(tmp_path):
         "workload": "failed", "cleanup": "released", "failed_phase": "run",
         "retry_class": "fix_code", "reason": "the workload exited 1: ValueError: x",
     }
+
+
+def test_a_keep_alive_preflight_http_error_keeps_its_json_body(tmp_path, keep_alive_spawn):
+    client = MagicMock()
+    client.assign.return_value = _cpu_assignment("m-s-job")
+    client.keep_alive_assignment.side_effect = _assign_error(
+        500, "Internal Server Error", body='{"error": {"message": "backend unavailable"}}',
+        content_type="application/json",
+    )
+    orch = _orch(tmp_path, spec=_spec(accelerator=Accelerator(prefer=[], accept_cpu=True)),
+                 client=client)
+
+    orch.provision()
+
+    [hint] = [h for h in orch.env.hints if h.startswith("keep-alive pre-flight failed")]
+    assert "HTTP 500" in hint
+    assert 'response body: {"error": {"message": "backend unavailable"}}' in hint
+    assert "nbh=" not in hint
