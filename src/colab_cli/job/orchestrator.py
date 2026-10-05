@@ -59,7 +59,8 @@ from colab_cli.job.models import (
 from colab_cli.job import verdict
 from colab_cli.job.store import RUNNER_LOG_FILE, JobStore
 from colab_cli.job.runtime_payload import RUNTIME_PAYLOAD_VERSION
-from colab_cli.job.runtime_payload.redact import describe_error, redact_credentials
+from colab_cli.job.runtime_payload.redact import describe_error, redact_credentials, redact_url
+from colab_cli.job.spec_io import fetch_control_result, url_id
 
 _logger = logging.getLogger(__name__)
 
@@ -311,6 +312,10 @@ class Orchestrator:
         # since when launch.json has been continuously absent.
         self._runner_seen = False
         self._watchdog_staleness = WatchdogStaleness()
+        self._runner_log_problem: Optional[str] = None
+        self._last_watchdog_hint: Optional[str] = None
+        # Why removing the transfer credential file was not confirmed.
+        self.secret_cleanup_problem: Optional[str] = None
         self._launch_absent_since: Optional[float] = None
 
     # -- envelope bookkeeping -------------------------------------------
@@ -342,16 +347,11 @@ class Orchestrator:
         before release. Any failure here (including a transport double that
         doesn't implement `read_text`) must never break the verdict poll.
         """
-        try:
-            log_text, log_status = transport.read_text(
-                f"{self.remote_dir}/{RUNNER_LOG_FILE}"
-            )
-            if log_status.name == "OK" and log_text is not None:
-                log_path = self.store.job_dir(self.job_id) / RUNNER_LOG_FILE
-                log_path.parent.mkdir(parents=True, exist_ok=True)
-                log_path.write_text(log_text)
-        except Exception:  # noqa: BLE001 - best-effort, never fatal
-            pass
+        problem = pull_runner_log(transport, self.store, self.job_id)
+        if problem != self._runner_log_problem:
+            if problem is not None:
+                _logger.warning("job %s: runner.log not copied: %s", self.job_id, problem)
+            self._runner_log_problem = problem
 
 
     # -- provision -------------------------------------------------------
@@ -631,9 +631,7 @@ class Orchestrator:
         try:
             runtime.stop()
         except Exception as e:  # noqa: BLE001 - local cleanup must not hide the verdict
-            self.env.hints.append(
-                f"local runtime client close failed ({type(e).__name__})"
-            )
+            self.env.hints.append(f"local runtime client close failed ({describe_error(e)})")
 
     def install(self) -> None:
         """uv first, pip if uv fails; see colab_cli.job.install."""
@@ -902,6 +900,7 @@ class Orchestrator:
         if not self._secret_channel_prepared:
             return True
         if self.session_state is None:
+            self.secret_cleanup_problem = "no session to reach the VM with"
             return False
         secret_path = f"{self.remote_dir}/mighty_runtime/.secrets/transfer.json"
         secret_dir = secret_path.rsplit("/", 1)[0]
@@ -916,25 +915,30 @@ class Orchestrator:
             f"try:\n    os.rmdir({secret_dir!r})\nexcept OSError:\n    pass\n"
             "print('SECRET_CHANNEL_ABSENT=%d' % (not os.path.lexists(p)))\n"
         )
+        kernel_note = "the kernel did not confirm it"
         try:
             outputs = self._execute_code(code, timeout=LAUNCH_TIMEOUT, phase=Phase.CLEANUP)
             kernel_absent = "SECRET_CHANNEL_ABSENT=1" in _outputs_text(outputs)
-        except Exception:  # noqa: BLE001 - use the independent Contents path
-            pass
+        except Exception as error:  # noqa: BLE001 - use the independent Contents path
+            kernel_note = f"the kernel call failed ({describe_error(error)})"
 
         contents_absent = False
+        contents_note = "Contents did not confirm it"
         try:
             from colab_cli.job.transport import ReadStatus
 
             status = self.job_transport().remove(secret_path)
             contents_absent = status in (ReadStatus.OK, ReadStatus.SESSION_LOST)
-        except Exception:  # noqa: BLE001 - kernel proof may still be available
-            pass
-
+            contents_note = f"Contents removal returned {status.name}"
+        except Exception as error:  # noqa: BLE001 - kernel proof may still be available
+            contents_note = f"Contents removal failed ({describe_error(error)})"
 
         removed = kernel_absent or contents_absent
         if removed:
             self._secret_channel_prepared = False
+            self.secret_cleanup_problem = None
+        else:
+            self.secret_cleanup_problem = f"{kernel_note}; {contents_note}"
         return removed
 
     def launch(self, payload_remote_path: str) -> Optional[int]:
@@ -1062,7 +1066,8 @@ class Orchestrator:
                 wd, wd_status = transport.read_json(f"{self.remote_dir}/watchdog.json")
                 if wd_status.name == "OK" and wd:
                     self._runner_seen = True
-                    replace_hint(self.env.hints, WATCHDOG_HINT_PREFIX, watchdog_hint(wd))
+                    self._last_watchdog_hint = watchdog_hint(wd)
+                    replace_hint(self.env.hints, WATCHDOG_HINT_PREFIX, self._last_watchdog_hint)
                     stalled = self._watchdog_staleness.observe(wd)
                     replace_hint(self.env.hints, WATCHDOG_STALLED_PREFIX, stalled)
                     if stalled:
@@ -1125,7 +1130,11 @@ class Orchestrator:
         # Local deadline reached. The VM's own watchdog owns the kill; the
         # supervisor going home is not itself a verdict.
         self.env.supervisor = Supervisor.INTERRUPTED
-        self.env.reason = "local supervisor deadline reached before a verdict"
+        self.env.reason = "local supervisor deadline reached before a verdict" + (
+            f" (last watchdog read: {self._last_watchdog_hint})"
+            if self._last_watchdog_hint
+            else " (watchdog.json was never read)"
+        )
         self.env.retry_class = RetryClass.RETRY_SAME
         self._persist()
 
@@ -1194,9 +1203,18 @@ class Orchestrator:
         return (datetime.datetime.now(datetime.timezone.utc) - started).total_seconds()
 
     def _finish_without_result(self, reason: str, transport) -> None:
-        """No result.json will arrive. The verdict is unknown; nothing was
+        """No result.json will arrive from the VM. With `control.result`
+        configured, the runner may have PUT its result there: absorb it if
+        it is terminal. Otherwise the verdict is unknown; nothing was
         offloaded by the runner, so offload is terminal too, and cleanup
         can release the VM."""
+        recovered = self._recover_control_result()
+        if recovered is not None:
+            self._absorb_or_keep(recovered, transport)
+            self.env.hints.append(
+                f"result read from control.result after: {reason}"
+            )
+            return
         self.env.workload = Workload.UNKNOWN
         if not self.env.offload.terminal:
             self.env.offload = (
@@ -1209,6 +1227,27 @@ class Orchestrator:
         self.env.record_failure(Phase.RUN)
         self._pull_runner_log(transport)
         self._persist()
+
+    def _recover_control_result(self) -> Optional[dict]:
+        """The terminal result the runner PUT to `control.result`, or None,
+        with a hint saying why when the read fails."""
+        channel = getattr(self.spec.control, "result", None)
+        if channel is None or not channel.get_url:
+            return None
+        try:
+            result = fetch_control_result(channel.get_url)
+        except Exception as error:  # noqa: BLE001 - recorded; the verdict stays unknown
+            self.env.hints.append(
+                "control.result could not be read: "
+                + redact_url(describe_error(error), channel.get_url, url_id(channel.get_url))
+            )
+            return None
+        if result.get("workload") not in {w.value for w in Workload if w.terminal}:
+            self.env.hints.append(
+                f"control.result holds no terminal result (workload={result.get('workload')!r})"
+            )
+            return None
+        return result
 
     @staticmethod
     def absorb_provenance(env: JobEnvelope, result: dict) -> None:
@@ -1244,7 +1283,10 @@ class Orchestrator:
             try:
                 env.phase = Phase(remote_phase)
             except ValueError:
-                pass
+                env.hints.append(
+                    f"the runner reported phase {remote_phase!r}, which this CLI "
+                    "does not know; phase left as it was"
+                )
 
         Orchestrator.absorb_provenance(env, result)
 
@@ -1371,8 +1413,11 @@ class Orchestrator:
             return
         try:
             self.session_store.remove(self.session_state.name)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:  # noqa: BLE001 - the release itself is recorded
+            self.env.hints.append(
+                f"local session record {self.session_state.name} not removed "
+                f"({describe_error(e)}); `mighty-colab sessions` may still list it"
+            )
 
 
 
@@ -1616,6 +1661,27 @@ def degraded_reason(transport, polls: Optional[int] = None) -> str:
     if isinstance(listing, str):
         text += f"; {listing}"
     return text
+
+
+def pull_runner_log(transport, store: JobStore, job_id: str) -> Optional[str]:
+    """Copy the VM's runner.log to the local job directory. Returns why it
+    was not copied, or None. Never raises: a poll must not break on it."""
+    try:
+        text, status = transport.read_text(f"/content/jobs/{job_id}/{RUNNER_LOG_FILE}")
+    except Exception as error:  # noqa: BLE001 - reported to the caller
+        return describe_error(error)
+    if status.name == "NOT_FOUND":
+        return None
+    if status.name != "OK" or text is None:
+        problem = getattr(transport, "last_problem", None)
+        return f"read {status.name}" + (f" ({problem})" if isinstance(problem, str) else "")
+    try:
+        path = store.job_dir(job_id) / RUNNER_LOG_FILE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    except OSError as error:
+        return f"local write failed ({describe_error(error)})"
+    return None
 
 
 def replace_hint(hints: List[str], prefix: str, text: Optional[str]) -> None:

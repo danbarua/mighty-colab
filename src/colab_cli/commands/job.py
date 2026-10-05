@@ -902,8 +902,13 @@ def apply(
             if orch.env.retry_class is None:
                 orch.env.retry_class = RetryClass.DO_NOT_RETRY
             orch.env.hints.append(
-                "transfer credential deletion could not be confirmed; forced VM "
-                "teardown to remove the secret"
+                "transfer credential deletion could not be confirmed"
+                + (
+                    f" ({orch.secret_cleanup_problem})"
+                    if orch.secret_cleanup_problem
+                    else ""
+                )
+                + "; forced VM teardown to remove the secret"
             )
         if orch.env.supervisor is Supervisor.INTERRUPTED and secret_removed:
             # Interrupted after launch: the run is still going on the VM.

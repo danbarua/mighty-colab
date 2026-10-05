@@ -2651,3 +2651,65 @@ def test_the_leave_up_flag_keeps_the_vm_and_an_unknown_plan_counts_only_it(tmp_p
     assert orch.env.model_dump(mode="json")["leave_up"] is True
     orch.env.leave_up = False
     assert "leave_up" not in orch.env.model_dump(mode="json")
+
+
+def test_an_unconfirmed_secret_cleanup_says_why(tmp_path):
+    from colab_cli.job.transport import ReadStatus
+
+    orch = _orch(tmp_path)
+    orch._secret_channel_prepared = True
+    orch.session_state = SimpleNamespace(url="https://u", token="t", name="s", endpoint="e")
+    orch._execute_code = MagicMock(side_effect=RuntimeError("Connection was lost."))
+    transport = MagicMock()
+    transport.remove.return_value = ReadStatus.DEGRADED
+    orch._job_transport = transport
+
+    assert orch.cleanup_secret_channel() is False
+    assert orch.secret_cleanup_problem == (
+        "the kernel call failed (RuntimeError: Connection was lost.); "
+        "Contents removal returned DEGRADED"
+    )
+
+
+def test_a_lost_vm_with_a_control_result_is_absorbed_not_unknown(tmp_path, monkeypatch):
+    spec = _spec(
+        control=Control(result=ControlChannel(put_url="https://x/r?sig=a", get_url="https://x/r?sig=b"))
+    )
+    orch = _orch(tmp_path, spec=spec)
+    monkeypatch.setattr(
+        "colab_cli.job.orchestrator.fetch_control_result",
+        lambda url: {"workload": "succeeded", "exit_code": 0},
+    )
+    transport = _poll_transport({})
+
+    orch._finish_without_result("the assignment is gone from the server", transport)
+
+    assert orch.env.workload is Workload.SUCCEEDED
+    assert "result read from control.result after: the assignment is gone from the server" in orch.env.hints
+
+
+def test_an_unreadable_control_result_says_why_without_the_signature(tmp_path, monkeypatch):
+    import urllib.error
+
+    get = "https://x/r?X-Goog-Signature=SENTINEL"
+    spec = _spec(control=Control(result=ControlChannel(put_url="https://x/r?sig=a", get_url=get)))
+    orch = _orch(tmp_path, spec=spec)
+
+    def forbidden(url):
+        raise urllib.error.HTTPError(url, 403, "Forbidden", {}, None)
+
+    monkeypatch.setattr("colab_cli.job.orchestrator.fetch_control_result", forbidden)
+
+    orch._finish_without_result("the runner is dead", _poll_transport({}))
+
+    assert orch.env.workload is Workload.UNKNOWN
+    [hint] = [h for h in orch.env.hints if h.startswith("control.result could not be read")]
+    assert "HTTP Error 403: Forbidden" in hint
+    assert "SENTINEL" not in hint
+
+
+def test_an_unknown_remote_phase_is_a_hint(tmp_path):
+    orch = _orch(tmp_path)
+    orch._absorb_result({"workload": "succeeded", "exit_code": 0, "phase": "teleport"})
+
+    assert any("the runner reported phase 'teleport'" in h for h in orch.env.hints)
