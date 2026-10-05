@@ -34,7 +34,8 @@ import asyncio
 import contextlib
 import io
 import json
-from typing import Any, Dict, List, Optional, Tuple
+import logging
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 import click
 import typer
@@ -246,31 +247,172 @@ def _build_kwargs(
     return kwargs
 
 
-def invoke_command(name: str, cmd: click.Command, arguments: Dict[str, Any]) -> Tuple[bool, str]:
-    """Run one Click command's callback in-process. Returns (ok, text)."""
-    output = io.StringIO()
+_logger = logging.getLogger(__name__)
 
-    def captured() -> str:
-        return _strip_ansi(output.getvalue()).strip()
 
+class ToolOutcome(NamedTuple):
+    ok: bool
+    # What a person reads: the command's own human lines, plus a rendering
+    # of its envelope when it has one.
+    text: str
+    # The `--json` envelope, for a command that builds one.
+    structured: Optional[Dict[str, Any]]
+
+
+def _json_capable(tool_name: str) -> bool:
+    """Whether the tool's top-level command builds a `--json` envelope.
+    Group leaves are named `group_sub`; top-level names use hyphens."""
+    from colab_cli.cli import JSON_CAPABLE_COMMANDS
+
+    return tool_name.split("_", 1)[0] in JSON_CAPABLE_COMMANDS
+
+
+def _parse_envelope(stdout_text: str) -> Optional[Dict[str, Any]]:
+    """The envelope a command printed: its last stdout line that is a JSON
+    object (`emit_json` prints one line)."""
+    for line in reversed(stdout_text.splitlines()):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            value = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(value, dict):
+            return value
+    return None
+
+
+def _render_outputs(outputs) -> List[str]:
+    """nbformat outputs as text: streams, text/plain results, and errors
+    (their traceback, or name and value when the traceback is empty)."""
+    lines: List[str] = []
+    for output in outputs or []:
+        kind = output.get("output_type")
+        if kind == "stream":
+            text = output.get("text", "")
+            lines.append("".join(text) if isinstance(text, list) else str(text))
+        elif kind in ("execute_result", "display_data"):
+            plain = (output.get("data") or {}).get("text/plain")
+            if plain is not None:
+                lines.append("".join(plain) if isinstance(plain, list) else str(plain))
+        elif kind == "error":
+            traceback = output.get("traceback") or []
+            lines.append(
+                "\n".join(traceback)
+                if traceback
+                else f"{output.get('ename')}: {output.get('evalue')}"
+            )
+    return [line.rstrip("\n") for line in lines if line]
+
+
+_ENVELOPE_META = {"schema_version", "cli_version", "command", "status", "exit_code"}
+
+
+def render_envelope(envelope: Dict[str, Any]) -> str:
+    """A person's reading of a `--json` envelope: the job rendering `job
+    status` prints, cell outputs, diagnostics, list rows, log content, and
+    otherwise the envelope's own fields."""
+    lines: List[str] = []
+    job = envelope.get("job")
+    if isinstance(job, dict):
+        from colab_cli.commands.job import _human
+        from colab_cli.job.models import JobEnvelope
+
+        try:
+            lines.append(_human(JobEnvelope.model_validate(job)))
+        except Exception as error:  # noqa: BLE001 - rendered as JSON instead
+            _logger.warning("job envelope not rendered (%s); showing it as JSON", error)
+            lines.append(json.dumps(job, indent=2))
+    for block in envelope.get("blocks") or []:
+        lines.extend(_render_outputs(block.get("outputs")))
+    lines.extend(_render_outputs(envelope.get("outputs")))
+    for d in envelope.get("diagnostics") or []:
+        lines.append(f"{str(d.get('severity', '')).upper()} {d.get('code')}: {d.get('message')}")
+    for row in envelope.get("jobs") or []:
+        lines.append(
+            f"{row.get('job_id')}  {row.get('workload')}/{row.get('offload')}/"
+            f"{row.get('cleanup')}" + (f"  ({row['reason']})" if row.get("reason") else "")
+        )
+    for key in ("removed", "skipped"):
+        for row in envelope.get(key) or []:
+            lines.append(f"{key}: {row.get('job_id')}  ({row.get('reason')})")
+    for session in envelope.get("sessions") or []:
+        lines.append(
+            f"{session.get('name')}  {session.get('endpoint')}  "
+            f"{session.get('accelerator')}  {session.get('status') or ''}".rstrip()
+        )
+    if envelope.get("content"):
+        lines.append(str(envelope["content"]))
+    if not lines:
+        lines = [
+            f"{key}: {value}"
+            for key, value in envelope.items()
+            if key not in _ENVELOPE_META and value not in (None, [], {})
+        ]
+    message = envelope.get("message")
+    if message and message not in lines:
+        lines.append(str(message))
+    return "\n".join(line for line in lines if line)
+
+
+def run_tool(name: str, cmd: click.Command, arguments: Dict[str, Any]) -> ToolOutcome:
+    """Run one Click command's callback in-process, once.
+
+    A command that builds a `--json` envelope runs in JSON mode: the
+    envelope (on stdout) is returned as `structured`, and the text is the
+    human lines it prints (moved to stderr in JSON mode) plus a rendering
+    of the envelope. Any other command's stdout and stderr are returned as
+    text, as they interleave.
+    """
+    from colab_cli.common import state
+
+    json_mode = _json_capable(name)
+    combined = io.StringIO()
+    out = io.StringIO() if json_mode else combined
+    err = io.StringIO() if json_mode else combined
+    ok, failure, exit_code = True, None, None
+    previous = state.json_output
     try:
         with click.Context(cmd, info_name=name) as ctx:
             kwargs = _build_kwargs(cmd, arguments, ctx)
             ctx.params = kwargs
+            if json_mode:
+                state.json_output = True
             # Commands report errors via `typer.echo(..., err=True)` before
             # raising -- capture stderr too, or those messages are lost and
             # the caller sees only a bare exit code.
-            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                 cmd.invoke(ctx)
     except typer.Exit as e:
-        if e.exit_code not in (0, None):
-            return False, captured() or f"[exit code {e.exit_code}]"
+        exit_code = e.exit_code
+        ok = e.exit_code in (0, None)
     except click.ClickException as e:
-        return False, (captured() + "\n" + e.format_message()).strip()
-    except Exception as e:
-        return False, (captured() + f"\n{e}").strip()
+        ok, failure = False, e.format_message()
+    except Exception as e:  # noqa: BLE001 - returned to the caller, traceback logged
+        _logger.exception("MCP tool %s raised", name)
+        ok, failure = False, f"{type(e).__name__}: {e}"
+    finally:
+        state.json_output = previous
 
-    return True, captured()
+    def text_of(buf: io.StringIO) -> str:
+        return _strip_ansi(buf.getvalue()).strip()
+
+    structured = _parse_envelope(text_of(out)) if json_mode else None
+    if structured is None:
+        parts = [text_of(out)] + ([text_of(err)] if json_mode else []) + [failure]
+    else:
+        parts = [text_of(err), render_envelope(structured), failure]
+    text = "\n".join(p for p in parts if p)
+    if not text and not ok:
+        text = f"[exit code {exit_code}]"
+    return ToolOutcome(ok, text, structured)
+
+
+def invoke_command(name: str, cmd: click.Command, arguments: Dict[str, Any]) -> Tuple[bool, str]:
+    """`run_tool`, for callers that need only (ok, text)."""
+    outcome = run_tool(name, cmd, arguments)
+    return outcome.ok, outcome.text
 
 
 
@@ -622,10 +764,11 @@ async def run_stdio_server(click_group: click.Group, server_name: str) -> None:
                 content=[types.TextContent(type="text", text=f"Unknown tool: {params.name}")],
                 is_error=True,
             )
-        ok, text = invoke_command(params.name, commands[params.name], params.arguments or {})
+        outcome = run_tool(params.name, commands[params.name], params.arguments or {})
         return types.CallToolResult(
-            content=[types.TextContent(type="text", text=text)],
-            is_error=not ok,
+            content=[types.TextContent(type="text", text=outcome.text)],
+            structured_content=outcome.structured,
+            is_error=not outcome.ok,
         )
 
     async def on_list_resources(ctx, params) -> types.ListResourcesResult:

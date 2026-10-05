@@ -47,6 +47,8 @@ JSON_CAPABLE_COMMANDS = {
     # shape, and the group name is what the callback sees as the invoked
     # subcommand, so one entry covers plan/apply/status/destroy/list.
     "job",
+    # `jobs list` and `jobs prune` build envelopes too.
+    "jobs",
 }
 
 # Every option defined on the root `@app.callback()` below -- i.e. one that

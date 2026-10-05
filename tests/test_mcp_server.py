@@ -904,3 +904,124 @@ def test_list_job_resources_survives_an_unreadable_envelope(tmp_path):
 
     assert "readable" in resources
     assert "unreadable" in resources["from-a-newer-cli"].description
+
+
+# --- tool results carry the --json envelope ----------------------------------
+
+
+def _write_failed_job(job_id="mcp-failed"):
+    from colab_cli.commands.job import _store
+    from colab_cli.job.models import (
+        Cleanup, JobEnvelope, Offload, Phase, RetryClass, Supervisor, Workload,
+    )
+
+    _store().write_envelope(
+        JobEnvelope(
+            job_id=job_id, phase=Phase.CLEANUP, failed_phase=Phase.RUN,
+            workload=Workload.FAILED, offload=Offload.NOT_REQUIRED, cleanup=Cleanup.RELEASED,
+            supervisor=Supervisor.FINISHED, retry_class=RetryClass.FIX_CODE,
+            reason="the workload exited 1: ValueError: bad",
+        )
+    )
+
+
+def test_a_job_tool_returns_the_envelope_and_its_human_rendering(tools_and_commands, mock_common_state):
+    from colab_cli.mcp_server import run_tool
+
+    _, commands = tools_and_commands
+    _write_failed_job()
+    mock_common_state.json_output = False
+
+    outcome = run_tool("job_status", commands["job_status"], {"job_id": "mcp-failed"})
+
+    assert outcome.ok is True
+    assert outcome.structured["command"] == "job status"
+    assert outcome.structured["job"]["failed_phase"] == "run"
+    assert outcome.structured["job"]["retry_class"] == "fix_code"
+    assert "[job] mcp-failed" in outcome.text
+    assert "failed in:  run" in outcome.text
+    assert "reason:     the workload exited 1: ValueError: bad" in outcome.text
+    assert mock_common_state.json_output is False, "JSON mode must not leak past the call"
+
+
+def test_jobs_list_returns_its_rows_structured(tools_and_commands, mock_common_state):
+    from colab_cli.mcp_server import run_tool
+
+    _, commands = tools_and_commands
+    _write_failed_job("listed")
+
+    outcome = run_tool("jobs_list", commands["jobs_list"], {})
+
+    assert [row["job_id"] for row in outcome.structured["jobs"]] == ["listed"]
+    assert "listed  failed/not_required/released" in outcome.text
+
+
+def test_a_tool_without_an_envelope_returns_text_only(tools_and_commands, mock_common_state):
+    from colab_cli.mcp_server import run_tool
+
+    _, commands = tools_and_commands
+    outcome = run_tool("adopt", commands["adopt"], {})
+
+    assert outcome.structured is None
+    assert "Provide an ENDPOINT to adopt, or use --orphanage" in outcome.text
+
+
+def test_a_tool_that_raises_names_the_exception_type(caplog):
+    from colab_cli.mcp_server import run_tool
+
+    @click.command()
+    def boom():
+        raise RuntimeError("kaput")
+
+    with caplog.at_level("ERROR", logger="colab_cli.mcp_server"):
+        outcome = run_tool("boom", boom, {})
+
+    assert outcome.ok is False
+    assert outcome.text == "RuntimeError: kaput"
+    assert "MCP tool boom raised" in caplog.text
+    assert "Traceback" in caplog.text
+
+
+def test_render_envelope_shows_cell_outputs_and_errors():
+    from colab_cli.mcp_server import render_envelope
+
+    text = render_envelope(
+        {
+            "command": "exec", "status": "error",
+            "blocks": [
+                {"code": "print(1)", "outputs": [
+                    {"output_type": "stream", "name": "stdout", "text": "1\n"},
+                    {"output_type": "execute_result", "data": {"text/plain": "42"}},
+                    {"output_type": "error", "ename": "ValueError", "evalue": "bad", "traceback": []},
+                ]},
+            ],
+        }
+    )
+
+    assert text == "1\n42\nValueError: bad"
+
+
+def test_render_envelope_falls_back_to_the_fields():
+    from colab_cli.mcp_server import render_envelope
+
+    text = render_envelope(
+        {"schema_version": "1", "command": "stop", "status": "ok", "exit_code": 0, "session": "s1"}
+    )
+
+    assert text == "session: s1"
+
+
+def test_the_cli_emits_json_for_jobs_list(tmp_path):
+    import json as _json
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [sys.executable, "-m", "colab_cli.cli", "--config", str(tmp_path / "sessions.json"),
+         "--json", "jobs", "list"],
+        capture_output=True, text=True, timeout=60,
+    )
+
+    assert "has no effect" not in result.stderr
+    payload = _json.loads(result.stdout.strip().splitlines()[-1])
+    assert payload["command"] == "jobs list" and payload["jobs"] == []
