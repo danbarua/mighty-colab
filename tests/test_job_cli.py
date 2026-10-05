@@ -3824,3 +3824,147 @@ def test_delete_job_reports_what_stopped_it(tmp_path):
 
     assert failure is not None and "PermissionError" in failure
     assert store.delete_job("locked") is None
+
+
+# --------------------------------------------------------------------------
+# status and destroy say why
+# --------------------------------------------------------------------------
+
+
+def test_status_says_when_it_did_not_consult_a_left_up_vm(mock_common_state):
+    from colab_cli.commands.job import _store
+    from colab_cli.job.models import Cleanup, JobEnvelope, Supervisor
+
+    _store().write_envelope(
+        JobEnvelope(
+            job_id="kept", phase=Phase.CLEANUP, workload=Workload.SUCCEEDED,
+            offload=Offload.FAILED, cleanup=Cleanup.LEFT_UP, supervisor=Supervisor.FINISHED,
+            session="job-kept", endpoint="m-s-kept",
+        )
+    )
+
+    result = runner.invoke(app, ["job", "status", "kept"])
+
+    assert result.exit_code == 0, result.output
+    out = _clean(result.output)
+    assert "the VM was not consulted: cleanup is already left_up" in out
+    assert "`mighty-colab sessions` shows it" in out
+
+
+def test_an_orphan_without_a_local_session_names_that_as_the_teardown_cause(
+    monkeypatch, mock_common_state
+):
+    store = _persist_running_job(mock_common_state, job_id="sessionless")
+    mock_common_state.store.get.return_value = None
+
+    result = runner.invoke(app, ["job", "status", "sessionless"])
+
+    assert result.exit_code == 1
+    final = store.read_envelope("sessionless")
+    assert final.reason == (
+        "forced teardown because transfer credential deletion could not be confirmed "
+        "(no local session record 'job-session', so the VM could not be reached)"
+    )
+
+
+def test_a_failed_secret_scrub_says_what_the_removal_returned(monkeypatch, mock_common_state):
+    from colab_cli.job.transport import ReadStatus
+
+    store = _persist_running_job(mock_common_state, job_id="scrub")
+    events = []
+    vm = _RunningVM(events, results=[None])
+    vm.remove = lambda _path: ReadStatus.DEGRADED
+    _use_vm(monkeypatch, mock_common_state, vm, events)
+
+    runner.invoke(app, ["job", "status", "scrub"])
+
+    final = store.read_envelope("scrub")
+    assert final.reason.endswith("could not be confirmed (removing it returned DEGRADED)")
+
+
+def test_status_keeps_an_unabsorbable_result_in_the_reason(monkeypatch, mock_common_state):
+    store = _persist_running_job(mock_common_state, job_id="bad-result")
+    events = []
+    vm = _RunningVM(events, results=[{"workload": "succeeded", "exit_code": "nope",
+                                      "schema_version": "2", "cli_version": "c",
+                                      "runtime_payload_version": "sha256:p"}])
+    _use_vm(monkeypatch, mock_common_state, vm, events)
+
+    result = runner.invoke(app, ["job", "status", "bad-result", "--poll"])
+
+    assert result.exit_code == 0, result.output
+    final = store.read_envelope("bad-result")
+    assert final.workload.value == "unknown"
+    assert final.reason.startswith("runner result could not be absorbed (ValidationError")
+    assert "exit_code='nope'" in final.reason
+
+
+def test_destroy_names_why_the_cancel_was_not_confirmed(monkeypatch, mock_common_state):
+    from colab_cli.job.transport import ReadStatus
+
+    store = _persist_running_job(mock_common_state, job_id="cancel-fail")
+    events = []
+    vm = _RunningVM(events, results=[None])
+    vm.write_json = lambda _path, _value: ReadStatus.DEGRADED
+    _use_vm(monkeypatch, mock_common_state, vm, events)
+
+    result = runner.invoke(app, ["job", "destroy", "cancel-fail", "--cancel-only"])
+
+    assert result.exit_code == 1
+    final = store.read_envelope("cancel-fail")
+    assert final.reason == (
+        "cancel intent could not be confirmed (cancel intent not confirmed (DEGRADED)); "
+        "VM left running"
+    )
+
+
+def test_a_keep_alive_respawn_quotes_why_the_daemon_stopped(mock_common_state, monkeypatch):
+    from colab_cli.commands.job import _ensure_keep_alive
+
+    session = MagicMock()
+    session.keep_alive_pid = None
+    session.name = "job-x"
+    mock_common_state.history.get_history.return_value = [
+        {"event_type": "keep_alive_started"},
+        {"event_type": "keep_alive_stopped", "reason": "consecutive_4xx_errors",
+         "last_error": "HTTP 401"},
+    ]
+    monkeypatch.setattr("colab_cli.commands.session.spawn_keep_alive", lambda *a, **k: 4321)
+
+    hint = _ensure_keep_alive(session, mock_common_state)
+
+    assert hint == (
+        "keep-alive had died (stopped: consecutive_4xx_errors, last error HTTP 401); "
+        "respawned as pid 4321"
+    )
+
+
+def test_a_keep_alive_that_cannot_be_respawned_is_a_hint_not_a_crash(mock_common_state, monkeypatch):
+    from colab_cli.commands.job import _ensure_keep_alive
+
+    session = MagicMock()
+    session.keep_alive_pid = None
+    session.name = "job-x"
+    mock_common_state.history.get_history.return_value = [{"event_type": "keep_alive_started"}]
+
+    def fail(*_a, **_k):
+        raise OSError(24, "Too many open files")
+
+    monkeypatch.setattr("colab_cli.commands.session.spawn_keep_alive", fail)
+
+    hint = _ensure_keep_alive(session, mock_common_state)
+
+    assert hint.startswith("keep-alive had died (it logged no stop reason) and could not be respawned (OSError")
+
+
+def test_a_forced_teardown_keeps_the_reason_it_replaces(monkeypatch, mock_common_state):
+    store = _persist_running_job(mock_common_state, job_id="replaced")
+    env = store.read_envelope("replaced")
+    env.reason = "transport failing for 3 polls (last: result.json: ReadTimeout)"
+    store.write_envelope(env)
+    mock_common_state.store.get.return_value = None
+
+    runner.invoke(app, ["job", "status", "replaced"])
+
+    final = store.read_envelope("replaced")
+    assert "before the forced teardown: transport failing for 3 polls (last: result.json: ReadTimeout)" in final.hints

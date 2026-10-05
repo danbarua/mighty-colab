@@ -76,6 +76,7 @@ from colab_cli.job.orchestrator import (
     raw_verdict,
     keep_vm,
     record_vm_kept,
+    pull_runner_log,
     release_assignment,
     replace_hint,
     request_cancel,
@@ -88,7 +89,6 @@ from colab_cli.job.spec_io import fetch_control_result, validation_messages
 from colab_cli.job.store import (
     ApplyInProgress,
     JobStore,
-    RUNNER_LOG_FILE,
     load_plan_file,
     write_plan_file,
 )
@@ -988,25 +988,39 @@ def _stage_payload(orch: Orchestrator, p) -> None:
 
 
 
-def _scrub_transfer_secret(transport, job_id: str) -> bool:
+def _scrub_transfer_secret(transport, job_id: str) -> tuple[bool, Optional[str]]:
+    """(removed, why not): remove the transfer credential file on the VM."""
     path = f"/content/jobs/{job_id}/mighty_runtime/.secrets/transfer.json"
     try:
-        return transport.remove(path).name == "OK"
-    except Exception:  # noqa: BLE001 - callers enforce teardown on uncertainty
-        return False
+        status = transport.remove(path)
+    except Exception as error:  # noqa: BLE001 - callers enforce teardown on uncertainty
+        return False, f"removing it failed ({describe_error(error)})"
+    if status.name == "OK":
+        return True, None
+    return False, f"removing it returned {status.name}"
 
 
-def _read_off_vm_result(store: JobStore, job_id: str):
+def _read_off_vm_result(store: JobStore, job_id: str) -> tuple[Optional[dict], Optional[str]]:
+    """(terminal result, None), (None, None) when no control.result is
+    configured, or (None, why) when it could not be used."""
+    from colab_cli.job.runtime_payload.redact import redact_url
+    from colab_cli.job.spec_io import url_id
+
     try:
         plan = store.read_plan_for_apply(job_id)
-        channel = plan.spec.control.result if plan is not None else None
-        if channel is None:
-            return None
+    except ValueError as error:
+        return None, f"the plan could not be loaded ({error})"
+    channel = plan.spec.control.result if plan is not None else None
+    if channel is None:
+        return None, None
+    try:
         result = fetch_control_result(channel.get_url)
-        workload = Workload(result.get("workload", ""))
-        return result if workload.terminal else None
-    except Exception:  # noqa: BLE001 - optional recovery must not block teardown
-        return None
+    except Exception as error:  # noqa: BLE001 - reported to the caller
+        return None, redact_url(describe_error(error), channel.get_url, url_id(channel.get_url))
+    workload = result.get("workload")
+    if workload not in {w.value for w in Workload if w.terminal}:
+        return None, f"it holds no terminal result (workload={workload!r})"
+    return result, None
 
 
 
@@ -1084,18 +1098,25 @@ def _forget_session(env, state) -> None:
 
 
 def _force_release_unconfirmed_secret(
-    env, state, store, action: str, transport=None
+    env, state, store, action: str, transport=None, cause: Optional[str] = None
 ) -> None:
+    """Release the VM because the transfer credential file could not be
+    confirmed removed; `cause` says why not."""
+    because = "transfer credential deletion could not be confirmed" + (
+        f" ({cause})" if cause else ""
+    )
     _copy_before_release(env, transport, store)
     _release(env, state, "forced unassign failed")
     _forget_session(env, state)
     if not env.workload.terminal:
+        if env.reason:
+            env.hints.append(f"before the forced teardown: {env.reason}")
         env.workload = Workload.UNKNOWN
         env.record_failure(Phase.CLEANUP)
-        env.reason = "forced teardown because transfer credential deletion could not be confirmed"
+        env.reason = f"forced teardown because {because}"
         env.retry_class = RetryClass.DO_NOT_RETRY
     else:
-        env.hints.append("forced VM teardown because credential deletion was not confirmed")
+        env.hints.append(f"forced VM teardown because {because}")
     env.supervisor = Supervisor.FINISHED
     store.write_envelope(env)
     _emit(env, action, exit_code=1)
@@ -1123,13 +1144,22 @@ def _absorb_remote_result(env, store, job_id, result) -> None:
 def _recover_off_vm_result(
     env: JobEnvelope, store: JobStore, job_id: str
 ) -> JobEnvelope | None:
+    """A copy of `env` with the result from control.result absorbed, or
+    None; when control.result is configured but unusable, `env` gets a
+    hint saying why."""
+    result, problem = _read_off_vm_result(store, job_id)
+    if result is None:
+        if problem:
+            env.hints.append(f"control.result could not be used: {problem}")
+        return None
+    recovered = env.model_copy(deep=True)
     try:
-        result = _read_off_vm_result(store, job_id)
-        if result is None:
-            return None
-        recovered = env.model_copy(deep=True)
         _absorb_remote_result(recovered, store, job_id, result)
-    except Exception:  # noqa: BLE001 - optional recovery must not block teardown
+    except Exception as error:  # noqa: BLE001 - optional recovery must not block teardown
+        env.hints.append(
+            f"control.result could not be absorbed ({describe_error(error)}); "
+            f"raw result: {raw_verdict(result)}"
+        )
         return None
     return recovered
 
@@ -1302,14 +1332,44 @@ def _ensure_keep_alive(session, state) -> Optional[str]:
         return None
     from colab_cli.commands.session import spawn_keep_alive
 
-    session.keep_alive_pid = spawn_keep_alive(
-        session.endpoint,
-        session.name,
-        auth_provider=state.auth_provider,
-        config_path=state.config_path,
+    stopped = _keep_alive_stop_note(state, session.name)
+    try:
+        session.keep_alive_pid = spawn_keep_alive(
+            session.endpoint,
+            session.name,
+            auth_provider=state.auth_provider,
+            config_path=state.config_path,
+        )
+        state.store.add(session)
+    except Exception as error:  # noqa: BLE001 - the status read must still finish
+        return (
+            f"keep-alive had died ({stopped}) and could not be respawned "
+            f"({describe_error(error)}); Colab may reclaim the idle VM"
+        )
+    return f"keep-alive had died ({stopped}); respawned as pid {session.keep_alive_pid}"
+
+
+def _keep_alive_stop_note(state, session_name: str) -> str:
+    """Why the session's last keep-alive daemon stopped, from its history:
+    the reason and last error it logged, or that it logged none."""
+    try:
+        events = state.history.get_history(session_name)
+    except Exception as error:  # noqa: BLE001 - only a note
+        return f"its history could not be read: {describe_error(error)}"
+    last = next(
+        (
+            e
+            for e in reversed(events)
+            if e.get("event_type") in ("keep_alive_started", "keep_alive_stopped")
+        ),
+        None,
     )
-    state.store.add(session)
-    return f"keep-alive had died; respawned as pid {session.keep_alive_pid}"
+    if last is None or last.get("event_type") != "keep_alive_stopped":
+        return "it logged no stop reason"
+    note = f"stopped: {last.get('reason')}"
+    if last.get("last_error"):
+        note += f", last error {last['last_error']}"
+    return note
 
 
 def status(
@@ -1358,16 +1418,27 @@ def status(
         session = state.store.get(env.session)
         if session is None and must_scrub:
             env = _recover_off_vm_result(env, store, job_id) or env
-            _force_release_unconfirmed_secret(env, state, store, "status")
+            _force_release_unconfirmed_secret(
+                env, state, store, "status",
+                cause=f"no local session record {env.session!r}, so the VM could not be reached",
+            )
+        if session is None and not must_scrub:
+            env.hints.append(
+                f"the VM was not consulted: no local session record {env.session!r} "
+                "on this machine"
+            )
         if session is not None:
             keep_alive_hint = _ensure_keep_alive(session, state)
             if keep_alive_hint:
                 env.hints.append(keep_alive_hint)
             transport = JobTransport(session, state.client, state.store)
-            if must_scrub and not _scrub_transfer_secret(transport, job_id):
+            scrubbed, scrub_problem = (
+                _scrub_transfer_secret(transport, job_id) if must_scrub else (True, None)
+            )
+            if not scrubbed:
                 env = _recover_off_vm_result(env, store, job_id) or env
                 _force_release_unconfirmed_secret(
-                    env, state, store, "status", transport
+                    env, state, store, "status", transport, cause=scrub_problem
                 )
             kind = None
             if orphaned and env.workload.terminal:
@@ -1392,19 +1463,23 @@ def status(
                     # else ever reads it back; if the VM disappears before
                     # offload, it's gone with everything else. Best-effort:
                     # any failure here must never break the verdict poll.
-                    try:
-                        log_text, log_status = transport.read_text(
-                            f"/content/jobs/{job_id}/{RUNNER_LOG_FILE}"
-                        )
-                        if log_status.name == "OK" and log_text is not None:
-                            (store.job_dir(job_id) / RUNNER_LOG_FILE).write_text(
-                                log_text
-                            )
-                    except Exception:  # noqa: BLE001 - best-effort, never fatal
-                        pass
+                    log_problem = pull_runner_log(transport, store, job_id)
+                    if log_problem is not None:
+                        _logger.warning("job %s: runner.log not copied: %s", job_id, log_problem)
                     kind, payload = observe_remote(transport, job_id)
                     if kind == "result":
-                        _absorb_remote_result(env, store, job_id, payload)
+                        try:
+                            _absorb_remote_result(env, store, job_id, payload)
+                        except Exception as error:  # noqa: BLE001 - kept in the reason
+                            env.workload = Workload.UNKNOWN
+                            env.record_failure(Phase.RUN)
+                            env.reason = (
+                                f"runner result could not be absorbed ({describe_error(error)}); "
+                                f"raw result: {raw_verdict(payload)}"
+                            )
+                            env.retry_class = RetryClass.DO_NOT_RETRY
+                            if not env.offload.terminal:
+                                env.offload = Offload.SKIPPED
                         if orphaned:
                             env.supervisor = Supervisor.FINISHED
                         break
@@ -1426,8 +1501,15 @@ def status(
                     if kind == "runner_dead":
                         env.workload = Workload.UNKNOWN
                         env.record_failure(Phase.RUN)
+                        reading = (
+                            f" (watchdog: elapsed={payload.get('elapsed')}s, "
+                            f"ts={payload.get('ts')})"
+                            if payload
+                            else ""
+                        )
                         env.reason = (
-                            "runner identity is dead and no result.json was written"
+                            f"runner identity is dead and no result.json was written{reading}; "
+                            "its last output is in runner.log"
                         )
                         env.retry_class = RetryClass.RETRY_SAME
                         env.supervisor = Supervisor.FINISHED
@@ -1467,6 +1549,22 @@ def status(
                 _release_orphaned_job(env, session, state, store, transport)
             else:
                 store.write_envelope(env)
+
+    released = env.cleanup in (Cleanup.RELEASED, Cleanup.ALREADY_ABSENT)
+    if not (env.session and cleanup_pending) and not released:
+        why = (
+            "no session is recorded for this job"
+            if not env.session
+            else f"cleanup is already {env.cleanup.value}"
+        )
+        note = f"the VM was not consulted: {why}"
+        if env.cleanup is Cleanup.LEFT_UP:
+            note += (
+                "; the VM was left running and may still bill: "
+                f"`mighty-colab sessions` shows it, `job destroy {job_id}` releases it"
+            )
+        if note not in env.hints:
+            env.hints.append(note)
 
     # Finalize hints once, regardless of which branch above ran (or none --
     # a terminal job with no session skips the whole block): drops any
@@ -1519,7 +1617,7 @@ def destroy(
 
     saved_plan = store.read_plan(job_id)
     transport = None
-    intent_status = None
+    wait_outcome = None
     session = state.store.get(env.session) if env.session else None
     if session is not None:
         transport = JobTransport(session, state.client, state.store)
@@ -1530,10 +1628,14 @@ def destroy(
             if read_status.name == "OK" and result:
                 _absorb_remote_result(env, store, job_id, result)
                 env.supervisor = Supervisor.FINISHED
+            elif read_status.name not in ("OK", "NOT_FOUND"):
+                env.hints.append(
+                    f"reading result.json before destroy returned {read_status.name}: "
+                    + degraded_reason(transport)
+                )
         except Exception as e:  # noqa: BLE001 - teardown still must proceed
-            typer.echo(
-                f"[colab] Could not reconcile remote result ({type(e).__name__}).",
-                err=True,
+            env.hints.append(
+                f"the remote result could not be reconciled before destroy ({describe_error(e)})"
             )
 
     if not env.workload.terminal:
@@ -1542,59 +1644,54 @@ def destroy(
             env = recovered
             env.supervisor = Supervisor.FINISHED
 
-    secret_removed = transport is not None and _scrub_transfer_secret(
-        transport, job_id
-    )
+    if transport is None:
+        secret_removed, scrub_problem = False, (
+            f"no local session record {env.session!r}, so the VM could not be reached"
+        )
+    else:
+        secret_removed, scrub_problem = _scrub_transfer_secret(transport, job_id)
     if cancel_only and not secret_removed:
         _copy_before_release(env, transport, store)
         stop_session_keep_alive(session)
         _release(env, state, "forced unassign failed")
         _forget_session(env, state)
         if not env.workload.terminal:
+            if env.reason:
+                env.hints.append(f"before the forced teardown: {env.reason}")
             env.workload = Workload.UNKNOWN
             env.record_failure(Phase.CLEANUP)
             env.reason = (
                 "cancel-only retention overridden because transfer credential "
-                "deletion could not be confirmed"
+                f"deletion could not be confirmed ({scrub_problem})"
             )
             env.retry_class = RetryClass.DO_NOT_RETRY
         else:
             env.hints.append(
-                "forced VM teardown because credential deletion was not confirmed"
+                "forced VM teardown because credential deletion was not confirmed "
+                f"({scrub_problem})"
             )
         env.supervisor = Supervisor.FINISHED
         _finalize_hints(env)
         store.write_envelope(env)
         _emit(env, "destroy", exit_code=1)
         raise typer.Exit(1)
+    cancel_note, cancel_confirmed = None, False
     if not env.workload.terminal and transport is not None:
-        try:
-            intent_status = transport.write_json(
-                f"/content/jobs/{job_id}/cancel.json",
-                {
-                    "intent": "cancelled",
-                    "by": "job destroy",
-                    "at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                },
-            )
-        except Exception as e:  # noqa: BLE001 - teardown still must proceed
-            typer.echo(
-                f"[colab] Could not write cancel intent ({type(e).__name__}).",
-                err=True,
-            )
+        cancel_note, cancel_confirmed = request_cancel(transport, job_id, "job destroy")
 
     if cancel_only:
         if env.workload.terminal:
             env.reason = env.reason or "workload already terminal; VM left running"
-        elif intent_status is not None and intent_status.name == "OK":
+        elif cancel_confirmed:
             env.reason = "cancel intent written; VM left running"
         else:
-            env.reason = "cancel intent could not be confirmed; VM left running"
+            env.reason = (
+                f"cancel intent could not be confirmed ({cancel_note or 'no transport'}); "
+                "VM left running"
+            )
         _finalize_hints(env)
         store.write_envelope(env)
-        failed = not env.workload.terminal and (
-            intent_status is None or intent_status.name != "OK"
-        )
+        failed = not env.workload.terminal and not cancel_confirmed
         _emit(env, "destroy", exit_code=1 if failed else 0)
         if failed:
             raise typer.Exit(1)
@@ -1603,8 +1700,7 @@ def destroy(
     if (
         not env.workload.terminal
         and transport is not None
-        and intent_status is not None
-        and intent_status.name == "OK"
+        and cancel_confirmed
         and wait > 0
     ):
         if _supervisor_alive(store, job_id):
@@ -1659,6 +1755,7 @@ def destroy(
                         f"raw result: {raw_verdict(outcome)}"
                     )
             else:
+                wait_outcome = outcome
                 env.hints.append(outcome)
     _copy_before_release(env, transport, store)
     stop_session_keep_alive(session)
@@ -1672,13 +1769,13 @@ def destroy(
                 if saved_plan is None or not saved_plan.spec.artifacts
                 else Offload.SKIPPED
             )
-        wrote_intent = intent_status is not None and intent_status.name == "OK"
         env.reason = (
             "VM destroyed after cancellation was requested; remote workload "
             "verdict unavailable"
-            if wrote_intent
+            if cancel_confirmed
             else "VM destroyed; cancellation intent and remote workload verdict unavailable"
-        )
+            + (f" ({cancel_note})" if cancel_note else "")
+        ) + (f": {wait_outcome}" if wait_outcome else "")
         env.retry_class = RetryClass.DO_NOT_RETRY
     env.supervisor = Supervisor.FINISHED
     _finalize_hints(env)
