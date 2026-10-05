@@ -3677,6 +3677,7 @@ def test_status_poll_cancels_an_orphan_past_its_deadline_and_releases(
         "no verdict within 660s of launch (wall_clock 60s + 600s); the job's supervisor "
         "is gone, so job status --poll cancelled it; cancelled by job status --poll"
     )
+    assert not any(h.startswith("past its deadline: ") for h in final.hints)
 
 
 
@@ -3969,3 +3970,31 @@ def test_a_forced_teardown_keeps_the_reason_it_replaces(monkeypatch, mock_common
     final = store.read_envelope("replaced")
     assert "before the forced teardown: transport failing for 3 polls (last: result.json: ReadTimeout)" in final.hints
 
+
+
+def test_a_plain_status_reports_an_overdue_orphan_without_cancelling_it(
+    monkeypatch, mock_common_state
+):
+    """Only --poll cancels: a status check must answer in seconds, not wait
+    up to 300 s for a cancelled runner."""
+    import datetime as dt
+
+    store = _persist_running_job(mock_common_state, job_id="overdue-check")
+    env = store.read_envelope("overdue-check")
+    env.started_at = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=1000)).isoformat()
+    store.write_envelope(env)
+    events = []
+    vm = _RunningVM(events, results=[None])
+    _use_vm(monkeypatch, mock_common_state, vm, events)
+
+    result = runner.invoke(app, ["job", "status", "overdue-check"])
+
+    assert result.exit_code == 0, result.output
+    assert "write cancel.json" not in events
+    assert "unassign" not in events
+    final = store.read_envelope("overdue-check")
+    assert any(
+        h.startswith("past its deadline: no verdict within 660s of launch")
+        and "`job status overdue-check --poll` cancels it" in h
+        for h in final.hints
+    ), final.hints

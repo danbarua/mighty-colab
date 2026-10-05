@@ -1213,7 +1213,8 @@ def _finalize_hints(env) -> None:
 
 def _status_poll_deadline(env, store, job_id: str):
     """(epoch, description) of an orphaned job's run deadline: launch plus
-    wall_clock plus the margin, as apply's default. None when the job has no
+    wall_clock plus the margin, as apply's default. `status --poll` cancels
+    past it; a plain status only reports it. None when the job has no
     launch time (it was orphaned before launch) or no readable plan; that
     is logged."""
     if not env.started_at:
@@ -1246,8 +1247,7 @@ def _status_poll_deadline(env, store, job_id: str):
     seconds = run_deadline_seconds(plan.spec)
     return launched + seconds, (
         f"no verdict within {seconds}s of launch "
-        f"(wall_clock {plan.spec.budgets.wall_clock}s + {RUN_DEADLINE_MARGIN_SECONDS}s); "
-        "the job's supervisor is gone, so job status --poll cancelled it"
+        f"(wall_clock {plan.spec.budgets.wall_clock}s + {RUN_DEADLINE_MARGIN_SECONDS}s)"
     )
 
 
@@ -1451,10 +1451,22 @@ def status(
                 deadline = _status_poll_deadline(env, store, job_id) if orphaned else None
                 while True:
                     if deadline is not None and time.time() > deadline[0]:
-                        _cancel_orphan_after_deadline(
-                            env, store, job_id, transport, deadline[1]
+                        if poll:
+                            replace_hint(env.hints, "past its deadline: ", None)
+                            _cancel_orphan_after_deadline(
+                                env, store, job_id, transport,
+                                f"{deadline[1]}; the job's supervisor is gone, so "
+                                "job status --poll cancelled it",
+                            )
+                            break
+                        # A plain status answers now; only --poll cancels
+                        # and waits for the runner.
+                        replace_hint(
+                            env.hints,
+                            "past its deadline: ",
+                            f"{deadline[1]}; `job status {job_id} --poll` cancels it "
+                            f"and releases the VM, `job destroy {job_id}` stops it now",
                         )
-                        break
                     keep_alive_hint = _ensure_keep_alive(session, state)
                     if keep_alive_hint:
                         env.hints.append(keep_alive_hint)
