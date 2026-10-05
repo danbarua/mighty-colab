@@ -129,7 +129,7 @@ budgets:
   wall_clock: 7200
 ```
 
-If Colab cannot grant a name in `prefer`, provision fails with `retry_class: retry_different`. It does not run on CPU unless `accept_cpu: true`.
+If Colab cannot grant any name in `prefer`, provision fails, and its retry class follows Colab's answer: no quota or entitlement for that accelerator (400) or a credentials problem (401/403) is `fix_human`, a capacity error (5xx) is `retry_different`, and no response is `retry_same`. The envelope's `provision_attempts` records each accelerator tried. It does not run on CPU unless `accept_cpu: true`.
 
 ### Large inputs and outputs
 
@@ -205,14 +205,15 @@ Treat every signed URL as a credential. Generated `spec.json`, `plan.json`, remo
 
 1. The object exists in the bucket.
 2. The URL uses `https`.
-3. The host is a public address. Private and link-local hosts are rejected.
+3. The host resolves, to a public address. Private and link-local hosts are rejected (`url_host_not_public`); a host that does not resolve is `url_host_unresolved`.
 4. The URL is signed for GET. A PUT signature fails the ranged probe.
-5. Expiry covers `budgets.wall_clock` plus 15 minutes.
+5. Expiry covers `budgets.wall_clock` plus 15 minutes, plus 55 minutes when `deps` is not empty, because install runs first.
 6. `sha256` is 64 hexadecimal characters when you set it.
+7. When you set `size_bytes`, it matches the object's size.
 
-`apply` checks expiry again, from the current time, before it allocates a VM. That check does not count install time. Installing `deps` can take up to about 53 minutes before the run starts. When `deps` is not empty, sign data and artifact URLs for longer than `wall_clock` plus 15 minutes.
+`apply` checks expiry again, from the current time, before it allocates a VM, with the same install allowance, and `verify` checks it once more after install, without it. A URL that is too short fails with `refresh_urls`; the message says when it expires and what it must cover.
 
-Plan performs a one-byte ranged GET on each `data[]` URL unless you pass `--no-probe`. HTTP 403 or 404 is a plan error.
+Plan performs a one-byte ranged GET on each `data[]` URL unless you pass `--no-probe`. Any response other than 206 (or 416 for an empty object) is a plan error, classified like a failed download: 401 and 403 `refresh_urls`, 404 and other 4xx `fix_code`, 408, 429, 5xx or no response `retry_same` (re-run `job plan`). The message includes the start of the response body, which for a storage service names the cause (for example `SignatureDoesNotMatch`). A size from the probe that differs from `size_bytes` is a plan error; for an input with no `size_bytes`, plan records the measured size for disk planning and reports it as an `info` diagnostic.
 
 `--no-probe` skips that laptop GET. The VM still downloads the object during `apply`. A bad URL then fails on the VM, after allocation.
 
@@ -220,8 +221,8 @@ Plan performs a one-byte ranged GET on each `data[]` URL unless you pass `--no-p
 
 1. The URL uses `https`.
 2. The host is public.
-3. Artifact and data expiry cover `wall_clock` plus 15 minutes.
-4. Control expiry covers `retry.budget_seconds` plus 15 minutes.
+3. Artifact and data expiry cover `wall_clock` plus 15 minutes, plus 55 minutes when `deps` is not empty.
+4. Control expiry covers the later of `retry.budget_seconds` plus 15 minutes and the data deadline, because the runner PUTs the result at the end of the run.
 5. GCS `control.result` PUT and GET identify the same object.
 
 Plan does not mutate artifact or control destinations. It does not probe them with GET.
@@ -260,22 +261,23 @@ A GET-signed URL returns 403 on PUT and on HEAD.
 
 Work through this list when plan exits non-zero.
 
-1. The file is YAML. The top level is a mapping.
+1. The file is YAML. The top level is a mapping. A YAML error names the problem and its line and column.
 2. It is your source spec, not a redacted `spec.json` from the job store.
 3. `name` and `code.entry` are set. The entry file exists on disk.
 4. For `kind: bundle`, `entry` stays under `root`.
 5. `prefer` names only known accelerators.
 6. `retry` uses the defaults above, or you omit the block.
 7. `control.log` is absent. `on_run_fail` is `offload_anyway` or omitted.
-8. Every URL is `https` and public.
-9. Data objects exist and accept a GET-signed ranged read, unless `--no-probe`.
-10. Signed expiry covers the budgets plus 15 minutes.
+8. Every URL is `https`, and its host resolves to a public address.
+9. Data objects exist, accept a GET-signed ranged read, and match any declared `size_bytes`, unless `--no-probe`.
+10. Signed expiry covers the budgets plus 15 minutes, and install when `deps` is not empty.
 11. GCS control PUT and GET name one object.
 12. A source file over 250 MB is a plan error. A source tree whose total size exceeds 250 MB is a plan warning. Move large files to `data[]`.
 13. `data[].dest` and `artifacts[].path` stay under `/content` and do not collide.
-14. Missing `size_bytes` on data or artifacts is a warning. Set `ignore_warnings: true` only if you accept that gap.
+14. Missing `size_bytes` on an artifact is a warning, and on an input the probe did not measure. Set `ignore_warnings: true` only if you accept that gap.
+15. The source files can be locked: no symbolic or hard links, nothing outside `root`, every file readable (`source_unreadable` names the file).
 
-Plan still writes records when diagnostics contain errors. `apply` refuses a plan that has errors.
+Plan still writes records when diagnostics contain errors. `apply` refuses a plan that has errors, and with `--json` its refusal carries the same diagnostics. `info` diagnostics report what plan measured and never stop apply.
 
 Re-run `job plan` after every source change. The plan locks each source file path, size, and SHA-256. `apply` refuses added, removed, renamed, or changed files before assignment.
 
@@ -294,7 +296,6 @@ Limits that still apply:
 
 - Retry, resume, and `control.log` are not implemented.
 - Caller-owned specs and secret sidecars still contain full signed URLs.
-- URL expiry is checked before install, not after it.
 - After launch, a dropped laptop session does not kill the consumer. `job status --poll` recovers an orphaned supervisor. It does not implement full supervisor takeover.
 
 `docs/job/design.md` lists every known gap.

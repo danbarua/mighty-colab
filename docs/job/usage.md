@@ -176,6 +176,8 @@ Some outcomes you will see:
 - a run killed by a signal nobody requested is `fix_code`. When the kernel's out-of-memory killer did it, the reason says so and quotes the kernel's `Killed process` line.
 - a failed data download or artifact upload: 401 or 403 is `refresh_urls`; 404 is `fix_code` for a download and `refresh_urls` for an upload; 408, 429 and 5xx are `retry_same`; other 4xx (413 included) and a size or sha256 mismatch are `fix_code`; no response at all is `retry_same`.
 - when the run failed and an upload failed too, the run's class decides, and the reason names both.
+- when no accelerator in `prefer` can be assigned: no quota or entitlement (400) or a credentials problem (401/403) is `fix_human`, a capacity error (5xx) is `retry_different`, no response is `retry_same`. `provision_attempts` in the envelope lists each accelerator tried.
+- a plan error from the data probe: 401/403 is `refresh_urls`, 404 is `fix_code`, a transient failure is `retry_same` (re-run `job plan`).
 
 ## Data and artifacts
 
@@ -273,10 +275,11 @@ boundary without intervention. If you write your own polling loop against
 `exec` or the Contents API, you must do the same, or you will conclude a
 healthy VM died.
 
-**Signed URLs that expire during a long install.** `apply` checks that data
-and artifact URLs stay valid for `wall_clock` plus 15 minutes, counted from
-before provisioning. Installing `deps` can take up to about 53 minutes before
-the run starts. Sign URLs with enough extra time to cover install.
+**Signed URLs that expire during a long install.** Install runs before your
+script and can take up to 55 minutes. When `deps` is not empty, plan and
+apply require data and artifact URLs to stay valid for `wall_clock` plus
+15 minutes plus those 55 minutes, and `verify` checks again after install.
+The error says when the URL expires and how long it must last.
 
 **A GPU you asked for and did not get.** Upstream `new` maps an unrecognised
 accelerator name onto A100, and capacity pressure can hand back a CPU box.
