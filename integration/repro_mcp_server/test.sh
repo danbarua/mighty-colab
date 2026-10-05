@@ -218,6 +218,13 @@ async def main() -> int:
             if f'"job_id": "{job_id}"' not in read.contents[0].text:
                 print(f"[FAILURE] {plan_uri} did not read back the plan")
                 return 1
+            file_uris = sorted(u for u in uris if u.startswith(f"job://{job_id}/files/"))
+            for uri in file_uris:
+                text = (await session.read_resource(uri)).contents[0].text
+                if "MCP_SIGNATURE" in text:
+                    print(f"[FAILURE] {uri} exposes the signed query")
+                    return 1
+            print(f"[*] read {len(file_uris)} record file(s), none carries the signature: {file_uris}")
             print(f"[SUCCESS] Phase 7 passed: plan/list/status structured, {plan_uri} readable, no secrets listed.")
 
     print("\n[SUCCESS] All MCP phases passed.")

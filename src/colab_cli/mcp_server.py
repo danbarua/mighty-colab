@@ -268,20 +268,33 @@ def _json_capable(tool_name: str) -> bool:
     return tool_name.split("_", 1)[0] in JSON_CAPABLE_COMMANDS
 
 
-def _parse_envelope(stdout_text: str) -> Optional[Dict[str, Any]]:
-    """The envelope a command printed: its last stdout line that is a JSON
-    object (`emit_json` prints one line)."""
-    for line in reversed(stdout_text.splitlines()):
-        line = line.strip()
+_ENVELOPE_KEYS = {"schema_version", "command", "status", "exit_code"}
+
+
+def _parse_envelope(stdout_text: str, tool_name: str) -> Tuple[Optional[Dict[str, Any]], List[str]]:
+    """(envelope, other stdout lines). The envelope is the last stdout line
+    that is a JSON object with the envelope's keys and a `command` of this
+    tool's top-level command (`emit_json` prints one line). A JSON object a
+    cell printed, for example, is not taken for it."""
+    top = tool_name.split("_", 1)[0]
+    lines = stdout_text.splitlines()
+    for index in range(len(lines) - 1, -1, -1):
+        line = lines[index].strip()
         if not line.startswith("{"):
             continue
         try:
             value = json.loads(line)
         except ValueError:
             continue
-        if isinstance(value, dict):
-            return value
-    return None
+        if (
+            isinstance(value, dict)
+            and _ENVELOPE_KEYS <= value.keys()
+            and str(value.get("command", "")).split(" ", 1)[0] == top
+        ):
+            return value, [
+                text for i, text in enumerate(lines) if i != index and text.strip()
+            ]
+    return None, [text for text in lines if text.strip()]
 
 
 def _render_outputs(outputs) -> List[str]:
@@ -349,10 +362,10 @@ def render_envelope(envelope: Dict[str, Any]) -> str:
         lines = [
             f"{key}: {value}"
             for key, value in envelope.items()
-            if key not in _ENVELOPE_META and value not in (None, [], {})
+            if key not in _ENVELOPE_META | {"message"} and value not in (None, [], {})
         ]
     message = envelope.get("message")
-    if message and message not in lines:
+    if message and str(message) not in lines:
         lines.append(str(message))
     return "\n".join(line for line in lines if line)
 
@@ -399,11 +412,21 @@ def run_tool(name: str, cmd: click.Command, arguments: Dict[str, Any]) -> ToolOu
     def text_of(buf: io.StringIO) -> str:
         return _strip_ansi(buf.getvalue()).strip()
 
-    structured = _parse_envelope(text_of(out)) if json_mode else None
+    structured, stray = _parse_envelope(text_of(out), name) if json_mode else (None, [])
     if structured is None:
         parts = [text_of(out)] + ([text_of(err)] if json_mode else []) + [failure]
     else:
-        parts = [text_of(err), render_envelope(structured), failure]
+        if stray:
+            # Printed to stdout outside `typer.echo` (a bare print): kept in
+            # the text rather than dropped with the envelope's line.
+            _logger.warning(
+                "MCP tool %s printed %d stdout line(s) besides its envelope", name, len(stray)
+            )
+        parts = [text_of(err), "\n".join(stray), render_envelope(structured), failure]
+        # The envelope's own exit code counts: `exec --json` reports a cell
+        # that raised there (`job_raised`) and exits 0.
+        if structured.get("exit_code") not in (0, None):
+            ok = False
     text = "\n".join(p for p in parts if p)
     if not text and not ok:
         text = f"[exit code {exit_code}]"

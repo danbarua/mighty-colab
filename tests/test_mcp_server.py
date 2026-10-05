@@ -1137,3 +1137,71 @@ def test_job_list_rows_carry_failed_phase_retry_class_and_supervisor(tmp_path):
     assert row["failed_phase"] == "run"
     assert row["retry_class"] == "fix_code"
     assert row["supervisor"] == env.supervisor.value
+
+
+def test_a_json_line_a_command_printed_is_not_the_envelope():
+    from colab_cli.mcp_server import _parse_envelope
+
+    envelope, stray = _parse_envelope('{"loss": 0.3}\nplain text', "exec")
+    assert envelope is None
+    assert stray == ['{"loss": 0.3}', "plain text"]
+
+    other = '{"schema_version": "1", "command": "run", "status": "ok", "exit_code": 0}'
+    assert _parse_envelope(other, "exec")[0] is None
+
+
+def test_stray_stdout_is_kept_and_a_raised_cell_is_an_error(caplog):
+    from colab_cli.mcp_server import run_tool
+
+    @click.command()
+    def exec_like():
+        import json as _json
+        import sys as _sys
+
+        print("bare print")
+        _sys.stdout.write(_json.dumps({
+            "schema_version": "1", "cli_version": "x", "command": "exec",
+            "status": "job_raised", "exit_code": 1, "reason": "job_raised",
+            "blocks": [{"code": "1/0", "outputs": [
+                {"output_type": "error", "ename": "ZeroDivisionError",
+                 "evalue": "division by zero", "traceback": []}
+            ]}],
+        }) + "\n")
+
+    with caplog.at_level("WARNING", logger="colab_cli.mcp_server"):
+        outcome = run_tool("exec", exec_like, {})
+
+    assert outcome.ok is False, "a cell that raised is a tool error, as before JSON mode"
+    assert outcome.structured["status"] == "job_raised"
+    assert "bare print" in outcome.text
+    assert "ZeroDivisionError: division by zero" in outcome.text
+    assert "printed 1 stdout line(s) besides its envelope" in caplog.text
+
+
+def test_render_envelope_does_not_repeat_the_message():
+    from colab_cli.mcp_server import render_envelope
+
+    text = render_envelope({"schema_version": "1", "command": "stop", "status": "error",
+                            "exit_code": 1, "reason": "session_not_found",
+                            "message": "no such session"})
+
+    assert text == "reason: session_not_found\nno such session"
+
+
+def test_every_json_capable_group_subcommand_has_an_envelope():
+    """Adding a group to JSON_CAPABLE_COMMANDS removes the root callback's
+    guard for every subcommand in it; a new subcommand must be added here
+    once it emits an envelope."""
+    import typer.main as _typer_main
+
+    from colab_cli.cli import JSON_CAPABLE_COMMANDS, app
+
+    group = _typer_main.get_command(app)
+    with_envelopes = {
+        "job": {"apply", "destroy", "plan", "status"},
+        "jobs": {"list", "prune"},
+    }
+    for name in JSON_CAPABLE_COMMANDS:
+        subcommands = getattr(group.commands[name], "commands", None)
+        if subcommands:
+            assert set(subcommands) == with_envelopes[name], name
