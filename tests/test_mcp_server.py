@@ -489,6 +489,8 @@ def test_list_job_resources_reports_status(tmp_path):
         "still-running (logs)",
         "finished",
         "finished (logs)",
+        # The write that finished the job appended its outcome event.
+        "finished/events.jsonl",
     }
     assert resources["jobs"].uri == "jobs://"
     assert resources["jobs (running)"].uri == "jobs://running"
@@ -500,8 +502,11 @@ def test_list_job_resources_reports_status(tmp_path):
     assert "running" in resources["still-running"].description
     assert "done" in resources["finished"].description
     json_resources = {
-        name: r for name, r in resources.items() if not name.endswith("(logs)")
+        name: r for name, r in resources.items()
+        if not name.endswith("(logs)") and "/" not in name
     }
+    assert resources["finished/events.jsonl"].uri == "job://finished/files/events.jsonl"
+    assert resources["finished/events.jsonl"].mime_type == "application/x-ndjson"
     assert all(r.mime_type == "application/json" for r in json_resources.values())
 
 
@@ -1025,3 +1030,110 @@ def test_the_cli_emits_json_for_jobs_list(tmp_path):
     assert "has no effect" not in result.stderr
     payload = _json.loads(result.stdout.strip().splitlines()[-1])
     assert payload["command"] == "jobs list" and payload["jobs"] == []
+
+
+
+# --- job record files, watchers, list rows ------------------------------------
+
+
+def test_record_files_are_resources_but_never_the_secrets(tmp_path):
+    from colab_cli.mcp_server import job_record_files, read_job_file_resource
+
+    store = _job_store(tmp_path)
+    job_dir = store.job_dir("files")
+    job_dir.mkdir(parents=True)
+    for name, text in {
+        "plan.json": "{}", "install.log": "uv ok", "apply.lock": "",
+        "plan.json.mighty-colab-secrets.json": "SECRET", "runner.log": "r",
+        ".mighty-colab-secret-tmp-abc": "SECRET", "status-poll.log": "polled",
+    }.items():
+        (job_dir / name).write_text(text)
+
+    assert job_record_files(store, "files") == ["install.log", "plan.json", "status-poll.log"]
+    result = read_job_file_resource(store, "job://files/files/install.log")
+    assert result.contents[0].text == "uv ok"
+    for forbidden in ("plan.json.mighty-colab-secrets.json", "../files/plan.json", "apply.lock"):
+        with pytest.raises(ValueError):
+            read_job_file_resource(store, f"job://files/files/{forbidden}")
+
+
+def test_subscribing_to_a_record_file_is_a_silent_no_op(tmp_path):
+    import asyncio
+
+    from colab_cli.mcp_server import JobResourceSubscriptions
+
+    store = _job_store(tmp_path)
+    subscriptions = JobResourceSubscriptions(store)
+    asyncio.run(subscriptions.subscribe(MagicMock(), "job://x/files/install.log"))
+    assert subscriptions._tasks == {}
+
+
+def test_a_job_watch_survives_an_unreadable_envelope(tmp_path):
+    import asyncio
+
+    from colab_cli.job.models import Workload
+    from colab_cli.mcp_server import JobResourceSubscriptions
+
+    store = MagicMock()
+    reads = iter([ValueError("truncated"), _done_envelope("j")])
+
+    def read(_job_id):
+        value = next(reads)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    store.read_envelope.side_effect = read
+    session = MagicMock()
+
+    async def sent(uri):
+        sent.uris.append(uri)
+
+    sent.uris = []
+    session.send_resource_updated = sent
+    subscriptions = JobResourceSubscriptions(store, poll_interval=0)
+
+    asyncio.run(subscriptions._watch(session, "job://j", "j", Workload.RUNNING))
+
+    assert sent.uris == ["job://j"]
+
+
+def test_the_job_list_watch_stops_cleanly_when_the_client_is_gone(tmp_path):
+    import asyncio
+
+    from colab_cli.mcp_server import JobListWatcher
+
+    store = MagicMock()
+    store.list_jobs.side_effect = [[], ["new-job"]]
+    session = MagicMock()
+
+    async def gone():
+        raise ConnectionError("closed")
+
+    session.send_resource_list_changed = gone
+    watcher = JobListWatcher(store, poll_interval=0)
+
+    async def run():
+        watcher.start(session)
+        await asyncio.sleep(0.05)
+
+    asyncio.run(run())
+
+    assert watcher._task is None, "a stopped watch must be restartable"
+
+
+def test_job_list_rows_carry_failed_phase_retry_class_and_supervisor(tmp_path):
+    from colab_cli.commands.job import _job_list_rows
+    from colab_cli.job.models import Phase, RetryClass
+
+    store = _job_store(tmp_path)
+    env = _done_envelope("row")
+    env.failed_phase = Phase.RUN
+    env.retry_class = RetryClass.FIX_CODE
+    store.write_envelope(env)
+
+    [row] = _job_list_rows(store)
+
+    assert row["failed_phase"] == "run"
+    assert row["retry_class"] == "fix_code"
+    assert row["supervisor"] == env.supervisor.value

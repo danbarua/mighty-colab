@@ -35,6 +35,7 @@ import contextlib
 import io
 import json
 import logging
+from pathlib import Path
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 import click
@@ -452,6 +453,49 @@ def _job_id_from_logs_uri(uri: str) -> Optional[str]:
     return job_id or None
 
 
+JOB_FILES_INFIX = "/files/"
+_FILE_MIME_TYPES = {".json": "application/json", ".jsonl": "application/x-ndjson"}
+
+
+def _job_file_uri(job_id: str, name: str) -> str:
+    return f"{_job_uri(job_id)}{JOB_FILES_INFIX}{name}"
+
+
+def _job_file_from_uri(uri: str) -> Optional[Tuple[str, str]]:
+    if not uri.startswith(JOB_URI_PREFIX) or JOB_FILES_INFIX not in uri:
+        return None
+    job_id, _, name = uri[len(JOB_URI_PREFIX):].partition(JOB_FILES_INFIX)
+    return (job_id, name) if job_id and name else None
+
+
+def job_record_files(store, job_id: str) -> List[str]:
+    """The job directory's record files exposed as resources: every
+    regular file except the envelope and runner.log (which have their own
+    URIs), the apply lock, and the plan's secrets sidecar and the temp
+    files records are written through, which can hold signed URLs."""
+    from colab_cli.job.store import (
+        APPLY_LOCK_FILE,
+        ENVELOPE_FILE,
+        RUNNER_LOG_FILE,
+        SECRET_SIDECAR_SUFFIX,
+        SECRET_TEMP_PREFIX,
+    )
+
+    directory = store.job_dir(job_id)
+    if not directory.is_dir():
+        return []
+    excluded = {ENVELOPE_FILE, RUNNER_LOG_FILE, APPLY_LOCK_FILE}
+    return sorted(
+        path.name
+        for path in directory.iterdir()
+        if path.is_file()
+        and path.name not in excluded
+        and not path.name.startswith(".")
+        and not path.name.startswith(SECRET_TEMP_PREFIX)
+        and not path.name.endswith(SECRET_SIDECAR_SUFFIX)
+    )
+
+
 JOBS_LIST_URI = "jobs://"
 JOBS_RUNNING_URI = "jobs://running"
 JOBS_DONE_URI = "jobs://done"
@@ -505,6 +549,15 @@ def list_job_resources(store) -> List[types.Resource]:
                 mime_type="text/plain",
             )
         )
+        for name in job_record_files(store, job_id):
+            resources.append(
+                types.Resource(
+                    uri=_job_file_uri(job_id, name),
+                    name=f"{job_id}/{name}",
+                    description=f"Local job record {name}",
+                    mime_type=_FILE_MIME_TYPES.get(Path(name).suffix, "text/plain"),
+                )
+            )
     return resources
 
 
@@ -590,6 +643,30 @@ def read_job_logs_resource(store, uri: str) -> types.ReadResourceResult:
     )
 
 
+def read_job_file_resource(store, uri: str) -> types.ReadResourceResult:
+    """`job://<id>/files/<name>`: one of the job directory's record files,
+    as listed by `job_record_files`."""
+    parsed = _job_file_from_uri(uri)
+    if parsed is None:
+        raise ValueError(f"not a job://<id>/files/<name> resource: {uri}")
+    job_id, name = parsed
+    if name not in job_record_files(store, job_id):
+        raise ValueError(f"job {job_id!r} has no record file {name!r}")
+    raw = (store.job_dir(job_id) / name).read_bytes()
+    text = raw.decode("utf-8", "replace")
+    if "\ufffd" in text and b"\xef\xbf\xbd" not in raw:
+        _logger.warning("%s has bytes that are not UTF-8; replaced with U+FFFD", uri)
+    return types.ReadResourceResult(
+        contents=[
+            types.TextResourceContents(
+                uri=uri,
+                mime_type=_FILE_MIME_TYPES.get(Path(name).suffix, "text/plain"),
+                text=text,
+            )
+        ]
+    )
+
+
 class JobResourceSubscriptions:
     """One background task per subscribed `job://` URI, polling for `done`.
 
@@ -615,8 +692,10 @@ class JobResourceSubscriptions:
         # still true that content changing on every job's every phase
         # transition and every prune is too often to sensibly notify on;
         # this just declines quietly rather than loudly.
-        if uri in (JOBS_LIST_URI, JOBS_RUNNING_URI, JOBS_DONE_URI) or uri.endswith(
-            JOB_LOGS_SUFFIX
+        if (
+            uri in (JOBS_LIST_URI, JOBS_RUNNING_URI, JOBS_DONE_URI)
+            or uri.endswith(JOB_LOGS_SUFFIX)
+            or _job_file_from_uri(uri) is not None
         ):
             return
         job_id = _job_id_from_uri(uri)
@@ -683,14 +762,24 @@ class JobResourceSubscriptions:
         workload_notified = initial_workload is not Workload.PENDING
         try:
             while True:
-                env = self._store.read_envelope(job_id)
-                if env is not None:
-                    if env.done:
-                        await session.send_resource_updated(uri)
-                        return
-                    if not workload_notified and env.workload is not Workload.PENDING:
-                        await session.send_resource_updated(uri)
-                        workload_notified = True
+                try:
+                    env = self._store.read_envelope(job_id)
+                except Exception:  # noqa: BLE001 - a bad read is retried next tick
+                    _logger.warning("watching %s: envelope unreadable", uri, exc_info=True)
+                    env = None
+                try:
+                    if env is not None:
+                        if env.done:
+                            await session.send_resource_updated(uri)
+                            return
+                        if not workload_notified and env.workload is not Workload.PENDING:
+                            await session.send_resource_updated(uri)
+                            workload_notified = True
+                except Exception:  # noqa: BLE001 - the client is gone; stop watching
+                    _logger.warning(
+                        "watching %s: notification not sent; watch stopped", uri, exc_info=True
+                    )
+                    return
                 await asyncio.sleep(self._poll_interval)
         finally:
             self._tasks.pop(uri, None)
@@ -735,12 +824,26 @@ class JobListWatcher:
         self._task = None
 
     async def _watch(self, session) -> None:
-        while True:
-            await asyncio.sleep(self._poll_interval)
-            current = set(self._store.list_jobs())
-            if current != self._known:
-                self._known = current
-                await session.send_resource_list_changed()
+        try:
+            while True:
+                await asyncio.sleep(self._poll_interval)
+                try:
+                    current = set(self._store.list_jobs())
+                except Exception:  # noqa: BLE001 - retried next tick
+                    _logger.warning("job list unreadable", exc_info=True)
+                    continue
+                if current != self._known:
+                    self._known = current
+                    try:
+                        await session.send_resource_list_changed()
+                    except Exception:  # noqa: BLE001 - the client is gone; stop watching
+                        _logger.warning(
+                            "list_changed not sent; job list watch stopped", exc_info=True
+                        )
+                        return
+        finally:
+            # A watch that ended can be started again.
+            self._task = None
 
 
 
@@ -781,6 +884,8 @@ async def run_stdio_server(click_group: click.Group, server_name: str) -> None:
     async def on_read_resource(ctx, params) -> types.ReadResourceResult:
         if params.uri in (JOBS_LIST_URI, JOBS_RUNNING_URI, JOBS_DONE_URI):
             return read_jobs_list_resource(job_store, params.uri)
+        if _job_file_from_uri(params.uri) is not None:
+            return read_job_file_resource(job_store, params.uri)
         if params.uri.endswith(JOB_LOGS_SUFFIX):
             return read_job_logs_resource(job_store, params.uri)
         return read_job_resource(job_store, params.uri)
