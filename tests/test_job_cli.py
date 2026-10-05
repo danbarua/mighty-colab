@@ -1259,7 +1259,7 @@ def test_destroy_recovers_terminal_result_from_control_get_url(
                 }
             ).encode()
 
-    monkeypatch.setattr("urllib.request.urlopen", lambda *_args, **_kwargs: Response())
+    monkeypatch.setattr("colab_cli.job.spec_io.urlopen_public", lambda *_args, **_kwargs: Response())
     _json_mode(mock_common_state)
 
     result = runner.invoke(app, ["job", "destroy", "destroy-me"])
@@ -1306,7 +1306,7 @@ def test_destroy_still_unassigns_when_control_result_is_malformed(
         def read(self, _size):
             return b'{"workload":"succeeded","artifacts":[{"unexpected":1}]}'
 
-    monkeypatch.setattr("urllib.request.urlopen", lambda *_args, **_kwargs: Response())
+    monkeypatch.setattr("colab_cli.job.spec_io.urlopen_public", lambda *_args, **_kwargs: Response())
 
     result = runner.invoke(app, ["job", "destroy", "destroy-me"])
 
@@ -1337,7 +1337,7 @@ def test_cancel_only_preserves_terminal_control_result_during_forced_release(
         def read(self, _size):
             return b'{"workload":"succeeded","exit_code":0}'
 
-    monkeypatch.setattr("urllib.request.urlopen", lambda *_args, **_kwargs: Response())
+    monkeypatch.setattr("colab_cli.job.spec_io.urlopen_public", lambda *_args, **_kwargs: Response())
 
     result = runner.invoke(
         app, ["job", "destroy", "destroy-me", "--cancel-only"]
@@ -1841,7 +1841,7 @@ def test_status_recovers_terminal_result_from_control_get_url(
         requests.append((request.full_url, request.get_method(), timeout))
         return Response()
 
-    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    monkeypatch.setattr("colab_cli.job.spec_io.urlopen_public", urlopen)
 
     result = runner.invoke(app, ["job", "status", "lost-result"])
 
@@ -1876,7 +1876,7 @@ def test_status_ignores_control_result_placeholder(monkeypatch, mock_common_stat
         def read(self, _size):
             return b"{}"
 
-    monkeypatch.setattr("urllib.request.urlopen", lambda *_args, **_kwargs: Response())
+    monkeypatch.setattr("colab_cli.job.spec_io.urlopen_public", lambda *_args, **_kwargs: Response())
 
     result = runner.invoke(app, ["job", "status", "pending-result"])
 

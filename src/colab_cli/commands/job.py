@@ -1842,6 +1842,9 @@ def _job_list_rows(store) -> List[Dict[str, Any]]:
                     "cleanup": None,
                     "done": False,
                     "endpoint": None,
+                    "failed_phase": None,
+                    "retry_class": None,
+                    "supervisor": None,
                     "reason": problem
                     or _apply_log_note(store, jid)
                     or "planned, not applied",
@@ -1857,6 +1860,9 @@ def _job_list_rows(store) -> List[Dict[str, Any]]:
                 "cleanup": e.cleanup.value,
                 "done": e.done,
                 "endpoint": e.endpoint,
+                "failed_phase": e.failed_phase.value if e.failed_phase else None,
+                "retry_class": e.retry_class.value if e.retry_class else None,
+                "supervisor": e.supervisor.value,
                 "reason": e.reason,
             }
         )

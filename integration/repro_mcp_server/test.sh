@@ -75,6 +75,14 @@ cat > "$SCRIPT_PATH" <<'PYEOF'
 print("mcp_exec_marker_ok")
 PYEOF
 
+JOB_SPEC_PATH="$TMP_DIR/job.yaml"
+cat > "$JOB_SPEC_PATH" <<YAMLEOF
+name: mcp-repro
+accelerator: {prefer: [], accept_cpu: true}
+code: {kind: file, root: $TMP_DIR, entry: script.py}
+data: [{url: "https://raw.githubusercontent.com/danbarua/mighty-colab/011b7978bab3d9356bae8a10f8253411c95ad8dd/LICENSE?sig=MCP_SIGNATURE", dest: in.bin, size_bytes: 11358}]
+YAMLEOF
+
 # ---------- MCP driver: speaks the real client protocol over stdio -----------
 # Spawns `mighty-colab mcp` as a subprocess exactly like a real MCP client
 # would (e.g. Claude Desktop), rather than calling into the CLI directly.
@@ -90,6 +98,7 @@ AUTH_FLAGS = os.environ["MCP_AUTH_FLAGS"]
 CONFIG_PATH = os.environ["MCP_CONFIG_PATH"]
 SESSION_NAME = os.environ["MCP_SESSION_NAME"]
 SCRIPT_PATH = os.environ["MCP_SCRIPT_PATH"]
+JOB_SPEC_PATH = os.environ["MCP_JOB_SPEC_PATH"]
 
 EXCLUDED_COMMANDS = {"ssh", "repl", "console", "edit", "drivemount", "mcp", "help", "pay"}
 EXPECTED_COMMANDS = {"new", "status", "stop", "sessions", "adopt", "exec"}
@@ -127,7 +136,11 @@ async def main() -> int:
             if result.is_error:
                 print("[FAILURE] 'new' tool call reported an error")
                 return 1
-            print("[SUCCESS] Phase 2 passed.")
+            new_env = result.structured_content or {}
+            if new_env.get("session") != SESSION_NAME or not new_env.get("endpoint"):
+                print(f"[FAILURE] 'new' returned no structured envelope: {result.structured_content!r}")
+                return 1
+            print(f"[SUCCESS] Phase 2 passed: structured envelope with endpoint {new_env['endpoint']}.")
 
             print(f"\n[*] Phase 3: call_tool('exec', session={SESSION_NAME!r}, file={SCRIPT_PATH!r})")
             result = await session.call_tool("exec", {"session": SESSION_NAME, "file": SCRIPT_PATH})
@@ -136,7 +149,11 @@ async def main() -> int:
             if result.is_error or "mcp_exec_marker_ok" not in text:
                 print("[FAILURE] 'exec' tool call did not run the script as expected")
                 return 1
-            print("[SUCCESS] Phase 3 passed.")
+            blocks = (result.structured_content or {}).get("blocks") or []
+            if not any("mcp_exec_marker_ok" in str(block.get("outputs")) for block in blocks):
+                print(f"[FAILURE] 'exec' structured envelope lacks the output: {result.structured_content!r}")
+                return 1
+            print("[SUCCESS] Phase 3 passed: text and structured blocks both carry the output.")
 
             print(f"\n[*] Phase 4: call_tool('status', session={SESSION_NAME!r})")
             result = await session.call_tool("status", {"session": SESSION_NAME})
@@ -171,6 +188,45 @@ async def main() -> int:
                 return 1
             print("[SUCCESS] Phase 6 passed: validation error surfaced over MCP, not swallowed.")
 
+            print("\n[*] Phase 7: job tools and record resources (local, no VM)")
+            result = await session.call_tool("job_plan", {"spec_file": JOB_SPEC_PATH, "no_probe": True})
+            plan_env = result.structured_content or {}
+            job_id = plan_env.get("job_id")
+            if result.is_error or not job_id or plan_env.get("command") != "job plan":
+                print(f"[FAILURE] job_plan returned no structured plan envelope: {plan_env!r}\n{text_of(result)}")
+                return 1
+            result = await session.call_tool("jobs_list", {})
+            rows = {row["job_id"]: row for row in (result.structured_content or {}).get("jobs", [])}
+            if job_id not in rows or "failed_phase" not in rows[job_id]:
+                print(f"[FAILURE] jobs_list structured rows lack {job_id}: {result.structured_content!r}")
+                return 1
+            result = await session.call_tool("job_status", {"job_id": job_id})
+            status_env = result.structured_content or {}
+            if not result.is_error or status_env.get("reason") != "job_not_found":
+                print(f"[FAILURE] job_status on a planned job: {status_env!r}")
+                return 1
+            if "No local record" not in text_of(result):
+                print(f"[FAILURE] job_status text lacks the human message: {text_of(result)!r}")
+                return 1
+            resources = await session.list_resources()
+            plan_uri = f"job://{job_id}/files/plan.json"
+            uris = {str(r.uri) for r in resources.resources}
+            if plan_uri not in uris or any(u.endswith(".mighty-colab-secrets.json") for u in uris):
+                print(f"[FAILURE] record resources wrong for {job_id}: {sorted(u for u in uris if job_id in u)}")
+                return 1
+            read = await session.read_resource(plan_uri)
+            if f'"job_id": "{job_id}"' not in read.contents[0].text:
+                print(f"[FAILURE] {plan_uri} did not read back the plan")
+                return 1
+            file_uris = sorted(u for u in uris if u.startswith(f"job://{job_id}/files/"))
+            for uri in file_uris:
+                text = (await session.read_resource(uri)).contents[0].text
+                if "MCP_SIGNATURE" in text:
+                    print(f"[FAILURE] {uri} exposes the signed query")
+                    return 1
+            print(f"[*] read {len(file_uris)} record file(s), none carries the signature: {file_uris}")
+            print(f"[SUCCESS] Phase 7 passed: plan/list/status structured, {plan_uri} readable, no secrets listed.")
+
     print("\n[SUCCESS] All MCP phases passed.")
     return 0
 
@@ -179,7 +235,7 @@ sys.exit(asyncio.run(main()))
 PYEOF
 
 echo "[*] Driving mighty-colab mcp via the real MCP client protocol (mcp.client.stdio)"
-MCP_AUTH_FLAGS="$AUTH_FLAGS" MCP_CONFIG_PATH="$SESSION_FILE" MCP_SESSION_NAME="$SESSION_NAME" MCP_SCRIPT_PATH="$SCRIPT_PATH" \
+MCP_AUTH_FLAGS="$AUTH_FLAGS" MCP_CONFIG_PATH="$SESSION_FILE" MCP_SESSION_NAME="$SESSION_NAME" MCP_SCRIPT_PATH="$SCRIPT_PATH" MCP_JOB_SPEC_PATH="$JOB_SPEC_PATH" \
     uv run python3 "$DRIVER_PATH"
 RC=$?
 if [ $RC -ne 0 ]; then

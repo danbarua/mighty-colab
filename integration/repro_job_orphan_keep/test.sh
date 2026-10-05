@@ -128,6 +128,19 @@ assert "0123SENTINEL" not in json.dumps(env), "the fabricated signature reached 
 assert env["retry_class"] == "refresh_urls", env
 print("failed upload:", env["cleanup"], "|", env["reason"][:160], "| body:", artifact["error"]["body"][:60])
 PY
+# Every record in the job directory but the secrets sidecar, including the
+# hand-off's status-poll.log, which MCP now exposes.
+JOB_DIR="$TMP_DIR/jobs/$JOB_ID" uv run python - <<'PY'
+import os
+from pathlib import Path
+root = Path(os.environ["JOB_DIR"])
+leaks = [str(p) for p in root.rglob("*") if p.is_file()
+         and not p.name.endswith(".mighty-colab-secrets.json")
+         and b"0123SENTINEL" in p.read_bytes()]
+assert not leaks, leaks
+print("failed upload: no record but the secrets sidecar carries the signature:",
+      sorted(p.name for p in root.iterdir() if p.is_file()))
+PY
 ENDPOINT=$(field "$JOB_ID" endpoint)
 endpoint_listed "$ENDPOINT" || { echo "the kept VM is not listed" >&2; exit 1; }
 mc --json job destroy "$JOB_ID" --wait 0 >/dev/null

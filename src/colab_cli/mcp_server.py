@@ -34,7 +34,9 @@ import asyncio
 import contextlib
 import io
 import json
-from typing import Any, Dict, List, Optional, Tuple
+import logging
+from pathlib import Path
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 import click
 import typer
@@ -246,31 +248,195 @@ def _build_kwargs(
     return kwargs
 
 
-def invoke_command(name: str, cmd: click.Command, arguments: Dict[str, Any]) -> Tuple[bool, str]:
-    """Run one Click command's callback in-process. Returns (ok, text)."""
-    output = io.StringIO()
+_logger = logging.getLogger(__name__)
 
-    def captured() -> str:
-        return _strip_ansi(output.getvalue()).strip()
 
+class ToolOutcome(NamedTuple):
+    ok: bool
+    # What a person reads: the command's own human lines, plus a rendering
+    # of its envelope when it has one.
+    text: str
+    # The `--json` envelope, for a command that builds one.
+    structured: Optional[Dict[str, Any]]
+
+
+def _json_capable(tool_name: str) -> bool:
+    """Whether the tool's top-level command builds a `--json` envelope.
+    Group leaves are named `group_sub`; top-level names use hyphens."""
+    from colab_cli.cli import JSON_CAPABLE_COMMANDS
+
+    return tool_name.split("_", 1)[0] in JSON_CAPABLE_COMMANDS
+
+
+_ENVELOPE_KEYS = {"schema_version", "command", "status", "exit_code"}
+
+
+def _parse_envelope(stdout_text: str, tool_name: str) -> Tuple[Optional[Dict[str, Any]], List[str]]:
+    """(envelope, other stdout lines). The envelope is the last stdout line
+    that is a JSON object with the envelope's keys and a `command` of this
+    tool's top-level command (`emit_json` prints one line). A JSON object a
+    cell printed, for example, is not taken for it."""
+    top = tool_name.split("_", 1)[0]
+    lines = stdout_text.splitlines()
+    for index in range(len(lines) - 1, -1, -1):
+        line = lines[index].strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            value = json.loads(line)
+        except ValueError:
+            continue
+        if (
+            isinstance(value, dict)
+            and _ENVELOPE_KEYS <= value.keys()
+            and str(value.get("command", "")).split(" ", 1)[0] == top
+        ):
+            return value, [
+                text for i, text in enumerate(lines) if i != index and text.strip()
+            ]
+    return None, [text for text in lines if text.strip()]
+
+
+def _render_outputs(outputs) -> List[str]:
+    """nbformat outputs as text: streams, text/plain results, and errors
+    (their traceback, or name and value when the traceback is empty)."""
+    lines: List[str] = []
+    for output in outputs or []:
+        kind = output.get("output_type")
+        if kind == "stream":
+            text = output.get("text", "")
+            lines.append("".join(text) if isinstance(text, list) else str(text))
+        elif kind in ("execute_result", "display_data"):
+            plain = (output.get("data") or {}).get("text/plain")
+            if plain is not None:
+                lines.append("".join(plain) if isinstance(plain, list) else str(plain))
+        elif kind == "error":
+            traceback = output.get("traceback") or []
+            lines.append(
+                "\n".join(traceback)
+                if traceback
+                else f"{output.get('ename')}: {output.get('evalue')}"
+            )
+    return [line.rstrip("\n") for line in lines if line]
+
+
+_ENVELOPE_META = {"schema_version", "cli_version", "command", "status", "exit_code"}
+
+
+def render_envelope(envelope: Dict[str, Any]) -> str:
+    """A person's reading of a `--json` envelope: the job rendering `job
+    status` prints, cell outputs, diagnostics, list rows, log content, and
+    otherwise the envelope's own fields."""
+    lines: List[str] = []
+    job = envelope.get("job")
+    if isinstance(job, dict):
+        from colab_cli.commands.job import _human
+        from colab_cli.job.models import JobEnvelope
+
+        try:
+            lines.append(_human(JobEnvelope.model_validate(job)))
+        except Exception as error:  # noqa: BLE001 - rendered as JSON instead
+            _logger.warning("job envelope not rendered (%s); showing it as JSON", error)
+            lines.append(json.dumps(job, indent=2))
+    for block in envelope.get("blocks") or []:
+        lines.extend(_render_outputs(block.get("outputs")))
+    lines.extend(_render_outputs(envelope.get("outputs")))
+    for d in envelope.get("diagnostics") or []:
+        lines.append(f"{str(d.get('severity', '')).upper()} {d.get('code')}: {d.get('message')}")
+    for row in envelope.get("jobs") or []:
+        lines.append(
+            f"{row.get('job_id')}  {row.get('workload')}/{row.get('offload')}/"
+            f"{row.get('cleanup')}" + (f"  ({row['reason']})" if row.get("reason") else "")
+        )
+    for key in ("removed", "skipped"):
+        for row in envelope.get(key) or []:
+            lines.append(f"{key}: {row.get('job_id')}  ({row.get('reason')})")
+    for session in envelope.get("sessions") or []:
+        lines.append(
+            f"{session.get('name')}  {session.get('endpoint')}  "
+            f"{session.get('accelerator')}  {session.get('status') or ''}".rstrip()
+        )
+    if envelope.get("content"):
+        lines.append(str(envelope["content"]))
+    if not lines:
+        lines = [
+            f"{key}: {value}"
+            for key, value in envelope.items()
+            if key not in _ENVELOPE_META | {"message"} and value not in (None, [], {})
+        ]
+    message = envelope.get("message")
+    if message and str(message) not in lines:
+        lines.append(str(message))
+    return "\n".join(line for line in lines if line)
+
+
+def run_tool(name: str, cmd: click.Command, arguments: Dict[str, Any]) -> ToolOutcome:
+    """Run one Click command's callback in-process, once.
+
+    A command that builds a `--json` envelope runs in JSON mode: the
+    envelope (on stdout) is returned as `structured`, and the text is the
+    human lines it prints (moved to stderr in JSON mode) plus a rendering
+    of the envelope. Any other command's stdout and stderr are returned as
+    text, as they interleave.
+    """
+    from colab_cli.common import state
+
+    json_mode = _json_capable(name)
+    combined = io.StringIO()
+    out = io.StringIO() if json_mode else combined
+    err = io.StringIO() if json_mode else combined
+    ok, failure, exit_code = True, None, None
+    previous = state.json_output
     try:
         with click.Context(cmd, info_name=name) as ctx:
             kwargs = _build_kwargs(cmd, arguments, ctx)
             ctx.params = kwargs
+            if json_mode:
+                state.json_output = True
             # Commands report errors via `typer.echo(..., err=True)` before
             # raising -- capture stderr too, or those messages are lost and
             # the caller sees only a bare exit code.
-            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                 cmd.invoke(ctx)
     except typer.Exit as e:
-        if e.exit_code not in (0, None):
-            return False, captured() or f"[exit code {e.exit_code}]"
+        exit_code = e.exit_code
+        ok = e.exit_code in (0, None)
     except click.ClickException as e:
-        return False, (captured() + "\n" + e.format_message()).strip()
-    except Exception as e:
-        return False, (captured() + f"\n{e}").strip()
+        ok, failure = False, e.format_message()
+    except Exception as e:  # noqa: BLE001 - returned to the caller, traceback logged
+        _logger.exception("MCP tool %s raised", name)
+        ok, failure = False, f"{type(e).__name__}: {e}"
+    finally:
+        state.json_output = previous
 
-    return True, captured()
+    def text_of(buf: io.StringIO) -> str:
+        return _strip_ansi(buf.getvalue()).strip()
+
+    structured, stray = _parse_envelope(text_of(out), name) if json_mode else (None, [])
+    if structured is None:
+        parts = [text_of(out)] + ([text_of(err)] if json_mode else []) + [failure]
+    else:
+        if stray:
+            # Printed to stdout outside `typer.echo` (a bare print): kept in
+            # the text rather than dropped with the envelope's line.
+            _logger.warning(
+                "MCP tool %s printed %d stdout line(s) besides its envelope", name, len(stray)
+            )
+        parts = [text_of(err), "\n".join(stray), render_envelope(structured), failure]
+        # The envelope's own exit code counts: `exec --json` reports a cell
+        # that raised there (`job_raised`) and exits 0.
+        if structured.get("exit_code") not in (0, None):
+            ok = False
+    text = "\n".join(p for p in parts if p)
+    if not text and not ok:
+        text = f"[exit code {exit_code}]"
+    return ToolOutcome(ok, text, structured)
+
+
+def invoke_command(name: str, cmd: click.Command, arguments: Dict[str, Any]) -> Tuple[bool, str]:
+    """`run_tool`, for callers that need only (ok, text)."""
+    outcome = run_tool(name, cmd, arguments)
+    return outcome.ok, outcome.text
 
 
 
@@ -308,6 +474,49 @@ def _job_id_from_logs_uri(uri: str) -> Optional[str]:
         return None
     job_id = uri[len(JOB_URI_PREFIX) : -len(JOB_LOGS_SUFFIX)]
     return job_id or None
+
+
+JOB_FILES_INFIX = "/files/"
+_FILE_MIME_TYPES = {".json": "application/json", ".jsonl": "application/x-ndjson"}
+
+
+def _job_file_uri(job_id: str, name: str) -> str:
+    return f"{_job_uri(job_id)}{JOB_FILES_INFIX}{name}"
+
+
+def _job_file_from_uri(uri: str) -> Optional[Tuple[str, str]]:
+    if not uri.startswith(JOB_URI_PREFIX) or JOB_FILES_INFIX not in uri:
+        return None
+    job_id, _, name = uri[len(JOB_URI_PREFIX):].partition(JOB_FILES_INFIX)
+    return (job_id, name) if job_id and name else None
+
+
+def job_record_files(store, job_id: str) -> List[str]:
+    """The job directory's record files exposed as resources: every
+    regular file except the envelope and runner.log (which have their own
+    URIs), the apply lock, and the plan's secrets sidecar and the temp
+    files records are written through, which can hold signed URLs."""
+    from colab_cli.job.store import (
+        APPLY_LOCK_FILE,
+        ENVELOPE_FILE,
+        RUNNER_LOG_FILE,
+        SECRET_SIDECAR_SUFFIX,
+        SECRET_TEMP_PREFIX,
+    )
+
+    directory = store.job_dir(job_id)
+    if not directory.is_dir():
+        return []
+    excluded = {ENVELOPE_FILE, RUNNER_LOG_FILE, APPLY_LOCK_FILE}
+    return sorted(
+        path.name
+        for path in directory.iterdir()
+        if path.is_file()
+        and path.name not in excluded
+        and not path.name.startswith(".")
+        and not path.name.startswith(SECRET_TEMP_PREFIX)
+        and not path.name.endswith(SECRET_SIDECAR_SUFFIX)
+    )
 
 
 JOBS_LIST_URI = "jobs://"
@@ -363,6 +572,15 @@ def list_job_resources(store) -> List[types.Resource]:
                 mime_type="text/plain",
             )
         )
+        for name in job_record_files(store, job_id):
+            resources.append(
+                types.Resource(
+                    uri=_job_file_uri(job_id, name),
+                    name=f"{job_id}/{name}",
+                    description=f"Local job record {name}",
+                    mime_type=_FILE_MIME_TYPES.get(Path(name).suffix, "text/plain"),
+                )
+            )
     return resources
 
 
@@ -448,6 +666,30 @@ def read_job_logs_resource(store, uri: str) -> types.ReadResourceResult:
     )
 
 
+def read_job_file_resource(store, uri: str) -> types.ReadResourceResult:
+    """`job://<id>/files/<name>`: one of the job directory's record files,
+    as listed by `job_record_files`."""
+    parsed = _job_file_from_uri(uri)
+    if parsed is None:
+        raise ValueError(f"not a job://<id>/files/<name> resource: {uri}")
+    job_id, name = parsed
+    if name not in job_record_files(store, job_id):
+        raise ValueError(f"job {job_id!r} has no record file {name!r}")
+    raw = (store.job_dir(job_id) / name).read_bytes()
+    text = raw.decode("utf-8", "replace")
+    if "\ufffd" in text and b"\xef\xbf\xbd" not in raw:
+        _logger.warning("%s has bytes that are not UTF-8; replaced with U+FFFD", uri)
+    return types.ReadResourceResult(
+        contents=[
+            types.TextResourceContents(
+                uri=uri,
+                mime_type=_FILE_MIME_TYPES.get(Path(name).suffix, "text/plain"),
+                text=text,
+            )
+        ]
+    )
+
+
 class JobResourceSubscriptions:
     """One background task per subscribed `job://` URI, polling for `done`.
 
@@ -473,8 +715,10 @@ class JobResourceSubscriptions:
         # still true that content changing on every job's every phase
         # transition and every prune is too often to sensibly notify on;
         # this just declines quietly rather than loudly.
-        if uri in (JOBS_LIST_URI, JOBS_RUNNING_URI, JOBS_DONE_URI) or uri.endswith(
-            JOB_LOGS_SUFFIX
+        if (
+            uri in (JOBS_LIST_URI, JOBS_RUNNING_URI, JOBS_DONE_URI)
+            or uri.endswith(JOB_LOGS_SUFFIX)
+            or _job_file_from_uri(uri) is not None
         ):
             return
         job_id = _job_id_from_uri(uri)
@@ -541,14 +785,24 @@ class JobResourceSubscriptions:
         workload_notified = initial_workload is not Workload.PENDING
         try:
             while True:
-                env = self._store.read_envelope(job_id)
-                if env is not None:
-                    if env.done:
-                        await session.send_resource_updated(uri)
-                        return
-                    if not workload_notified and env.workload is not Workload.PENDING:
-                        await session.send_resource_updated(uri)
-                        workload_notified = True
+                try:
+                    env = self._store.read_envelope(job_id)
+                except Exception:  # noqa: BLE001 - a bad read is retried next tick
+                    _logger.warning("watching %s: envelope unreadable", uri, exc_info=True)
+                    env = None
+                try:
+                    if env is not None:
+                        if env.done:
+                            await session.send_resource_updated(uri)
+                            return
+                        if not workload_notified and env.workload is not Workload.PENDING:
+                            await session.send_resource_updated(uri)
+                            workload_notified = True
+                except Exception:  # noqa: BLE001 - the client is gone; stop watching
+                    _logger.warning(
+                        "watching %s: notification not sent; watch stopped", uri, exc_info=True
+                    )
+                    return
                 await asyncio.sleep(self._poll_interval)
         finally:
             self._tasks.pop(uri, None)
@@ -593,12 +847,26 @@ class JobListWatcher:
         self._task = None
 
     async def _watch(self, session) -> None:
-        while True:
-            await asyncio.sleep(self._poll_interval)
-            current = set(self._store.list_jobs())
-            if current != self._known:
-                self._known = current
-                await session.send_resource_list_changed()
+        try:
+            while True:
+                await asyncio.sleep(self._poll_interval)
+                try:
+                    current = set(self._store.list_jobs())
+                except Exception:  # noqa: BLE001 - retried next tick
+                    _logger.warning("job list unreadable", exc_info=True)
+                    continue
+                if current != self._known:
+                    self._known = current
+                    try:
+                        await session.send_resource_list_changed()
+                    except Exception:  # noqa: BLE001 - the client is gone; stop watching
+                        _logger.warning(
+                            "list_changed not sent; job list watch stopped", exc_info=True
+                        )
+                        return
+        finally:
+            # A watch that ended can be started again.
+            self._task = None
 
 
 
@@ -622,10 +890,11 @@ async def run_stdio_server(click_group: click.Group, server_name: str) -> None:
                 content=[types.TextContent(type="text", text=f"Unknown tool: {params.name}")],
                 is_error=True,
             )
-        ok, text = invoke_command(params.name, commands[params.name], params.arguments or {})
+        outcome = run_tool(params.name, commands[params.name], params.arguments or {})
         return types.CallToolResult(
-            content=[types.TextContent(type="text", text=text)],
-            is_error=not ok,
+            content=[types.TextContent(type="text", text=outcome.text)],
+            structured_content=outcome.structured,
+            is_error=not outcome.ok,
         )
 
     async def on_list_resources(ctx, params) -> types.ListResourcesResult:
@@ -638,6 +907,8 @@ async def run_stdio_server(click_group: click.Group, server_name: str) -> None:
     async def on_read_resource(ctx, params) -> types.ReadResourceResult:
         if params.uri in (JOBS_LIST_URI, JOBS_RUNNING_URI, JOBS_DONE_URI):
             return read_jobs_list_resource(job_store, params.uri)
+        if _job_file_from_uri(params.uri) is not None:
+            return read_job_file_resource(job_store, params.uri)
         if params.uri.endswith(JOB_LOGS_SUFFIX):
             return read_job_logs_resource(job_store, params.uri)
         return read_job_resource(job_store, params.uri)

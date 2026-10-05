@@ -559,12 +559,16 @@ class Orchestrator:
         from colab_cli.commands.session import _record_keep_alive_failure
         from colab_cli.utils import get_status_code
 
+        from colab_cli.client import response_body_if_json
+
         _record_keep_alive_failure(session)
         status = get_status_code(error)
+        body = response_body_if_json(error, limit=ASSIGN_BODY_CHARS)
         self.env.hints.append(
             "keep-alive pre-flight failed "
-            f"({'HTTP ' + str(status) + '; ' if status else ''}{describe_error(error)}); "
-            "the daemon was started anyway"
+            f"({'HTTP ' + str(status) + '; ' if status else ''}{describe_error(error)}"
+            + (f"; response body: {redact_credentials(' '.join(body.split()))}" if body else "")
+            + "); the daemon was started anyway"
         )
 
     def _stop_keep_alive(self) -> None:

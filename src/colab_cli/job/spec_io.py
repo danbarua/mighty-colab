@@ -379,7 +379,10 @@ def fetch_control_result(
     """Read one bounded JSON result object from a signed GET URL."""
 
     request = urllib.request.Request(url, method="GET")
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    # The same public-destination policy as the data probe and the VM
+    # runner: HTTPS only, every DNS answer public, redirects checked, and
+    # the connection pinned to the address that was checked.
+    with urlopen_public(request, timeout=timeout) as response:
         body = response.read(max_bytes + 1)
     if len(body) > max_bytes:
         raise ValueError("control result exceeds maximum size")

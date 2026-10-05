@@ -279,7 +279,7 @@ def test_fetch_control_result_rejects_oversized_body(monkeypatch):
             reads.append(size)
             return b"12345"
 
-    monkeypatch.setattr("urllib.request.urlopen", lambda *_args, **_kwargs: Response())
+    monkeypatch.setattr("colab_cli.job.spec_io.urlopen_public", lambda *_args, **_kwargs: Response())
 
     with pytest.raises(ValueError, match="maximum size"):
         fetch_control_result(PUBLIC_URL, max_bytes=4)
@@ -643,3 +643,13 @@ def test_install_log_is_a_reserved_path(tmp_path):
         data=[DataItem(url=PUBLIC_URL, dest="/content/jobs/planner-test/install.log", size_bytes=1)],
     )
     assert RESERVED_PATH in diagnostic_codes(build_plan(spec, JOB_ID, probe=False))
+
+
+def test_fetch_control_result_refuses_a_private_destination():
+    from colab_cli.job.runtime_payload.netpolicy import BlockedDestination
+
+    with pytest.raises(BlockedDestination, match="non-public address for private.test"):
+        fetch_control_result("https://private.test/result.json?sig=x")
+
+    with pytest.raises(BlockedDestination, match="https"):
+        fetch_control_result("http://storage.example.test/result.json")

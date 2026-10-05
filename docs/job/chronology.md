@@ -9,6 +9,25 @@ request and `issue #N` an issue in `danbarua/mighty-colab`.
 The other documents in `docs/job/` describe the current system. This one
 records what changed and what each claim rests on.
 
+### 2026-10-05: MCP tool results carry the envelope; every job record is a resource
+
+Tools called over MCP returned the human text only, so an agent saw no
+artifact errors, hints or `failed_phase` without reading `job://<id>`
+again. Each tool call now runs its command once in JSON mode when it has an
+envelope, returning the envelope as `structured_content` beside the human
+text. Every record file in a job's directory is a `job://<id>/files/<name>`
+resource (never the secrets sidecar); the watchers survive a bad read and
+stop cleanly when the client has gone; `jobs list` rows carry
+`failed_phase`, `retry_class` and `supervisor`. `--json` now works on `jobs
+list` and `jobs prune`, which built envelopes the root callback refused to
+emit. The `control.result` GET, the one signed-URL request outside the
+public-destination policy, now follows it.
+
+Evidence: `integration/repro_mcp_server` (the real MCP stdio client: the
+`new` and `exec` results carry their envelopes; `job_plan`, `jobs_list` and
+`job_status` return structured envelopes; `job://<id>/files/plan.json` reads
+back and no secrets sidecar is listed).
+
 ### 2026-10-05: No poll waits forever, and a finished job keeps its VM by one rule
 
 Apply's default deadline (`wall_clock` + 600 s) started before

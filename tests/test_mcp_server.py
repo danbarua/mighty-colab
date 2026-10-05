@@ -489,6 +489,8 @@ def test_list_job_resources_reports_status(tmp_path):
         "still-running (logs)",
         "finished",
         "finished (logs)",
+        # The write that finished the job appended its outcome event.
+        "finished/events.jsonl",
     }
     assert resources["jobs"].uri == "jobs://"
     assert resources["jobs (running)"].uri == "jobs://running"
@@ -500,8 +502,11 @@ def test_list_job_resources_reports_status(tmp_path):
     assert "running" in resources["still-running"].description
     assert "done" in resources["finished"].description
     json_resources = {
-        name: r for name, r in resources.items() if not name.endswith("(logs)")
+        name: r for name, r in resources.items()
+        if not name.endswith("(logs)") and "/" not in name
     }
+    assert resources["finished/events.jsonl"].uri == "job://finished/files/events.jsonl"
+    assert resources["finished/events.jsonl"].mime_type == "application/x-ndjson"
     assert all(r.mime_type == "application/json" for r in json_resources.values())
 
 
@@ -904,3 +909,299 @@ def test_list_job_resources_survives_an_unreadable_envelope(tmp_path):
 
     assert "readable" in resources
     assert "unreadable" in resources["from-a-newer-cli"].description
+
+
+# --- tool results carry the --json envelope ----------------------------------
+
+
+def _write_failed_job(job_id="mcp-failed"):
+    from colab_cli.commands.job import _store
+    from colab_cli.job.models import (
+        Cleanup, JobEnvelope, Offload, Phase, RetryClass, Supervisor, Workload,
+    )
+
+    _store().write_envelope(
+        JobEnvelope(
+            job_id=job_id, phase=Phase.CLEANUP, failed_phase=Phase.RUN,
+            workload=Workload.FAILED, offload=Offload.NOT_REQUIRED, cleanup=Cleanup.RELEASED,
+            supervisor=Supervisor.FINISHED, retry_class=RetryClass.FIX_CODE,
+            reason="the workload exited 1: ValueError: bad",
+        )
+    )
+
+
+def test_a_job_tool_returns_the_envelope_and_its_human_rendering(tools_and_commands, mock_common_state):
+    from colab_cli.mcp_server import run_tool
+
+    _, commands = tools_and_commands
+    _write_failed_job()
+    mock_common_state.json_output = False
+
+    outcome = run_tool("job_status", commands["job_status"], {"job_id": "mcp-failed"})
+
+    assert outcome.ok is True
+    assert outcome.structured["command"] == "job status"
+    assert outcome.structured["job"]["failed_phase"] == "run"
+    assert outcome.structured["job"]["retry_class"] == "fix_code"
+    assert "[job] mcp-failed" in outcome.text
+    assert "failed in:  run" in outcome.text
+    assert "reason:     the workload exited 1: ValueError: bad" in outcome.text
+    assert mock_common_state.json_output is False, "JSON mode must not leak past the call"
+
+
+def test_jobs_list_returns_its_rows_structured(tools_and_commands, mock_common_state):
+    from colab_cli.mcp_server import run_tool
+
+    _, commands = tools_and_commands
+    _write_failed_job("listed")
+
+    outcome = run_tool("jobs_list", commands["jobs_list"], {})
+
+    assert [row["job_id"] for row in outcome.structured["jobs"]] == ["listed"]
+    assert "listed  failed/not_required/released" in outcome.text
+
+
+def test_a_tool_without_an_envelope_returns_text_only(tools_and_commands, mock_common_state):
+    from colab_cli.mcp_server import run_tool
+
+    _, commands = tools_and_commands
+    outcome = run_tool("adopt", commands["adopt"], {})
+
+    assert outcome.structured is None
+    assert "Provide an ENDPOINT to adopt, or use --orphanage" in outcome.text
+
+
+def test_a_tool_that_raises_names_the_exception_type(caplog):
+    from colab_cli.mcp_server import run_tool
+
+    @click.command()
+    def boom():
+        raise RuntimeError("kaput")
+
+    with caplog.at_level("ERROR", logger="colab_cli.mcp_server"):
+        outcome = run_tool("boom", boom, {})
+
+    assert outcome.ok is False
+    assert outcome.text == "RuntimeError: kaput"
+    assert "MCP tool boom raised" in caplog.text
+    assert "Traceback" in caplog.text
+
+
+def test_render_envelope_shows_cell_outputs_and_errors():
+    from colab_cli.mcp_server import render_envelope
+
+    text = render_envelope(
+        {
+            "command": "exec", "status": "error",
+            "blocks": [
+                {"code": "print(1)", "outputs": [
+                    {"output_type": "stream", "name": "stdout", "text": "1\n"},
+                    {"output_type": "execute_result", "data": {"text/plain": "42"}},
+                    {"output_type": "error", "ename": "ValueError", "evalue": "bad", "traceback": []},
+                ]},
+            ],
+        }
+    )
+
+    assert text == "1\n42\nValueError: bad"
+
+
+def test_render_envelope_falls_back_to_the_fields():
+    from colab_cli.mcp_server import render_envelope
+
+    text = render_envelope(
+        {"schema_version": "1", "command": "stop", "status": "ok", "exit_code": 0, "session": "s1"}
+    )
+
+    assert text == "session: s1"
+
+
+def test_the_cli_emits_json_for_jobs_list(tmp_path):
+    import json as _json
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [sys.executable, "-m", "colab_cli.cli", "--config", str(tmp_path / "sessions.json"),
+         "--json", "jobs", "list"],
+        capture_output=True, text=True, timeout=60,
+    )
+
+    assert "has no effect" not in result.stderr
+    payload = _json.loads(result.stdout.strip().splitlines()[-1])
+    assert payload["command"] == "jobs list" and payload["jobs"] == []
+
+
+
+# --- job record files, watchers, list rows ------------------------------------
+
+
+def test_record_files_are_resources_but_never_the_secrets(tmp_path):
+    from colab_cli.mcp_server import job_record_files, read_job_file_resource
+
+    store = _job_store(tmp_path)
+    job_dir = store.job_dir("files")
+    job_dir.mkdir(parents=True)
+    for name, text in {
+        "plan.json": "{}", "install.log": "uv ok", "apply.lock": "",
+        "plan.json.mighty-colab-secrets.json": "SECRET", "runner.log": "r",
+        ".mighty-colab-secret-tmp-abc": "SECRET", "status-poll.log": "polled",
+    }.items():
+        (job_dir / name).write_text(text)
+
+    assert job_record_files(store, "files") == ["install.log", "plan.json", "status-poll.log"]
+    result = read_job_file_resource(store, "job://files/files/install.log")
+    assert result.contents[0].text == "uv ok"
+    for forbidden in ("plan.json.mighty-colab-secrets.json", "../files/plan.json", "apply.lock"):
+        with pytest.raises(ValueError):
+            read_job_file_resource(store, f"job://files/files/{forbidden}")
+
+
+def test_subscribing_to_a_record_file_is_a_silent_no_op(tmp_path):
+    import asyncio
+
+    from colab_cli.mcp_server import JobResourceSubscriptions
+
+    store = _job_store(tmp_path)
+    subscriptions = JobResourceSubscriptions(store)
+    asyncio.run(subscriptions.subscribe(MagicMock(), "job://x/files/install.log"))
+    assert subscriptions._tasks == {}
+
+
+def test_a_job_watch_survives_an_unreadable_envelope(tmp_path):
+    import asyncio
+
+    from colab_cli.job.models import Workload
+    from colab_cli.mcp_server import JobResourceSubscriptions
+
+    store = MagicMock()
+    reads = iter([ValueError("truncated"), _done_envelope("j")])
+
+    def read(_job_id):
+        value = next(reads)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    store.read_envelope.side_effect = read
+    session = MagicMock()
+
+    async def sent(uri):
+        sent.uris.append(uri)
+
+    sent.uris = []
+    session.send_resource_updated = sent
+    subscriptions = JobResourceSubscriptions(store, poll_interval=0)
+
+    asyncio.run(subscriptions._watch(session, "job://j", "j", Workload.RUNNING))
+
+    assert sent.uris == ["job://j"]
+
+
+def test_the_job_list_watch_stops_cleanly_when_the_client_is_gone(tmp_path):
+    import asyncio
+
+    from colab_cli.mcp_server import JobListWatcher
+
+    store = MagicMock()
+    store.list_jobs.side_effect = [[], ["new-job"]]
+    session = MagicMock()
+
+    async def gone():
+        raise ConnectionError("closed")
+
+    session.send_resource_list_changed = gone
+    watcher = JobListWatcher(store, poll_interval=0)
+
+    async def run():
+        watcher.start(session)
+        await asyncio.sleep(0.05)
+
+    asyncio.run(run())
+
+    assert watcher._task is None, "a stopped watch must be restartable"
+
+
+def test_job_list_rows_carry_failed_phase_retry_class_and_supervisor(tmp_path):
+    from colab_cli.commands.job import _job_list_rows
+    from colab_cli.job.models import Phase, RetryClass
+
+    store = _job_store(tmp_path)
+    env = _done_envelope("row")
+    env.failed_phase = Phase.RUN
+    env.retry_class = RetryClass.FIX_CODE
+    store.write_envelope(env)
+
+    [row] = _job_list_rows(store)
+
+    assert row["failed_phase"] == "run"
+    assert row["retry_class"] == "fix_code"
+    assert row["supervisor"] == env.supervisor.value
+
+
+def test_a_json_line_a_command_printed_is_not_the_envelope():
+    from colab_cli.mcp_server import _parse_envelope
+
+    envelope, stray = _parse_envelope('{"loss": 0.3}\nplain text', "exec")
+    assert envelope is None
+    assert stray == ['{"loss": 0.3}', "plain text"]
+
+    other = '{"schema_version": "1", "command": "run", "status": "ok", "exit_code": 0}'
+    assert _parse_envelope(other, "exec")[0] is None
+
+
+def test_stray_stdout_is_kept_and_a_raised_cell_is_an_error(caplog):
+    from colab_cli.mcp_server import run_tool
+
+    @click.command()
+    def exec_like():
+        import json as _json
+        import sys as _sys
+
+        print("bare print")
+        _sys.stdout.write(_json.dumps({
+            "schema_version": "1", "cli_version": "x", "command": "exec",
+            "status": "job_raised", "exit_code": 1, "reason": "job_raised",
+            "blocks": [{"code": "1/0", "outputs": [
+                {"output_type": "error", "ename": "ZeroDivisionError",
+                 "evalue": "division by zero", "traceback": []}
+            ]}],
+        }) + "\n")
+
+    with caplog.at_level("WARNING", logger="colab_cli.mcp_server"):
+        outcome = run_tool("exec", exec_like, {})
+
+    assert outcome.ok is False, "a cell that raised is a tool error, as before JSON mode"
+    assert outcome.structured["status"] == "job_raised"
+    assert "bare print" in outcome.text
+    assert "ZeroDivisionError: division by zero" in outcome.text
+    assert "printed 1 stdout line(s) besides its envelope" in caplog.text
+
+
+def test_render_envelope_does_not_repeat_the_message():
+    from colab_cli.mcp_server import render_envelope
+
+    text = render_envelope({"schema_version": "1", "command": "stop", "status": "error",
+                            "exit_code": 1, "reason": "session_not_found",
+                            "message": "no such session"})
+
+    assert text == "reason: session_not_found\nno such session"
+
+
+def test_every_json_capable_group_subcommand_has_an_envelope():
+    """Adding a group to JSON_CAPABLE_COMMANDS removes the root callback's
+    guard for every subcommand in it; a new subcommand must be added here
+    once it emits an envelope."""
+    import typer.main as _typer_main
+
+    from colab_cli.cli import JSON_CAPABLE_COMMANDS, app
+
+    group = _typer_main.get_command(app)
+    with_envelopes = {
+        "job": {"apply", "destroy", "plan", "status"},
+        "jobs": {"list", "prune"},
+    }
+    for name in JSON_CAPABLE_COMMANDS:
+        subcommands = getattr(group.commands[name], "commands", None)
+        if subcommands:
+            assert set(subcommands) == with_envelopes[name], name
