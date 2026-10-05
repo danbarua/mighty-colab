@@ -103,6 +103,13 @@ How each provider supplies the scope:
 succeeds so missing-scope failures surface immediately (with per-provider
 remediation guidance) rather than silently after ~1 minute via the daemon.
 
+The detached keep-alive daemon writes its stderr to
+`keep-alive/<session>.log` beside the session state file
+(`~/.config/colab-cli/keep-alive/` by default), appending across respawns.
+A crash outside its own loop (at startup, in authentication, or reading the
+session store) leaves its traceback there; the loop's own stops are logged
+to the session history as `keep_alive_stopped`.
+
 ## Approach
 
 ### 1. Authentication (`colab auth`)

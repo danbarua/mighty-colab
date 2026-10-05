@@ -9,6 +9,45 @@ request and `issue #N` an issue in `danbarua/mighty-colab`.
 The other documents in `docs/job/` describe the current system. This one
 records what changed and what each claim rests on.
 
+### 2026-10-05: No poll waits forever, and a finished job keeps its VM by one rule
+
+Apply's default deadline (`wall_clock` + 600 s) started before
+provisioning, so a long install could make apply cancel a healthy run
+inside its own `wall_clock`; it now starts at launch, and an explicit
+`--timeout` stays a budget for the whole call. `job status --poll` had no
+deadline: with a dead watchdog, whose last `watchdog.json` still said
+`runner_alive: true`, it polled and the VM billed forever, including the
+detached poll apply hands off to on SIGTERM. It now cancels an orphaned job
+at the same deadline and releases the VM, and both polls report a
+`watchdog.json` that has not changed for 5 minutes. The orphan release
+ignored `on_offload_fail: leave_up` and could not see `--leave-up`; both
+now follow apply's rule, with `--leave-up` stored in the envelope. `jobs
+prune` deleted an early-failed `apply --async`'s directory, its `apply.log`
+included; it now skips it, and skips a job whose apply holds the lock.
+Status, destroy and the transport now give causes where they gave a type
+or nothing: why a read failed and what the listing showed, why the
+credential file's removal was not confirmed, why `control.result` could not
+be used, why the keep-alive daemon stopped. The job's outcome is appended
+to `events.jsonl`, and the keep-alive daemon's stderr is kept.
+
+Evidence: `integration/repro_job_status_poll_bound` (runner and watchdog
+killed on the VM after apply was killed: the stall reported, the cancel at
+the deadline, the VM released); `integration/repro_job_orphan_keep` (the
+detached poll keeps the VM after a real 403 on upload and releases it when
+the artifact was never written).
+
+### 2026-10-05: A missing output no longer keeps the VM billing
+
+A required artifact that was never produced (the run crashed, was OOM- or
+`wall_clock`-killed, or wrote the file elsewhere) fails offload, and the
+default `on_offload_fail: leave_up` kept the VM up and billing although
+there was nothing on it to rescue. `leave_up` now keeps the VM only after an
+attempted upload failed. `cleanup` also stopped recomputing the decision on
+its own, which could keep a VM up after apply had overridden `leave_up`
+because the transfer credential's deletion was not confirmed.
+
+Evidence: unit tests in `tests/test_job_orchestrator.py`.
+
 ### 2026-10-05: Plan, apply's preflight and provision say why they refuse; URL expiry counts install
 
 Plan reported a host that does not resolve as a private address, flagged

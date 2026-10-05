@@ -148,6 +148,39 @@ class JobTransport:
         # and proved that this endpoint is absent.
         self._last_endpoint_present: bool | None = None
         self._last_404_refresh_at: float | None = None
+        # The most recent failure's cause, credentials removed, for a
+        # caller's reason; and why the assignment listing last failed.
+        self.last_problem: str | None = None
+        self._listing_error: str | None = None
+
+    def _problem(self, text: str) -> None:
+        self.last_problem = text
+        self._logger.warning("job transport %s: %s", self.endpoint, text)
+
+    def listing_note(self) -> str:
+        """What the last assignment listing showed, for a degraded reason."""
+        if self._last_endpoint_present is True:
+            return "the assignment was listed at the last check"
+        if self._last_endpoint_present is False:
+            return "the assignment is no longer listed"
+        if self._listing_error:
+            return f"listing the assignments also failed ({self._listing_error})"
+        return "whether the assignment is still listed is unknown"
+
+    def _decode_text(self, raw: bytes, remote_path: str) -> str:
+        """UTF-8 text, with each undecodable byte replaced by U+FFFD and
+        the count logged, so one bad byte does not hide the whole file."""
+        try:
+            return raw.decode("utf-8")
+        except UnicodeDecodeError:
+            text = raw.decode("utf-8", "replace")
+            self._logger.warning(
+                "job transport %s: %s has bytes that are not UTF-8; %d replaced with U+FFFD",
+                self.endpoint,
+                remote_path,
+                text.count("\ufffd"),
+            )
+            return text
 
     @property
     def timeout(self) -> tuple[float, float]:
@@ -165,11 +198,11 @@ class JobTransport:
             return value, status
         try:
             decoded = json.loads(value)
-        except (TypeError, ValueError):
-            self._logger.warning("Contents response for %s was not JSON", remote_path)
+        except (TypeError, ValueError) as error:
+            self._problem(f"{remote_path} is not JSON ({describe_error(error)})")
             return None, ReadStatus.DEGRADED
         if not isinstance(decoded, dict):
-            self._logger.warning("JSON Contents response for %s was not an object", remote_path)
+            self._problem(f"{remote_path} is JSON but not an object ({type(decoded).__name__})")
             return None, ReadStatus.DEGRADED
         return decoded, status
 
@@ -182,10 +215,7 @@ class JobTransport:
         if isinstance(value, str):
             return value, status
         if isinstance(value, bytes):
-            try:
-                return value.decode("utf-8"), status
-            except UnicodeDecodeError:
-                return None, ReadStatus.DEGRADED
+            return self._decode_text(value, remote_path), status
         return str(value), status
 
     def write_json(self, remote_path: str, value: Mapping[str, Any]) -> ReadStatus:
@@ -413,7 +443,7 @@ class JobTransport:
         while True:
             try:
                 payload = self._request(remote_path)
-                return self._decode_contents_payload(payload)
+                return self._decode_contents_payload(payload, remote_path)
             except Exception as error:  # Requests and Contents use several exception types.
                 status_code = self._status_code(error)
 
@@ -423,8 +453,16 @@ class JobTransport:
                     refresh_attempted = True
                     refresh_status = self._refresh_token()
                     if refresh_status is ReadStatus.SESSION_LOST:
+                        self._problem(
+                            f"{remote_path}: HTTP {status_code}, and the assignment "
+                            "is no longer listed"
+                        )
                         return None, refresh_status
                     if refresh_status is not ReadStatus.OK:
+                        self._problem(
+                            f"{remote_path}: HTTP {status_code}, and the token refresh "
+                            f"failed ({self.last_problem})"
+                        )
                         return None, ReadStatus.DEGRADED
                     if status_code == 404:
                         self._last_404_refresh_at = time.monotonic()
@@ -442,8 +480,12 @@ class JobTransport:
                     # A successful assignment refresh followed by a 404 means
                     # the endpoint is healthy and the path itself is absent.
                     return None, ReadStatus.NOT_FOUND
-                if status_code in (401, 404):
-                    return None, self._classify_endpoint()
+                retries = (
+                    f" (after {transient_retries} retr{'y' if transient_retries == 1 else 'ies'})"
+                    if transient_retries
+                    else ""
+                )
+                self._problem(f"{remote_path}: {describe_error(error)}{retries}")
                 return None, self._classify_endpoint()
 
     def _confirm_text(self, remote_path: str, payload: str) -> bool | None:
@@ -525,12 +567,15 @@ class JobTransport:
         if endpoint_present is False:
             return ReadStatus.SESSION_LOST
         if endpoint_present is None:
+            self._problem(f"listing the assignments failed ({self._listing_error})")
             return ReadStatus.DEGRADED
         if assignment is None:
+            self._problem("the assignment listing returned no entry for this endpoint")
             return ReadStatus.DEGRADED
 
         token, proxy_url = self._proxy_values(assignment)
         if not token:
+            self._problem("the listed assignment carries no runtime-proxy token")
             return ReadStatus.DEGRADED
 
         updates: dict[str, str] = {"token": token}
@@ -556,9 +601,20 @@ class JobTransport:
             assignments = self.client.list_assignments(timeout=self.timeout)
             for assignment in assignments:
                 if self._assignment_endpoint(assignment) == self.endpoint:
+                    self._listing_error = None
                     return assignment, True
-        except Exception:
+        except Exception as error:  # noqa: BLE001 - recorded; the caller classifies
+            status = get_status_code(error)
+            self._listing_error = describe_error(error) + (
+                f" (HTTP {status})" if status is not None else ""
+            )
+            self._logger.warning(
+                "job transport %s: listing the assignments failed: %s",
+                self.endpoint,
+                self._listing_error,
+            )
             return None, None
+        self._listing_error = None
         return None, False
 
     def _classify_endpoint(self) -> ReadStatus:
@@ -606,8 +662,9 @@ class JobTransport:
             error, (requests.exceptions.ConnectionError, requests.exceptions.Timeout)
         )
 
-    @staticmethod
-    def _decode_contents_payload(payload: Any) -> tuple[Any | None, ReadStatus]:
+    def _decode_contents_payload(
+        self, payload: Any, remote_path: str = ""
+    ) -> tuple[Any | None, ReadStatus]:
         if not isinstance(payload, Mapping):
             return payload, ReadStatus.OK
         if "content" not in payload:
@@ -617,6 +674,8 @@ class JobTransport:
         if payload.get("format") != "base64":
             return content, ReadStatus.OK
         try:
-            return base64.b64decode(content).decode("utf-8"), ReadStatus.OK
-        except (ValueError, TypeError, UnicodeDecodeError):
+            raw = base64.b64decode(content)
+        except (ValueError, TypeError) as error:
+            self._problem(f"{remote_path}: base64 content does not decode ({describe_error(error)})")
             return None, ReadStatus.DEGRADED
+        return self._decode_text(raw, remote_path), ReadStatus.OK

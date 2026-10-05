@@ -24,7 +24,10 @@
 #   4. an input whose sha256 is wrong: planned and received digests,
 #      fix_code;
 #   5. an uncaught exception from a library: its module-qualified type
-#      and message are the reason.
+#      and message are the reason;
+#   6. the same exception before a required artifact was written: offload
+#      fails (fix_code), and the default on_offload_fail: leave_up releases
+#      the VM, because there is no file on it to rescue.
 
 set -euo pipefail
 
@@ -192,4 +195,15 @@ assert "Traceback" in log, "runner.log has no traceback"
 print("exception:", env["reason"])
 '
 
-echo "[SUCCESS] wall_clock, OOM, a 404 input, a sha256 mismatch and an exception each carry their cause"
+# 6. no artifact was produced: released despite leave_up
+run missing-artifact raises.py '[]' 'budgets: {wall_clock: 600}' \
+    "artifacts: [{path: out/model.pt, url: \"https://storage.googleapis.com/mighty-colab-no-such-bucket-4821/model.pt\", size_bytes: 1}]"
+check '
+assert env["offload"] == "failed", env
+assert env["retry_class"] == "fix_code", env
+assert "required artifact(s) not produced: out/model.pt" in env["reason"], env
+assert not any("left running" in h for h in env["hints"]), env
+print("missing artifact:", env["offload"], env["cleanup"], "|", env["reason"])
+'
+
+echo "[SUCCESS] wall_clock, OOM, a 404 input, a sha256 mismatch and an exception each carry their cause; a missing artifact releases the VM"

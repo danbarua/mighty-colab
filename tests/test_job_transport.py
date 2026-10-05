@@ -424,3 +424,50 @@ def test_a_failed_token_refresh_is_named(mocker, session_state, tmp_path):
 
     assert error.value.status is ReadStatus.SESSION_LOST
     assert str(error.value).endswith("; the token refresh failed (session_lost)")
+
+
+def test_a_failed_read_records_its_cause_and_what_the_listing_showed(
+    mocker, session_state, assignment
+):
+    contents = MagicMock()
+    contents._request.side_effect = requests.exceptions.ConnectionError("reset by peer")
+    client = MagicMock()
+    client.list_assignments.side_effect = http_error(401)
+    transport, _factory, _refreshed = make_transport(
+        mocker, session_state, contents, client, MagicMock()
+    )
+
+    value, status = transport.read_json("/content/jobs/x/result.json")
+
+    assert (value, status) == (None, ReadStatus.DEGRADED)
+    assert transport.last_problem.startswith(
+        "/content/jobs/x/result.json: ConnectionError: reset by peer (after 3 retries)"
+    )
+    assert transport.listing_note().startswith("listing the assignments also failed (HTTPError")
+    assert "(HTTP 401)" in transport.listing_note()
+
+
+def test_non_utf8_text_is_kept_with_replacements_and_logged(mocker, session_state, caplog):
+    contents = MagicMock()
+    contents._request.return_value = b"ok \xff\xfe end"
+    transport, _factory, _refreshed = make_transport(
+        mocker, session_state, contents, MagicMock(), MagicMock()
+    )
+
+    with caplog.at_level("WARNING", logger="colab_cli.job.transport"):
+        text, status = transport.read_text("/content/jobs/x/runner.log")
+
+    assert status is ReadStatus.OK
+    assert text == "ok �� end"
+    assert "2 replaced with U+FFFD" in caplog.text
+
+
+def test_a_non_json_record_says_why(mocker, session_state):
+    contents = MagicMock()
+    contents._request.return_value = "not json"
+    transport, _factory, _refreshed = make_transport(
+        mocker, session_state, contents, MagicMock(), MagicMock()
+    )
+
+    assert transport.read_json("/content/jobs/x/result.json") == (None, ReadStatus.DEGRADED)
+    assert transport.last_problem.startswith("/content/jobs/x/result.json is not JSON (JSONDecodeError")

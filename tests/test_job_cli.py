@@ -406,8 +406,8 @@ def test_unconfirmed_credential_cleanup_overrides_leave_up(
     def launch(_self, _path):
         raise PhaseError(Phase.RUN, "launch failed", RetryClass.RETRY_SAME)
 
-    def cleanup(self, force_leave_up=False):
-        forced["leave_up"] = force_leave_up
+    def cleanup(self, leave_up=False):
+        forced["leave_up"] = leave_up
         self.env.cleanup = Cleanup.FAILED
 
     monkeypatch.setattr(Orchestrator, "provision", provision)
@@ -3039,16 +3039,17 @@ def _apply_with(monkeypatch, tmp_path, mock_common_state, **overrides):
         "poll": lambda _self, _transport, deadline: None,
         "job_transport": lambda _self: MagicMock(),
         "cleanup_secret_channel": lambda _self: calls.append("cleanup_secret_channel") or True,
-        "cleanup": lambda self, force_leave_up=False: setattr(self.env, "cleanup", Cleanup.RELEASED),
+        "cleanup": lambda self, leave_up=False: setattr(self.env, "cleanup", Cleanup.RELEASED),
     }
     stage = overrides.pop("_stage_payload", lambda _orch, _plan: None)
+    extra_args = overrides.pop("_args", [])
     defaults.update(overrides)
     for name, fn in defaults.items():
         monkeypatch.setattr(Orchestrator, name, fn)
     monkeypatch.setattr(job_command, "_stage_payload", stage)
     _json_mode(mock_common_state)
     mock_common_state.debug = False
-    result = runner.invoke(app, ["job", "apply", str(out)])
+    result = runner.invoke(app, ["job", "apply", str(out), *extra_args])
     return result, calls
 
 
@@ -3193,8 +3194,8 @@ def test_ctrl_c_before_launch_releases_the_vm(tmp_path, monkeypatch, mock_common
     def install(_self):
         raise KeyboardInterrupt
 
-    def cleanup(self, force_leave_up=False):
-        released.append(force_leave_up)
+    def cleanup(self, leave_up=False):
+        released.append(leave_up)
         self.env.cleanup = Cleanup.RELEASED
 
     result, _calls = _apply_with(
@@ -3222,7 +3223,7 @@ def test_ctrl_c_after_launch_keeps_the_job_recoverable(tmp_path, monkeypatch, mo
     result, _calls = _apply_with(
         monkeypatch, tmp_path, mock_common_state,
         launch=_launch_running, poll=poll,
-        cleanup=lambda self, force_leave_up=False: released.append(True),
+        cleanup=lambda self, leave_up=False: released.append(True),
         detach=lambda self: detached.append(True),
     )
 
@@ -3247,13 +3248,13 @@ def test_a_passed_timeout_cancels_and_releases(tmp_path, monkeypatch, mock_commo
         self.env.supervisor = Supervisor.INTERRUPTED
         self.env.reason = "local supervisor deadline reached before a verdict"
 
-    def cancel_after_deadline(self, _transport, budget, wait=None):
-        calls.append(("cancel", budget))
+    def cancel_after_deadline(self, _transport, passed, requester, wait=None):
+        calls.append(("cancel", passed, requester))
         self.env.workload = Workload.UNKNOWN
         self.env.supervisor = Supervisor.FINISHED
 
-    def cleanup(self, force_leave_up=False):
-        calls.append(("cleanup", force_leave_up))
+    def cleanup(self, leave_up=False):
+        calls.append(("cleanup", leave_up))
         self.env.cleanup = Cleanup.RELEASED
 
     result, _ = _apply_with(
@@ -3264,7 +3265,63 @@ def test_a_passed_timeout_cancels_and_releases(tmp_path, monkeypatch, mock_commo
 
     job = _envelope(result.output)["job"]
     assert calls[0][0] == "cancel" and calls[1] == ("cleanup", False)
+    assert calls[0][2] == "job apply deadline"
+    assert calls[0][1] == "no verdict within 4200s of launch (wall_clock 3600s + 600s)"
     assert job["cleanup"] == "released"
+
+
+def _fake_clock(monkeypatch, start=1000.0):
+    import colab_cli.commands.job as job_command
+
+    clock = {"now": start}
+    monkeypatch.setattr(job_command.time, "time", lambda: clock["now"])
+    return clock
+
+
+def test_the_default_deadline_starts_at_launch(tmp_path, monkeypatch, mock_common_state):
+    """A long install must not eat into the run's wall_clock."""
+    clock = _fake_clock(monkeypatch)
+    seen = {}
+
+    def install(_self):
+        clock["now"] += 3000  # a 50-minute install
+
+    def poll(_self, _transport, deadline):
+        seen["deadline"] = deadline
+
+    result, _ = _apply_with(monkeypatch, tmp_path, mock_common_state, install=install, poll=poll)
+
+    assert result.exit_code in (0, 1), result.output
+    assert seen["deadline"] == 1000.0 + 3000 + 3600 + 600
+
+
+def test_an_explicit_timeout_still_bounds_the_whole_call(tmp_path, monkeypatch, mock_common_state):
+    from colab_cli.job.models import Supervisor
+
+    clock = _fake_clock(monkeypatch)
+    seen = {}
+
+    def install(_self):
+        clock["now"] += 3000
+
+    def poll(self, _transport, deadline):
+        seen["deadline"] = deadline
+        self.env.supervisor = Supervisor.INTERRUPTED
+
+    def cancel_after_deadline(self, _transport, passed, requester, wait=None):
+        seen["cancel"] = (passed, requester)
+        self.env.workload = Workload.UNKNOWN
+        self.env.supervisor = Supervisor.FINISHED
+
+    _apply_with(
+        monkeypatch, tmp_path, mock_common_state, install=install, poll=poll,
+        cancel_after_deadline=cancel_after_deadline, _args=["--timeout", "5000"],
+    )
+
+    assert seen["deadline"] == 1000.0 + 5000
+    assert seen["cancel"] == (
+        "apply's --timeout of 5000s passed before a verdict", "job apply --timeout"
+    )
 
 
 
@@ -3305,7 +3362,7 @@ def test_sigterm_before_launch_releases_the_vm(tmp_path, monkeypatch, mock_commo
     def install(_self):
         os.kill(os.getpid(), signal.SIGTERM)
 
-    def cleanup(self, force_leave_up=False):
+    def cleanup(self, leave_up=False):
         released.append(True)
         self.env.cleanup = Cleanup.RELEASED
 
@@ -3344,7 +3401,7 @@ def test_sigterm_after_launch_hands_off_to_a_detached_poll(
     result, _ = _apply_with(
         monkeypatch, tmp_path, mock_common_state,
         launch=_launch_running, poll=poll,
-        cleanup=lambda self, force_leave_up=False: released.append(True),
+        cleanup=lambda self, leave_up=False: released.append(True),
         detach=lambda self: None,
     )
 
@@ -3588,3 +3645,356 @@ def test_apply_refuses_with_the_plan_errors_before_checking_the_source_lock(
     envelope = json.loads(_clean(result.output).strip().splitlines()[-1])
     assert [d["code"] for d in envelope["diagnostics"]] == ["source_unreadable"]
     assert "no source lock" not in result.output
+
+
+def test_status_poll_cancels_an_orphan_past_its_deadline_and_releases(
+    monkeypatch, mock_common_state
+):
+    import datetime as dt
+
+    store = _persist_running_job(mock_common_state, job_id="overdue")
+    env = store.read_envelope("overdue")
+    env.started_at = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=1000)).isoformat()
+    store.write_envelope(env)
+    events = []
+    cancelled = {
+        "workload": "cancelled", "signal": 15, "signal_name": "SIGTERM",
+        "cancel_intent": {"intent": "cancelled", "by": "job status --poll"},
+    }
+    vm = _RunningVM(events, results=[None, cancelled])
+    _use_vm(monkeypatch, mock_common_state, vm, events)
+
+    result = runner.invoke(app, ["job", "status", "overdue", "--poll"])
+
+    assert result.exit_code == 0, result.output
+    final = store.read_envelope("overdue")
+    assert "write cancel.json" in events
+    assert events.index("write cancel.json") < events.index("unassign")
+    assert final.workload.value == "cancelled"
+    assert final.cleanup.value == "released"
+    assert final.failed_phase.value == "run"
+    assert final.reason.startswith(
+        "no verdict within 660s of launch (wall_clock 60s + 600s); the job's supervisor "
+        "is gone, so job status --poll cancelled it; cancelled by job status --poll"
+    )
+    assert not any(h.startswith("past its deadline: ") for h in final.hints)
+
+
+
+def _orphan_finished(store, job_id, artifacts, leave_up=False, on_offload_fail="leave_up"):
+    from colab_cli.job.models import ArtifactItem, ArtifactResult, Offload
+
+    plan = store.read_plan(job_id)
+    plan.spec.artifacts = [ArtifactItem(path="out/m.pt", url="https://x/m.pt", size_bytes=1)]
+    plan.spec.on_offload_fail = on_offload_fail
+    store.write_plan(plan)
+    env = store.read_envelope(job_id)
+    env.workload = Workload.FAILED
+    env.offload = Offload.FAILED
+    env.artifacts = [ArtifactResult(path="out/m.pt", url_id="u", status=s) for s in artifacts]
+    env.leave_up = leave_up
+    store.write_envelope(env)
+
+
+@pytest.mark.parametrize(
+    "artifacts, leave_up, on_offload_fail, kept",
+    [
+        (["failed"], False, "leave_up", True),
+        (["missing"], False, "leave_up", False),
+        (["failed"], False, "destroy", False),
+        (["missing"], True, "destroy", True),
+    ],
+)
+def test_the_orphan_release_follows_the_same_keep_rule_as_apply(
+    monkeypatch, mock_common_state, artifacts, leave_up, on_offload_fail, kept
+):
+    store = _persist_running_job(mock_common_state, job_id="orphan-keep")
+    _orphan_finished(store, "orphan-keep", artifacts, leave_up, on_offload_fail)
+    events = []
+    vm = _RunningVM(events, results=[None])
+    _use_vm(monkeypatch, mock_common_state, vm, events)
+
+    result = runner.invoke(app, ["job", "status", "orphan-keep"])
+
+    assert result.exit_code == 0, result.output
+    final = store.read_envelope("orphan-keep")
+    if kept:
+        assert "unassign" not in events
+        assert final.cleanup.value == "left_up"
+        assert any("still billing" in h for h in final.hints)
+    else:
+        assert "unassign" in events
+        assert final.cleanup.value == "released"
+
+
+def test_apply_records_leave_up_before_the_first_envelope_write(
+    tmp_path, monkeypatch, mock_common_state
+):
+    from colab_cli.commands.job import _store
+
+    seen = {}
+
+    def provision(self):
+        self._persist()
+        seen["first"] = _store().read_envelope(self.job_id).leave_up
+        from types import SimpleNamespace
+
+        self.session_state = SimpleNamespace(name="phases", url="https://vm", token="x")
+        self.env.endpoint = "m-test"
+
+    _apply_with(monkeypatch, tmp_path, mock_common_state, provision=provision, _args=["--leave-up"])
+
+    assert seen["first"] is True
+
+
+# --------------------------------------------------------------------------
+# Prune keeps what may still matter
+# --------------------------------------------------------------------------
+
+
+def _prune_json(mock_common_state, *args):
+    _json_mode(mock_common_state)
+    result = runner.invoke(app, ["jobs", "prune", *args])
+    assert result.exit_code == 0, result.output
+    return json.loads(_clean(result.output).strip().splitlines()[-1])
+
+
+def test_prune_keeps_a_job_whose_async_apply_left_only_a_log(tmp_path, mock_common_state):
+    from colab_cli.commands.job import _store
+
+    store = _store()
+    for job_id, log in (("failed-early", "[colab] This plan has warnings.\n"), ("preflight", "")):
+        store.job_dir(job_id).mkdir(parents=True)
+        (store.job_dir(job_id) / "apply.log").write_text(log)
+    store.job_dir("plain-plan").mkdir(parents=True)
+
+    payload = _prune_json(mock_common_state)
+
+    assert [r["job_id"] for r in payload["removed"]] == ["plain-plan"]
+    skipped = {r["job_id"]: r["reason"] for r in payload["skipped"]}
+    assert skipped["failed-early"].startswith("apply wrote no envelope; its output is in")
+    assert "an `apply --async` may still be in its preflight" in skipped["preflight"]
+    assert store.job_dir("failed-early").exists() and store.job_dir("preflight").exists()
+    assert not store.job_dir("plain-plan").exists()
+
+
+def test_prune_keeps_a_job_whose_apply_holds_the_lock(tmp_path, mock_common_state):
+    from colab_cli.commands.job import _store
+
+    store = _store()
+    claim = store.claim_apply("claimed", pid=os.getpid(), starttime="1", boot_id="b")
+    try:
+        payload = _prune_json(mock_common_state)
+    finally:
+        claim.release()
+
+    assert payload["removed"] == []
+    assert payload["skipped"] == [
+        {"job_id": "claimed", "reason": "a live `job apply` holds its lock, will not prune"}
+    ]
+
+
+def test_prune_reports_a_deletion_that_failed(tmp_path, mock_common_state, monkeypatch):
+    from colab_cli.commands.job import _store
+    from colab_cli.job.store import JobStore
+
+    store = _store()
+    store.job_dir("stuck").mkdir(parents=True)
+    monkeypatch.setattr(JobStore, "delete_job", lambda self, job_id: "stuck: PermissionError: denied")
+
+    payload = _prune_json(mock_common_state)
+
+    assert payload["removed"] == []
+    assert payload["skipped"] == [
+        {"job_id": "stuck", "reason": "deletion failed: stuck: PermissionError: denied"}
+    ]
+
+
+def test_delete_job_reports_what_stopped_it(tmp_path):
+    from colab_cli.job.store import JobStore
+
+    store = JobStore(tmp_path / "jobs")
+    locked = store.job_dir("locked")
+    (locked / "sub").mkdir(parents=True)
+    (locked / "sub" / "f").write_text("x")
+    (locked / "sub").chmod(0o500)
+    try:
+        failure = store.delete_job("locked")
+    finally:
+        (locked / "sub").chmod(0o700)
+
+    assert failure is not None and "PermissionError" in failure
+    assert store.delete_job("locked") is None
+
+
+# --------------------------------------------------------------------------
+# status and destroy say why
+# --------------------------------------------------------------------------
+
+
+def test_status_says_when_it_did_not_consult_a_left_up_vm(mock_common_state):
+    from colab_cli.commands.job import _store
+    from colab_cli.job.models import Cleanup, JobEnvelope, Supervisor
+
+    _store().write_envelope(
+        JobEnvelope(
+            job_id="kept", phase=Phase.CLEANUP, workload=Workload.SUCCEEDED,
+            offload=Offload.FAILED, cleanup=Cleanup.LEFT_UP, supervisor=Supervisor.FINISHED,
+            session="job-kept", endpoint="m-s-kept",
+        )
+    )
+
+    result = runner.invoke(app, ["job", "status", "kept"])
+
+    assert result.exit_code == 0, result.output
+    out = _clean(result.output)
+    assert "the VM was not consulted: cleanup is already left_up" in out
+    assert "`mighty-colab sessions` shows it" in out
+
+
+def test_an_orphan_without_a_local_session_names_that_as_the_teardown_cause(
+    monkeypatch, mock_common_state
+):
+    store = _persist_running_job(mock_common_state, job_id="sessionless")
+    mock_common_state.store.get.return_value = None
+
+    result = runner.invoke(app, ["job", "status", "sessionless"])
+
+    assert result.exit_code == 1
+    final = store.read_envelope("sessionless")
+    assert final.reason == (
+        "forced teardown because transfer credential deletion could not be confirmed "
+        "(no local session record 'job-session', so the VM could not be reached)"
+    )
+
+
+def test_a_failed_secret_scrub_says_what_the_removal_returned(monkeypatch, mock_common_state):
+    from colab_cli.job.transport import ReadStatus
+
+    store = _persist_running_job(mock_common_state, job_id="scrub")
+    events = []
+    vm = _RunningVM(events, results=[None])
+    vm.remove = lambda _path: ReadStatus.DEGRADED
+    _use_vm(monkeypatch, mock_common_state, vm, events)
+
+    runner.invoke(app, ["job", "status", "scrub"])
+
+    final = store.read_envelope("scrub")
+    assert final.reason.endswith("could not be confirmed (removing it returned DEGRADED)")
+
+
+def test_status_keeps_an_unabsorbable_result_in_the_reason(monkeypatch, mock_common_state):
+    store = _persist_running_job(mock_common_state, job_id="bad-result")
+    events = []
+    vm = _RunningVM(events, results=[{"workload": "succeeded", "exit_code": "nope",
+                                      "schema_version": "2", "cli_version": "c",
+                                      "runtime_payload_version": "sha256:p"}])
+    _use_vm(monkeypatch, mock_common_state, vm, events)
+
+    result = runner.invoke(app, ["job", "status", "bad-result", "--poll"])
+
+    assert result.exit_code == 0, result.output
+    final = store.read_envelope("bad-result")
+    assert final.workload.value == "unknown"
+    assert final.reason.startswith("runner result could not be absorbed (ValidationError")
+    assert "exit_code='nope'" in final.reason
+
+
+def test_destroy_names_why_the_cancel_was_not_confirmed(monkeypatch, mock_common_state):
+    from colab_cli.job.transport import ReadStatus
+
+    store = _persist_running_job(mock_common_state, job_id="cancel-fail")
+    events = []
+    vm = _RunningVM(events, results=[None])
+    vm.write_json = lambda _path, _value: ReadStatus.DEGRADED
+    _use_vm(monkeypatch, mock_common_state, vm, events)
+
+    result = runner.invoke(app, ["job", "destroy", "cancel-fail", "--cancel-only"])
+
+    assert result.exit_code == 1
+    final = store.read_envelope("cancel-fail")
+    assert final.reason == (
+        "cancel intent could not be confirmed (cancel intent not confirmed (DEGRADED)); "
+        "VM left running"
+    )
+
+
+def test_a_keep_alive_respawn_quotes_why_the_daemon_stopped(mock_common_state, monkeypatch):
+    from colab_cli.commands.job import _ensure_keep_alive
+
+    session = MagicMock()
+    session.keep_alive_pid = None
+    session.name = "job-x"
+    mock_common_state.history.get_history.return_value = [
+        {"event_type": "keep_alive_started"},
+        {"event_type": "keep_alive_stopped", "reason": "consecutive_4xx_errors",
+         "last_error": "HTTP 401"},
+    ]
+    monkeypatch.setattr("colab_cli.commands.session.spawn_keep_alive", lambda *a, **k: 4321)
+
+    hint = _ensure_keep_alive(session, mock_common_state)
+
+    assert hint == (
+        "keep-alive had died (stopped: consecutive_4xx_errors, last error HTTP 401); "
+        "respawned as pid 4321"
+    )
+
+
+def test_a_keep_alive_that_cannot_be_respawned_is_a_hint_not_a_crash(mock_common_state, monkeypatch):
+    from colab_cli.commands.job import _ensure_keep_alive
+
+    session = MagicMock()
+    session.keep_alive_pid = None
+    session.name = "job-x"
+    mock_common_state.history.get_history.return_value = [{"event_type": "keep_alive_started"}]
+
+    def fail(*_a, **_k):
+        raise OSError(24, "Too many open files")
+
+    monkeypatch.setattr("colab_cli.commands.session.spawn_keep_alive", fail)
+
+    hint = _ensure_keep_alive(session, mock_common_state)
+
+    assert hint.startswith("keep-alive had died (it logged no stop reason) and could not be respawned (OSError")
+
+
+def test_a_forced_teardown_keeps_the_reason_it_replaces(monkeypatch, mock_common_state):
+    store = _persist_running_job(mock_common_state, job_id="replaced")
+    env = store.read_envelope("replaced")
+    env.reason = "transport failing for 3 polls (last: result.json: ReadTimeout)"
+    store.write_envelope(env)
+    mock_common_state.store.get.return_value = None
+
+    runner.invoke(app, ["job", "status", "replaced"])
+
+    final = store.read_envelope("replaced")
+    assert "before the forced teardown: transport failing for 3 polls (last: result.json: ReadTimeout)" in final.hints
+
+
+
+def test_a_plain_status_reports_an_overdue_orphan_without_cancelling_it(
+    monkeypatch, mock_common_state
+):
+    """Only --poll cancels: a status check must answer in seconds, not wait
+    up to 300 s for a cancelled runner."""
+    import datetime as dt
+
+    store = _persist_running_job(mock_common_state, job_id="overdue-check")
+    env = store.read_envelope("overdue-check")
+    env.started_at = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=1000)).isoformat()
+    store.write_envelope(env)
+    events = []
+    vm = _RunningVM(events, results=[None])
+    _use_vm(monkeypatch, mock_common_state, vm, events)
+
+    result = runner.invoke(app, ["job", "status", "overdue-check"])
+
+    assert result.exit_code == 0, result.output
+    assert "write cancel.json" not in events
+    assert "unassign" not in events
+    final = store.read_envelope("overdue-check")
+    assert any(
+        h.startswith("past its deadline: no verdict within 660s of launch")
+        and "`job status overdue-check --poll` cancels it" in h
+        for h in final.hints
+    ), final.hints

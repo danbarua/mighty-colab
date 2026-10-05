@@ -59,7 +59,8 @@ from colab_cli.job.models import (
 from colab_cli.job import verdict
 from colab_cli.job.store import RUNNER_LOG_FILE, JobStore
 from colab_cli.job.runtime_payload import RUNTIME_PAYLOAD_VERSION
-from colab_cli.job.runtime_payload.redact import describe_error, redact_credentials
+from colab_cli.job.runtime_payload.redact import describe_error, redact_credentials, redact_url
+from colab_cli.job.spec_io import fetch_control_result, url_id
 
 _logger = logging.getLogger(__name__)
 
@@ -310,6 +311,11 @@ class Orchestrator:
         # poll(): whether the runner's own records have ever been read, and
         # since when launch.json has been continuously absent.
         self._runner_seen = False
+        self._watchdog_staleness = WatchdogStaleness()
+        self._runner_log_problem: Optional[str] = None
+        self._last_watchdog_hint: Optional[str] = None
+        # Why removing the transfer credential file was not confirmed.
+        self.secret_cleanup_problem: Optional[str] = None
         self._launch_absent_since: Optional[float] = None
 
     # -- envelope bookkeeping -------------------------------------------
@@ -341,16 +347,11 @@ class Orchestrator:
         before release. Any failure here (including a transport double that
         doesn't implement `read_text`) must never break the verdict poll.
         """
-        try:
-            log_text, log_status = transport.read_text(
-                f"{self.remote_dir}/{RUNNER_LOG_FILE}"
-            )
-            if log_status.name == "OK" and log_text is not None:
-                log_path = self.store.job_dir(self.job_id) / RUNNER_LOG_FILE
-                log_path.parent.mkdir(parents=True, exist_ok=True)
-                log_path.write_text(log_text)
-        except Exception:  # noqa: BLE001 - best-effort, never fatal
-            pass
+        problem = pull_runner_log(transport, self.store, self.job_id)
+        if problem != self._runner_log_problem:
+            if problem is not None:
+                _logger.warning("job %s: runner.log not copied: %s", self.job_id, problem)
+            self._runner_log_problem = problem
 
 
     # -- provision -------------------------------------------------------
@@ -630,9 +631,7 @@ class Orchestrator:
         try:
             runtime.stop()
         except Exception as e:  # noqa: BLE001 - local cleanup must not hide the verdict
-            self.env.hints.append(
-                f"local runtime client close failed ({type(e).__name__})"
-            )
+            self.env.hints.append(f"local runtime client close failed ({describe_error(e)})")
 
     def install(self) -> None:
         """uv first, pip if uv fails; see colab_cli.job.install."""
@@ -901,6 +900,7 @@ class Orchestrator:
         if not self._secret_channel_prepared:
             return True
         if self.session_state is None:
+            self.secret_cleanup_problem = "no session to reach the VM with"
             return False
         secret_path = f"{self.remote_dir}/mighty_runtime/.secrets/transfer.json"
         secret_dir = secret_path.rsplit("/", 1)[0]
@@ -915,25 +915,30 @@ class Orchestrator:
             f"try:\n    os.rmdir({secret_dir!r})\nexcept OSError:\n    pass\n"
             "print('SECRET_CHANNEL_ABSENT=%d' % (not os.path.lexists(p)))\n"
         )
+        kernel_note = "the kernel did not confirm it"
         try:
             outputs = self._execute_code(code, timeout=LAUNCH_TIMEOUT, phase=Phase.CLEANUP)
             kernel_absent = "SECRET_CHANNEL_ABSENT=1" in _outputs_text(outputs)
-        except Exception:  # noqa: BLE001 - use the independent Contents path
-            pass
+        except Exception as error:  # noqa: BLE001 - use the independent Contents path
+            kernel_note = f"the kernel call failed ({describe_error(error)})"
 
         contents_absent = False
+        contents_note = "Contents did not confirm it"
         try:
             from colab_cli.job.transport import ReadStatus
 
             status = self.job_transport().remove(secret_path)
             contents_absent = status in (ReadStatus.OK, ReadStatus.SESSION_LOST)
-        except Exception:  # noqa: BLE001 - kernel proof may still be available
-            pass
-
+            contents_note = f"Contents removal returned {status.name}"
+        except Exception as error:  # noqa: BLE001 - kernel proof may still be available
+            contents_note = f"Contents removal failed ({describe_error(error)})"
 
         removed = kernel_absent or contents_absent
         if removed:
             self._secret_channel_prepared = False
+            self.secret_cleanup_problem = None
+        else:
+            self.secret_cleanup_problem = f"{kernel_note}; {contents_note}"
         return removed
 
     def launch(self, payload_remote_path: str) -> Optional[int]:
@@ -1053,10 +1058,7 @@ class Orchestrator:
             if status.name == "DEGRADED":
                 consecutive_degraded += 1
                 self.env.supervisor = Supervisor.DEGRADED
-                self.env.reason = (
-                    f"transport failing for {consecutive_degraded} polls; "
-                    "the assignment is still listed"
-                )
+                self.env.reason = degraded_reason(transport, consecutive_degraded)
             else:
                 consecutive_degraded = 0
                 self.env.supervisor = Supervisor.RUNNING
@@ -1064,7 +1066,12 @@ class Orchestrator:
                 wd, wd_status = transport.read_json(f"{self.remote_dir}/watchdog.json")
                 if wd_status.name == "OK" and wd:
                     self._runner_seen = True
-                    self.env.hints = [watchdog_hint(wd)]
+                    self._last_watchdog_hint = watchdog_hint(wd)
+                    replace_hint(self.env.hints, WATCHDOG_HINT_PREFIX, self._last_watchdog_hint)
+                    stalled = self._watchdog_staleness.observe(wd)
+                    replace_hint(self.env.hints, WATCHDOG_STALLED_PREFIX, stalled)
+                    if stalled:
+                        self.env.reason = stalled
                     if wd.get("runner_alive") is False:
                         if self._absorb_late_result(transport):
                             return
@@ -1123,7 +1130,11 @@ class Orchestrator:
         # Local deadline reached. The VM's own watchdog owns the kill; the
         # supervisor going home is not itself a verdict.
         self.env.supervisor = Supervisor.INTERRUPTED
-        self.env.reason = "local supervisor deadline reached before a verdict"
+        self.env.reason = "local supervisor deadline reached before a verdict" + (
+            f" (last watchdog read: {self._last_watchdog_hint})"
+            if self._last_watchdog_hint
+            else " (watchdog.json was never read)"
+        )
         self.env.retry_class = RetryClass.RETRY_SAME
         self._persist()
 
@@ -1138,45 +1149,29 @@ class Orchestrator:
         return False
 
     def cancel_after_deadline(
-        self, transport, budget: float, wait: float = RUNNER_STOP_WAIT_SECONDS
+        self,
+        transport,
+        passed: str,
+        requester: str,
+        wait: float = RUNNER_STOP_WAIT_SECONDS,
     ) -> None:
-        """apply's --timeout passed with no verdict: cancel the runner, wait
-        up to `wait` seconds for its result, and end the job so cleanup
-        releases the VM. Reaching the deadline is a failure of the run to
-        produce a verdict in time, whatever the runner reports after."""
-        timed_out = f"apply's --timeout of {budget:.0f}s passed before a verdict"
-        requester = "job apply --timeout"
-        try:
-            intent = transport.write_json(
-                f"{self.remote_dir}/cancel.json",
-                {"intent": "cancelled", "by": requester, "at": _now()},
-            )
-            intent_note = (
-                "cancel requested"
-                if getattr(intent, "name", "") == "OK"
-                else f"cancel intent not confirmed ({getattr(intent, 'name', intent)})"
-            )
-        except Exception as error:  # noqa: BLE001 - release must still happen
-            intent_note = f"cancel intent not written ({describe_error(error)})"
+        """A deadline passed with no verdict: cancel the runner, wait up to
+        `wait` seconds for its result, and end the job so cleanup releases
+        the VM. Reaching the deadline is a failure of the run to produce a
+        verdict in time, whatever the runner reports after. `passed` says
+        which deadline, `requester` names the canceller in cancel.json."""
+        note, confirmed = request_cancel(transport, self.job_id, requester)
         kind, outcome = await_runner_result(transport, self.job_id, wait)
         if kind == "result":
             self._absorb_or_keep(outcome, transport)
             self.env.record_failure(Phase.RUN)
-            # A result cancelled by this request already says so.
-            received = verdict.cancel_source(outcome.get("cancel_intent")) == requester
-            self.env.reason = "; ".join(
-                part
-                for part in (
-                    timed_out,
-                    None if received else intent_note,
-                    self.env.reason,
-                )
-                if part
+            self.env.reason = deadline_reason(
+                passed, note, confirmed, requester, outcome, self.env.reason
             )
             if self.env.retry_class is None:
                 self.env.retry_class = RetryClass.RETRY_SAME
         else:
-            self._finish_without_result(f"{timed_out}; {intent_note}; {outcome}", transport)
+            self._finish_without_result(f"{passed}; {note}; {outcome}", transport)
         self.env.hints.append(
             "if the work needs longer, raise apply's --timeout or budgets.wall_clock"
         )
@@ -1208,9 +1203,18 @@ class Orchestrator:
         return (datetime.datetime.now(datetime.timezone.utc) - started).total_seconds()
 
     def _finish_without_result(self, reason: str, transport) -> None:
-        """No result.json will arrive. The verdict is unknown; nothing was
+        """No result.json will arrive from the VM. With `control.result`
+        configured, the runner may have PUT its result there: absorb it if
+        it is terminal. Otherwise the verdict is unknown; nothing was
         offloaded by the runner, so offload is terminal too, and cleanup
         can release the VM."""
+        recovered = self._recover_control_result()
+        if recovered is not None:
+            self._absorb_or_keep(recovered, transport)
+            self.env.hints.append(
+                f"result read from control.result after: {reason}"
+            )
+            return
         self.env.workload = Workload.UNKNOWN
         if not self.env.offload.terminal:
             self.env.offload = (
@@ -1223,6 +1227,27 @@ class Orchestrator:
         self.env.record_failure(Phase.RUN)
         self._pull_runner_log(transport)
         self._persist()
+
+    def _recover_control_result(self) -> Optional[dict]:
+        """The terminal result the runner PUT to `control.result`, or None,
+        with a hint saying why when the read fails."""
+        channel = getattr(self.spec.control, "result", None)
+        if channel is None or not channel.get_url:
+            return None
+        try:
+            result = fetch_control_result(channel.get_url)
+        except Exception as error:  # noqa: BLE001 - recorded; the verdict stays unknown
+            self.env.hints.append(
+                "control.result could not be read: "
+                + redact_url(describe_error(error), channel.get_url, url_id(channel.get_url))
+            )
+            return None
+        if result.get("workload") not in {w.value for w in Workload if w.terminal}:
+            self.env.hints.append(
+                f"control.result holds no terminal result (workload={result.get('workload')!r})"
+            )
+            return None
+        return result
 
     @staticmethod
     def absorb_provenance(env: JobEnvelope, result: dict) -> None:
@@ -1258,7 +1283,10 @@ class Orchestrator:
             try:
                 env.phase = Phase(remote_phase)
             except ValueError:
-                pass
+                env.hints.append(
+                    f"the runner reported phase {remote_phase!r}, which this CLI "
+                    "does not know; phase left as it was"
+                )
 
         Orchestrator.absorb_provenance(env, result)
 
@@ -1339,14 +1367,12 @@ class Orchestrator:
 
     # -- cleanup -----------------------------------------------------------
 
-    def cleanup(self, force_leave_up: bool = False) -> None:
-        """Always runs. Records its own outcome; never edits the verdict."""
+    def cleanup(self, leave_up: bool = False) -> None:
+        """Always runs. Records its own outcome; never edits the verdict.
+        `leave_up` is the caller's decision to keep the VM."""
         self._close_runtime()
         self._set_phase(Phase.CLEANUP)
-        leave = force_leave_up or (
-            self.env.offload is Offload.FAILED
-            and self.spec.on_offload_fail == "leave_up"
-        )
+        leave = leave_up
         if not self.env.endpoint:
             self._stop_keep_alive()
             self._drop_session()
@@ -1354,43 +1380,7 @@ class Orchestrator:
             self._persist()
             return
         if leave:
-            # A surviving descendant only matters while the VM lives: an
-            # `unassign` takes the whole machine, escapee included. But if
-            # we are deliberately leaving it up, cleanup did not do its job
-            # -- there is now an unbounded GPU consumer the caller never
-            # asked for, on a machine that keeps billing. That is a cleanup
-            # failure in substance, and recording it as one is what makes
-            # `ok` false; a hint an agent can skip past is not a guard.
-            if self.env.surviving_descendants:
-                self.env.cleanup = Cleanup.FAILED
-                self.env.record_failure(Phase.CLEANUP)
-                # `cleanup = FAILED` is on its own enough to make `ok`
-                # false, so the escapee never needs to overwrite the
-                # workload's verdict to be actionable. Writing `reason` or
-                # `retry_class` unconditionally here would replace
-                # "a required artifact was not produced" / `fix_code` with
-                # `fix_human`, and send an agent to a human about a broken
-                # script. Fill them only when the workload left them empty;
-                # the detail always lands in `hints`.
-                self.env.hints.append(
-                    f"cleanup: VM left up with pids "
-                    f"{self.env.surviving_descendants} still holding its "
-                    f"resources; `mighty-colab job destroy {self.job_id}` "
-                    "releases the VM and everything on it"
-                )
-                if self.env.reason is None:
-                    self.env.reason = (
-                        f"VM left up with {len(self.env.surviving_descendants)} "
-                        "surviving descendant(s) still holding its resources"
-                    )
-                if self.env.retry_class is None:
-                    self.env.retry_class = RetryClass.FIX_HUMAN
-            else:
-                self.env.cleanup = Cleanup.LEFT_UP
-                self.env.hints.append(
-                    f"VM left running deliberately and is still billing: "
-                    f"`mighty-colab job destroy {self.job_id}` when done"
-                )
+            record_vm_kept(self.env, self.job_id)
             self._persist()
             return
         # Last chance: whatever explains this run is on the VM, and the VM
@@ -1423,8 +1413,11 @@ class Orchestrator:
             return
         try:
             self.session_store.remove(self.session_state.name)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:  # noqa: BLE001 - the release itself is recorded
+            self.env.hints.append(
+                f"local session record {self.session_state.name} not removed "
+                f"({describe_error(e)}); `mighty-colab sessions` may still list it"
+            )
 
 
 
@@ -1479,6 +1472,52 @@ def _extract_tagged(text: str, tag: str, raw: bool = False):
             except json.JSONDecodeError:
                 return None
     return None
+
+
+def keep_vm(env: JobEnvelope, spec: Optional[JobSpec], *, secret_removed: bool) -> bool:
+    """Whether to keep the VM after the job: `--leave-up` was given, or an
+    artifact upload was attempted and failed under `on_offload_fail:
+    leave_up`, so the file is on the VM to rescue. A required artifact that
+    was never produced also fails offload, but leaves nothing to rescue.
+    Never when the transfer credential's deletion is unconfirmed: the
+    release removes it with the VM. `spec` is None when the plan cannot be
+    read; then only `--leave-up` counts."""
+    if not secret_removed:
+        return False
+    upload_failed = spec is not None and spec.on_offload_fail == "leave_up" and any(
+        artifact.status == "failed" for artifact in env.artifacts
+    )
+    return env.leave_up or upload_failed
+
+
+def record_vm_kept(env: JobEnvelope, job_id: str) -> None:
+    """Record the VM kept up on purpose. A surviving descendant on it is a
+    cleanup failure: an unbounded consumer nobody asked for, on a machine
+    that keeps billing."""
+    if env.surviving_descendants:
+        env.cleanup = Cleanup.FAILED
+        env.record_failure(Phase.CLEANUP)
+        # `cleanup = FAILED` alone makes `ok` false; the workload's reason
+        # and retry class are filled only when it left them empty, so a
+        # broken script is not sent to a human.
+        env.hints.append(
+            f"cleanup: VM left up with pids {env.surviving_descendants} still "
+            f"holding its resources; `mighty-colab job destroy {job_id}` "
+            "releases the VM and everything on it"
+        )
+        if env.reason is None:
+            env.reason = (
+                f"VM left up with {len(env.surviving_descendants)} "
+                "surviving descendant(s) still holding its resources"
+            )
+        if env.retry_class is None:
+            env.retry_class = RetryClass.FIX_HUMAN
+    else:
+        env.cleanup = Cleanup.LEFT_UP
+        env.hints.append(
+            f"VM left running deliberately and is still billing: "
+            f"`mighty-colab job destroy {job_id}` when done"
+        )
 
 
 def release_assignment(client, endpoint: str) -> Tuple[Cleanup, Optional[str]]:
@@ -1552,19 +1591,143 @@ def observe_remote(transport, job_id: str):
         or not isinstance(starttime, str)
         or not isinstance(boot_id, str)
     ):
-        return "degraded", None
+        return "launch_invalid", launch
     watchdog, watchdog_status = transport.read_json(
         f"/content/jobs/{job_id}/watchdog.json"
     )
     if watchdog_status.name == "SESSION_LOST":
         return "session_lost", None
-    if (
-        watchdog_status.name == "OK"
-        and watchdog is not None
-        and watchdog.get("runner_alive") is False
-    ):
-        return "runner_dead", launch
-    return "runner_alive", launch
+    record = watchdog if watchdog_status.name == "OK" and watchdog else None
+    if record is not None and record.get("runner_alive") is False:
+        return "runner_dead", record
+    return "runner_alive", record
+
+
+# A run's local deadline, after launch: its wall_clock plus this margin
+# for the runner's own escalation, offload and result write.
+RUN_DEADLINE_MARGIN_SECONDS = 600
+
+
+def run_deadline_seconds(spec: JobSpec) -> int:
+    return spec.budgets.wall_clock + RUN_DEADLINE_MARGIN_SECONDS
+
+
+# A healthy watchdog rewrites watchdog.json every 30 seconds.
+WATCHDOG_STALE_SECONDS = 300
+WATCHDOG_HINT_PREFIX = "watchdog: "
+WATCHDOG_STALLED_PREFIX = "watchdog stalled: "
+
+
+class WatchdogStaleness:
+    """Whether watchdog.json has stopped changing. Compares successive `ts`
+    values for equality and times the gap with this machine's monotonic
+    clock: the VM's clock is never compared with this one. Only
+    successful reads count."""
+
+    def __init__(self, clock: Optional[Callable[[], float]] = None) -> None:
+        self._clock = clock or (lambda: time.monotonic())
+        self._ts = None
+        self._since: Optional[float] = None
+
+    def observe(self, record: dict) -> Optional[str]:
+        """The stall, in words, when `ts` has not changed for
+        WATCHDOG_STALE_SECONDS; otherwise None."""
+        ts = record.get("ts")
+        now = self._clock()
+        if self._since is None or ts != self._ts:
+            self._ts, self._since = ts, now
+            return None
+        unchanged = now - self._since
+        if unchanged < WATCHDOG_STALE_SECONDS:
+            return None
+        return (
+            f"watchdog.json has not changed for {unchanged:.0f}s (ts={ts}): the "
+            "watchdog has stopped, or cannot write its record (for example a "
+            "full disk), so whether the runner is alive is unknown"
+        )
+
+
+def degraded_reason(transport, polls: Optional[int] = None) -> str:
+    """Why reading the VM is failing: the transport's last recorded
+    problem, and what the last assignment listing showed."""
+    problem = getattr(transport, "last_problem", None)
+    listing_note = getattr(transport, "listing_note", None)
+    listing = listing_note() if callable(listing_note) else None
+    text = (
+        f"transport failing for {polls} polls" if polls is not None else "transport failing"
+    )
+    if isinstance(problem, str):
+        text += f" (last: {problem})"
+    if isinstance(listing, str):
+        text += f"; {listing}"
+    return text
+
+
+def pull_runner_log(transport, store: JobStore, job_id: str) -> Optional[str]:
+    """Copy the VM's runner.log to the local job directory. Returns why it
+    was not copied, or None. Never raises: a poll must not break on it."""
+    try:
+        text, status = transport.read_text(f"/content/jobs/{job_id}/{RUNNER_LOG_FILE}")
+    except Exception as error:  # noqa: BLE001 - reported to the caller
+        return describe_error(error)
+    if status.name == "NOT_FOUND":
+        return None
+    if status.name != "OK" or text is None:
+        problem = getattr(transport, "last_problem", None)
+        return f"read {status.name}" + (f" ({problem})" if isinstance(problem, str) else "")
+    try:
+        path = store.job_dir(job_id) / RUNNER_LOG_FILE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    except OSError as error:
+        return f"local write failed ({describe_error(error)})"
+    return None
+
+
+def replace_hint(hints: List[str], prefix: str, text: Optional[str]) -> None:
+    """Replace the hint starting with `prefix` in place (or drop it when
+    `text` is None), leaving every other hint as it was."""
+    kept = [h for h in hints if not h.startswith(prefix)]
+    if text is not None:
+        kept.append(prefix + text)
+    hints[:] = kept
+
+
+def request_cancel(transport, job_id: str, requester: str) -> Tuple[str, bool]:
+    """Write the cancel intent. Returns a note saying what happened and
+    whether the write was confirmed."""
+    try:
+        intent = transport.write_json(
+            f"/content/jobs/{job_id}/cancel.json",
+            {"intent": "cancelled", "by": requester, "at": _now()},
+        )
+    except Exception as error:  # noqa: BLE001 - release must still happen
+        return f"cancel intent not written ({describe_error(error)})", False
+    if getattr(intent, "name", "") == "OK":
+        return "cancel requested", True
+    return f"cancel intent not confirmed ({getattr(intent, 'name', intent)})", False
+
+
+def deadline_reason(
+    passed: str,
+    note: str,
+    confirmed: bool,
+    requester: str,
+    result: Optional[dict],
+    absorbed_reason: Optional[str],
+) -> str:
+    """The reason after a deadline cancel that got a result: what passed,
+    the cancel note unless the result shows this cancel arrived, and the
+    result's own reason."""
+    received = (
+        result is not None
+        and verdict.cancel_source(result.get("cancel_intent")) == requester
+    )
+    return "; ".join(
+        part
+        for part in (passed, None if (received and confirmed) else note, absorbed_reason)
+        if part
+    )
 
 
 def watchdog_hint(wd: dict) -> str:
@@ -1594,6 +1757,7 @@ def await_runner_result(transport, job_id: str, wait: int):
     started, the assignment is gone, or reading the VM failed.
     """
     polls = math.ceil(wait / RUNNER_RESULT_POLL_SECONDS) if wait > 0 else 0
+    unreadable = 0
     for _ in range(polls):
         time.sleep(RUNNER_RESULT_POLL_SECONDS)
         try:
@@ -1608,6 +1772,13 @@ def await_runner_result(transport, job_id: str, wait: int):
             return None, "the runner never started (no launch.json)"
         if kind == "session_lost":
             return None, "the assignment disappeared while waiting for the runner"
+        if kind in ("degraded", "launch_invalid"):
+            unreadable += 1
+    if polls and unreadable == polls:
+        return None, (
+            f"no result.json could be read within {wait}s of the cancel request: "
+            f"every one of {polls} reads of the runner's records failed"
+        )
     return None, f"the runner wrote no result.json within {wait}s of the cancel request"
 
 

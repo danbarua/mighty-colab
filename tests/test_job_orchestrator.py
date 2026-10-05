@@ -37,6 +37,7 @@ import requests
 from colab_cli.auto_update import get_app_version
 from colab_cli.job.models import (
     Accelerator,
+    ArtifactResult,
     ArtifactItem,
     Budgets,
     Cleanup,
@@ -1115,7 +1116,7 @@ def test_leave_up_records_the_endpoint_and_a_destroy_hint(tmp_path):
     orch = _orch(tmp_path, client=client)
     orch.env.endpoint = "m-s-abc"
 
-    orch.cleanup(force_leave_up=True)
+    orch.cleanup(leave_up=True)
 
     assert orch.env.cleanup is Cleanup.LEFT_UP
     client.unassign.assert_not_called()
@@ -1128,7 +1129,7 @@ def test_cleanup_closes_the_kernel_client_when_the_vm_is_left_up(tmp_path):
     orch._runtime_handle()
     orch.env.endpoint = "m-s-abc"
 
-    orch.cleanup(force_leave_up=True)
+    orch.cleanup(leave_up=True)
 
     runtime.stop.assert_called_once_with()
 def test_cleanup_stops_keep_alive_before_release(tmp_path, monkeypatch):
@@ -1165,7 +1166,7 @@ def test_leave_up_preserves_keep_alive(tmp_path, monkeypatch):
         name="job-unit-job", keep_alive_pid=4242
     )
 
-    orch.cleanup(force_leave_up=True)
+    orch.cleanup(leave_up=True)
 
     assert killed == []
     client.unassign.assert_not_called()
@@ -1483,7 +1484,7 @@ def test_cleanup_does_not_copy_records_when_the_vm_is_left_up(tmp_path):
     orch = _orch(tmp_path, transport_factory=lambda _s: transport)
     orch.env.endpoint = "m-s-abc"
 
-    orch.cleanup(force_leave_up=True)
+    orch.cleanup(leave_up=True)
 
     assert events == []
 
@@ -1783,7 +1784,7 @@ def test_poll_does_not_end_the_job_when_liveness_is_unknown(tmp_path):
     assert orch.env.workload is not Workload.UNKNOWN
     assert orch.env.supervisor is Supervisor.INTERRUPTED
     assert orch.env.hints == [
-        "t=95s remaining=505s gpu=none (nvidia-smi exited 9: Unknown Error) "
+        "watchdog: t=95s remaining=505s gpu=none (nvidia-smi exited 9: Unknown Error) "
         "disk_free=None runner_alive=None (launch.json unreadable: JSONDecodeError: x)"
     ]
 
@@ -2245,7 +2246,9 @@ def test_a_passed_deadline_cancels_the_runner_and_keeps_its_result(tmp_path, mon
         ]
     )
 
-    orch.cancel_after_deadline(transport, budget=900)
+    orch.cancel_after_deadline(
+        transport, "apply's --timeout of 900s passed before a verdict", "job apply --timeout"
+    )
 
     path, intent = transport.written[0]
     assert path.endswith("/cancel.json") and intent["by"] == "job apply --timeout"
@@ -2269,7 +2272,9 @@ def test_a_passed_deadline_with_a_result_that_finished_first_keeps_the_cancel_no
     orch.env.supervisor = Supervisor.INTERRUPTED
     transport = _cancel_transport([None, {"workload": "succeeded", "exit_code": 0}])
 
-    orch.cancel_after_deadline(transport, budget=900)
+    orch.cancel_after_deadline(
+        transport, "apply's --timeout of 900s passed before a verdict", "job apply --timeout"
+    )
 
     assert orch.env.reason == (
         "apply's --timeout of 900s passed before a verdict; cancel requested"
@@ -2283,7 +2288,10 @@ def test_a_passed_deadline_without_a_result_still_ends_the_job(tmp_path, monkeyp
     orch.env.supervisor = Supervisor.INTERRUPTED
     transport = _cancel_transport([None])
 
-    orch.cancel_after_deadline(transport, budget=900, wait=10)
+    orch.cancel_after_deadline(
+        transport, "apply's --timeout of 900s passed before a verdict",
+        "job apply --timeout", wait=10,
+    )
 
     assert orch.env.workload is Workload.UNKNOWN
     assert orch.env.supervisor is Supervisor.FINISHED
@@ -2511,3 +2519,217 @@ def test_a_long_json_assign_body_says_how_much_was_cut(tmp_path):
         orch.provision()
 
     assert orch.env.provision_attempts[0].body.endswith(" [... 209 characters omitted]")
+
+
+# -- leave_up keeps the VM only for a failed upload --------------------------
+
+
+def _artifact_orch(tmp_path, client, on_offload_fail="leave_up"):
+    spec = _spec(
+        artifacts=[ArtifactItem(path="/content/out/model.pt", url="https://x/m.pt")],
+        on_offload_fail=on_offload_fail,
+    )
+    orch = _orch(tmp_path, spec=spec, client=client)
+    orch.env.endpoint = "m-s-abc"
+    return orch
+
+
+def test_a_crash_before_writing_a_required_artifact_releases_the_vm(tmp_path):
+    """Nothing was produced, so nothing on the VM needs rescuing; its
+    records are copied off before release."""
+    client = MagicMock()
+    orch = _artifact_orch(tmp_path, client)
+    orch._absorb_result(
+        {
+            "workload": "failed",
+            "exit_code": 1,
+            "exception": {"type": "ValueError", "message": "bad", "traceback": ""},
+            "artifacts": [{"path": "/content/out/model.pt", "url_id": "https://x/m.pt#1",
+                           "status": "missing"}],
+        }
+    )
+
+    assert orch.env.offload is Offload.FAILED
+    assert orch.env.retry_class is RetryClass.FIX_CODE
+    from colab_cli.job.orchestrator import keep_vm
+
+    assert keep_vm(orch.env, orch.spec, secret_removed=True) is False
+    orch.cleanup(leave_up=False)
+
+    client.unassign.assert_called_once_with("m-s-abc")
+    assert orch.env.cleanup is Cleanup.RELEASED
+
+
+def test_a_failed_upload_keeps_the_vm_under_leave_up(tmp_path):
+    orch = _artifact_orch(tmp_path, MagicMock())
+    orch._absorb_result(
+        {
+            "workload": "succeeded",
+            "exit_code": 0,
+            "artifacts": [{"path": "/content/out/model.pt", "url_id": "https://x/m.pt#1",
+                           "status": "failed",
+                           "error": {"exception": "HTTPStatusError", "reason": "HTTP 413",
+                                     "http_status": 413, "category": "http"}}],
+        }
+    )
+
+    from colab_cli.job.orchestrator import keep_vm
+
+    assert keep_vm(orch.env, orch.spec, secret_removed=True) is True
+    # An unconfirmed credential deletion releases the VM whatever the policy.
+    assert keep_vm(orch.env, orch.spec, secret_removed=False) is False
+
+
+def test_on_offload_fail_destroy_never_keeps_the_vm(tmp_path):
+    orch = _artifact_orch(tmp_path, MagicMock(), on_offload_fail="destroy")
+    orch.env.artifacts = [ArtifactResult(path="/content/out/model.pt", url_id="u", status="failed")]
+
+    from colab_cli.job.orchestrator import keep_vm
+
+    assert keep_vm(orch.env, orch.spec, secret_removed=True) is False
+
+
+def test_cleanup_releases_when_told_to_even_after_a_failed_upload(tmp_path):
+    """The caller decides: apply overrides leave_up when the credential
+    file's deletion was not confirmed, and cleanup must not keep the VM
+    on its own."""
+    client = MagicMock()
+    orch = _artifact_orch(tmp_path, client)
+    orch.env.offload = Offload.FAILED
+    orch.env.artifacts = [ArtifactResult(path="/content/out/model.pt", url_id="u", status="failed")]
+
+    orch.cleanup(leave_up=False)
+
+    client.unassign.assert_called_once_with("m-s-abc")
+    assert orch.env.cleanup is Cleanup.RELEASED
+
+
+# -- a watchdog that stops writing ---------------------------------------------
+
+
+def test_a_watchdog_that_stops_writing_is_reported_as_stalled(tmp_path, monkeypatch):
+    clock = iter(range(0, 10**6, 100))
+    monkeypatch.setattr("colab_cli.job.orchestrator.time.monotonic", lambda: float(next(clock)))
+    orch = _orch(tmp_path)
+    orch.env.hints = ["verified device=None source=1 input=0 output=0 free=9"]
+    transport = _poll_transport(
+        {"watchdog.json": [{"runner_alive": True, "ts": 5.0, "elapsed": 30, "remaining": 30}]}
+    )
+
+    orch.poll(transport, deadline=time.time() + 0.3, interval=0)
+
+    stalled = [h for h in orch.env.hints if h.startswith("watchdog stalled: ")]
+    assert len(stalled) == 1
+    assert "watchdog.json has not changed for" in stalled[0]
+    assert "(ts=5.0)" in stalled[0]
+    # Earlier hints survive the poll; the telemetry line is replaced in place.
+    assert orch.env.hints[0].startswith("verified device=")
+    assert sum(h.startswith("watchdog: ") for h in orch.env.hints) == 1
+
+
+def test_a_changing_watchdog_is_not_stalled():
+    from colab_cli.job.orchestrator import WatchdogStaleness
+
+    ticks = iter([0.0, 400.0, 800.0])
+    tracker = WatchdogStaleness(clock=lambda: next(ticks))
+    assert tracker.observe({"ts": 1.0}) is None
+    assert tracker.observe({"ts": 31.0}) is None
+    assert tracker.observe({"ts": 61.0}) is None
+
+
+
+def test_the_leave_up_flag_keeps_the_vm_and_an_unknown_plan_counts_only_it(tmp_path):
+    from colab_cli.job.orchestrator import keep_vm
+
+    orch = _artifact_orch(tmp_path, MagicMock())
+    orch.env.artifacts = [ArtifactResult(path="/content/out/model.pt", url_id="u", status="failed")]
+
+    assert keep_vm(orch.env, None, secret_removed=True) is False
+    orch.env.leave_up = True
+    assert keep_vm(orch.env, None, secret_removed=True) is True
+    assert keep_vm(orch.env, orch.spec, secret_removed=False) is False
+    assert orch.env.model_dump(mode="json")["leave_up"] is True
+    orch.env.leave_up = False
+    assert "leave_up" not in orch.env.model_dump(mode="json")
+
+
+def test_an_unconfirmed_secret_cleanup_says_why(tmp_path):
+    from colab_cli.job.transport import ReadStatus
+
+    orch = _orch(tmp_path)
+    orch._secret_channel_prepared = True
+    orch.session_state = SimpleNamespace(url="https://u", token="t", name="s", endpoint="e")
+    orch._execute_code = MagicMock(side_effect=RuntimeError("Connection was lost."))
+    transport = MagicMock()
+    transport.remove.return_value = ReadStatus.DEGRADED
+    orch._job_transport = transport
+
+    assert orch.cleanup_secret_channel() is False
+    assert orch.secret_cleanup_problem == (
+        "the kernel call failed (RuntimeError: Connection was lost.); "
+        "Contents removal returned DEGRADED"
+    )
+
+
+def test_a_lost_vm_with_a_control_result_is_absorbed_not_unknown(tmp_path, monkeypatch):
+    spec = _spec(
+        control=Control(result=ControlChannel(put_url="https://x/r?sig=a", get_url="https://x/r?sig=b"))
+    )
+    orch = _orch(tmp_path, spec=spec)
+    monkeypatch.setattr(
+        "colab_cli.job.orchestrator.fetch_control_result",
+        lambda url: {"workload": "succeeded", "exit_code": 0},
+    )
+    transport = _poll_transport({})
+
+    orch._finish_without_result("the assignment is gone from the server", transport)
+
+    assert orch.env.workload is Workload.SUCCEEDED
+    assert "result read from control.result after: the assignment is gone from the server" in orch.env.hints
+
+
+def test_an_unreadable_control_result_says_why_without_the_signature(tmp_path, monkeypatch):
+    import urllib.error
+
+    get = "https://x/r?X-Goog-Signature=SENTINEL"
+    spec = _spec(control=Control(result=ControlChannel(put_url="https://x/r?sig=a", get_url=get)))
+    orch = _orch(tmp_path, spec=spec)
+
+    def forbidden(url):
+        raise urllib.error.HTTPError(url, 403, "Forbidden", {}, None)
+
+    monkeypatch.setattr("colab_cli.job.orchestrator.fetch_control_result", forbidden)
+
+    orch._finish_without_result("the runner is dead", _poll_transport({}))
+
+    assert orch.env.workload is Workload.UNKNOWN
+    [hint] = [h for h in orch.env.hints if h.startswith("control.result could not be read")]
+    assert "HTTP Error 403: Forbidden" in hint
+    assert "SENTINEL" not in hint
+
+
+def test_an_unknown_remote_phase_is_a_hint(tmp_path):
+    orch = _orch(tmp_path)
+    orch._absorb_result({"workload": "succeeded", "exit_code": 0, "phase": "teleport"})
+
+    assert any("the runner reported phase 'teleport'" in h for h in orch.env.hints)
+
+
+def test_the_write_that_finishes_a_job_appends_its_outcome_once(tmp_path):
+    store = JobStore(tmp_path / "jobs")
+    env = JobEnvelope(job_id="done-job", workload=Workload.FAILED, offload=Offload.NOT_REQUIRED,
+                      cleanup=Cleanup.PENDING, supervisor=Supervisor.FINISHED,
+                      retry_class=RetryClass.FIX_CODE, reason="the workload exited 1: ValueError: x")
+    env.record_failure(Phase.RUN)
+    store.write_envelope(env)
+    env.cleanup = Cleanup.RELEASED
+    store.write_envelope(env)
+    store.write_envelope(env)
+
+    events = [json.loads(line) for line in (store.job_dir("done-job") / "events.jsonl").read_text().splitlines()]
+    outcomes = [e for e in events if e.get("event") == "outcome"]
+    assert len(outcomes) == 1
+    assert {k: outcomes[0][k] for k in ("workload", "cleanup", "failed_phase", "retry_class", "reason")} == {
+        "workload": "failed", "cleanup": "released", "failed_phase": "run",
+        "retry_class": "fix_code", "reason": "the workload exited 1: ValueError: x",
+    }

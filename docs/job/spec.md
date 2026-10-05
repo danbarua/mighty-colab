@@ -82,7 +82,7 @@ Common optional fields. Defaults apply when you omit them.
 | `retry.mode` | `recreate` | Must stay `recreate`. |
 | `retry.budget_seconds` | `14400` | Used to check control-URL expiry. It does not run a retry loop. |
 | `on_run_fail` | `offload_anyway` | Must stay this value. `skip` is a plan error. |
-| `on_offload_fail` | `leave_up` | `leave_up` or `destroy`. |
+| `on_offload_fail` | `leave_up` | `leave_up` or `destroy`. `leave_up` keeps the VM only when an artifact upload was attempted and failed; a required artifact that was never produced fails offload but releases the VM. |
 | `ignore_warnings` | `false` | `apply` refuses plan warnings unless this is `true`. |
 
 Accepted accelerator names: `T4`, `L4`, `G4`, `H100`, `A100`, `v5e1`, `v6e1`.
