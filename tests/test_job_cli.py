@@ -3744,3 +3744,83 @@ def test_apply_records_leave_up_before_the_first_envelope_write(
     _apply_with(monkeypatch, tmp_path, mock_common_state, provision=provision, _args=["--leave-up"])
 
     assert seen["first"] is True
+
+
+# --------------------------------------------------------------------------
+# Prune keeps what may still matter
+# --------------------------------------------------------------------------
+
+
+def _prune_json(mock_common_state, *args):
+    _json_mode(mock_common_state)
+    result = runner.invoke(app, ["jobs", "prune", *args])
+    assert result.exit_code == 0, result.output
+    return json.loads(_clean(result.output).strip().splitlines()[-1])
+
+
+def test_prune_keeps_a_job_whose_async_apply_left_only_a_log(tmp_path, mock_common_state):
+    from colab_cli.commands.job import _store
+
+    store = _store()
+    for job_id, log in (("failed-early", "[colab] This plan has warnings.\n"), ("preflight", "")):
+        store.job_dir(job_id).mkdir(parents=True)
+        (store.job_dir(job_id) / "apply.log").write_text(log)
+    store.job_dir("plain-plan").mkdir(parents=True)
+
+    payload = _prune_json(mock_common_state)
+
+    assert [r["job_id"] for r in payload["removed"]] == ["plain-plan"]
+    skipped = {r["job_id"]: r["reason"] for r in payload["skipped"]}
+    assert skipped["failed-early"].startswith("apply wrote no envelope; its output is in")
+    assert "an `apply --async` may still be in its preflight" in skipped["preflight"]
+    assert store.job_dir("failed-early").exists() and store.job_dir("preflight").exists()
+    assert not store.job_dir("plain-plan").exists()
+
+
+def test_prune_keeps_a_job_whose_apply_holds_the_lock(tmp_path, mock_common_state):
+    from colab_cli.commands.job import _store
+
+    store = _store()
+    claim = store.claim_apply("claimed", pid=os.getpid(), starttime="1", boot_id="b")
+    try:
+        payload = _prune_json(mock_common_state)
+    finally:
+        claim.release()
+
+    assert payload["removed"] == []
+    assert payload["skipped"] == [
+        {"job_id": "claimed", "reason": "a live `job apply` holds its lock, will not prune"}
+    ]
+
+
+def test_prune_reports_a_deletion_that_failed(tmp_path, mock_common_state, monkeypatch):
+    from colab_cli.commands.job import _store
+    from colab_cli.job.store import JobStore
+
+    store = _store()
+    store.job_dir("stuck").mkdir(parents=True)
+    monkeypatch.setattr(JobStore, "delete_job", lambda self, job_id: "stuck: PermissionError: denied")
+
+    payload = _prune_json(mock_common_state)
+
+    assert payload["removed"] == []
+    assert payload["skipped"] == [
+        {"job_id": "stuck", "reason": "deletion failed: stuck: PermissionError: denied"}
+    ]
+
+
+def test_delete_job_reports_what_stopped_it(tmp_path):
+    from colab_cli.job.store import JobStore
+
+    store = JobStore(tmp_path / "jobs")
+    locked = store.job_dir("locked")
+    (locked / "sub").mkdir(parents=True)
+    (locked / "sub" / "f").write_text("x")
+    (locked / "sub").chmod(0o500)
+    try:
+        failure = store.delete_job("locked")
+    finally:
+        (locked / "sub").chmod(0o700)
+
+    assert failure is not None and "PermissionError" in failure
+    assert store.delete_job("locked") is None

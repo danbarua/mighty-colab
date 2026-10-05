@@ -402,16 +402,39 @@ class JobStore:
             return []
         return sorted(p.name for p in self.root.iterdir() if p.is_dir())
 
-    def delete_job(self, job_id: str) -> None:
-        """Remove a job's entire directory. Caller decides safety.
+    def delete_job(self, job_id: str) -> Optional[str]:
+        """Remove a job's entire directory. Caller decides safety: `jobs
+        prune` applies the rule before calling this. Returns None when the
+        directory is gone, otherwise what stopped the deletion."""
+        failures: List[str] = []
+        shutil.rmtree(
+            self.job_dir(job_id),
+            onexc=lambda _func, path, error: failures.append(
+                f"{path}: {describe_error(error)}"
+            ),
+        )
+        if self.job_dir(job_id).exists():
+            return "; ".join(failures) or "the directory still exists"
+        return None
 
-        No lock check, no envelope inspection here -- `jobs prune` (the only
-        caller) already applies the safety rule (unapplied plan, or
-        terminal with cleanup released/already_absent) before calling this.
-        Kept dumb on purpose: this is deletion, it should do exactly what
-        it's told and nothing more.
-        """
-        shutil.rmtree(self.job_dir(job_id), ignore_errors=True)
+    def apply_lock_held(self, job_id: str) -> bool:
+        """Whether a live `job apply` holds this job's lock. Tested with a
+        non-blocking flock, not a PID check, so a reused PID cannot pass
+        for a live apply."""
+        path = self.job_dir(job_id) / APPLY_LOCK_FILE
+        try:
+            fd = os.open(str(path), os.O_RDWR)
+        except FileNotFoundError:
+            return False
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        else:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            return False
+        finally:
+            os.close(fd)
 
 
     def append_event(self, job_id: str, event: dict) -> None:

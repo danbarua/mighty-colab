@@ -1822,7 +1822,24 @@ def prune(
             skipped.append((jid, f"{problem} -- state unknown, will not prune"))
             continue
         if e is None:
-            removed.append((jid, "planned, not applied"))
+            held = store.apply_lock_held(jid)
+            log = store.job_dir(jid) / "apply.log"
+            if held:
+                skipped.append((jid, "a live `job apply` holds its lock, will not prune"))
+            elif log.exists():
+                # An `apply --async` that refused or crashed before writing
+                # an envelope, or one still in its preflight (an empty log):
+                # apply.log is the only record of why.
+                skipped.append(
+                    (
+                        jid,
+                        (_apply_log_note(store, jid) or f"{log} exists but is empty: "
+                         "an `apply --async` may still be in its preflight")
+                        + "; read it, then delete the job directory by hand",
+                    )
+                )
+            else:
+                removed.append((jid, "planned, not applied"))
             continue
         if e.done and e.cleanup in (Cleanup.RELEASED, Cleanup.ALREADY_ABSENT):
             removed.append((jid, f"done, cleanup={e.cleanup.value}"))
@@ -1838,8 +1855,11 @@ def prune(
         skipped.append((jid, reason))
 
     if not dry_run:
-        for jid, _ in removed:
-            store.delete_job(jid)
+        for jid, reason in list(removed):
+            failure = store.delete_job(jid)
+            if failure is not None:
+                removed.remove((jid, reason))
+                skipped.append((jid, f"deletion failed: {failure}"))
 
     if state.json_output:
         emit_json(

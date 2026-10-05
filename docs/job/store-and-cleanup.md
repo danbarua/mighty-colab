@@ -7,8 +7,7 @@ covers where local job records live on disk, what each file means, and what
 
 **Prefer `mighty-colab jobs prune` (`--dry-run` first) over deleting these
 directories by hand.** It applies the rule in "What `jobs prune` deletes"
-below and reports what it skipped and why. It does not yet check
-`apply.lock` or `supervisor.json`; see that section. The rest of this
+below and reports what it skipped and why. The rest of this
 document explains what the command checks, for anyone auditing it or
 cleaning up by hand (a different machine, a broken install, a script).
 
@@ -66,7 +65,14 @@ what it removed and skipped, with reasons:
 - **No `envelope.json`** — deleted as `(planned, not applied)`. This is the
   bulk of what accumulates from `job plan` iteration during spec authoring
   (every failed plan, every retry while fixing a spec, gets its own job ID
-  and directory).
+  and directory). Two exceptions are skipped:
+  - an `apply.log` exists: an `apply --async` that refused or crashed
+    before writing an envelope (the log is the only record of why, and the
+    skip reason quotes its last line), or one still in its preflight (the
+    log can still be empty). Read it, then delete the directory by hand;
+  - a live `job apply` holds `apply.lock` (tested with a non-blocking
+    `flock`, not a PID check): an apply between claiming the job ID and
+    writing its first envelope.
 - **`done=True` with `cleanup: released` or `cleanup: already_absent`** —
   deleted. Terminal, and the VM is confirmed gone.
 - **`done=True` with `cleanup: left_up`** — skipped. The VM was left
@@ -87,13 +93,15 @@ what it removed and skipped, with reasons:
   process on this or another machine, or a prior run was interrupted
   mid-flight. Run `job status --poll <job_id>` for a live read.
 
-**Known gap:** `jobs prune` does not check `apply.lock` or
-`supervisor.json`. Between `apply` claiming the job ID and provisioning
-writing the first `envelope.json`, a job being applied has no envelope, and
-`jobs prune` deletes its directory as `(planned, not applied)`. Do not run
-`jobs prune` while an `apply` that has not yet reached `provision` may be
-running; when cleaning up by hand, treat an `apply.lock` or
-`supervisor.json` in the directory as "do not delete".
+A directory that cannot be fully deleted is reported as skipped with what
+stopped it, not as removed.
+
+**Known gap:** a synchronous `job apply` (without `--async`) checks the
+plan, its sources and URL expiry before it claims `apply.lock`, and writes
+no `apply.log`. During those seconds its job has no envelope, no lock and
+no log, and `jobs prune` deletes the directory as `(planned, not applied)`;
+the apply then fails to find its plan. Do not run `jobs prune` while a
+synchronous apply is starting.
 
 ## Live check commands
 
