@@ -2551,8 +2551,10 @@ def test_a_crash_before_writing_a_required_artifact_releases_the_vm(tmp_path):
 
     assert orch.env.offload is Offload.FAILED
     assert orch.env.retry_class is RetryClass.FIX_CODE
-    assert orch.leave_up_requested() is False
-    orch.cleanup(leave_up=orch.leave_up_requested())
+    from colab_cli.job.orchestrator import keep_vm
+
+    assert keep_vm(orch.env, orch.spec, secret_removed=True) is False
+    orch.cleanup(leave_up=False)
 
     client.unassign.assert_called_once_with("m-s-abc")
     assert orch.env.cleanup is Cleanup.RELEASED
@@ -2571,14 +2573,20 @@ def test_a_failed_upload_keeps_the_vm_under_leave_up(tmp_path):
         }
     )
 
-    assert orch.leave_up_requested() is True
+    from colab_cli.job.orchestrator import keep_vm
+
+    assert keep_vm(orch.env, orch.spec, secret_removed=True) is True
+    # An unconfirmed credential deletion releases the VM whatever the policy.
+    assert keep_vm(orch.env, orch.spec, secret_removed=False) is False
 
 
 def test_on_offload_fail_destroy_never_keeps_the_vm(tmp_path):
     orch = _artifact_orch(tmp_path, MagicMock(), on_offload_fail="destroy")
     orch.env.artifacts = [ArtifactResult(path="/content/out/model.pt", url_id="u", status="failed")]
 
-    assert orch.leave_up_requested() is False
+    from colab_cli.job.orchestrator import keep_vm
+
+    assert keep_vm(orch.env, orch.spec, secret_removed=True) is False
 
 
 def test_cleanup_releases_when_told_to_even_after_a_failed_upload(tmp_path):
@@ -2627,3 +2635,19 @@ def test_a_changing_watchdog_is_not_stalled():
     assert tracker.observe({"ts": 1.0}) is None
     assert tracker.observe({"ts": 31.0}) is None
     assert tracker.observe({"ts": 61.0}) is None
+
+
+
+def test_the_leave_up_flag_keeps_the_vm_and_an_unknown_plan_counts_only_it(tmp_path):
+    from colab_cli.job.orchestrator import keep_vm
+
+    orch = _artifact_orch(tmp_path, MagicMock())
+    orch.env.artifacts = [ArtifactResult(path="/content/out/model.pt", url_id="u", status="failed")]
+
+    assert keep_vm(orch.env, None, secret_removed=True) is False
+    orch.env.leave_up = True
+    assert keep_vm(orch.env, None, secret_removed=True) is True
+    assert keep_vm(orch.env, orch.spec, secret_removed=False) is False
+    assert orch.env.model_dump(mode="json")["leave_up"] is True
+    orch.env.leave_up = False
+    assert "leave_up" not in orch.env.model_dump(mode="json")

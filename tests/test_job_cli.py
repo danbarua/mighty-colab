@@ -3677,3 +3677,70 @@ def test_status_poll_cancels_an_orphan_past_its_deadline_and_releases(
         "no verdict within 660s of launch (wall_clock 60s + 600s); the job's supervisor "
         "is gone, so job status --poll cancelled it; cancelled by job status --poll"
     )
+
+
+
+def _orphan_finished(store, job_id, artifacts, leave_up=False, on_offload_fail="leave_up"):
+    from colab_cli.job.models import ArtifactItem, ArtifactResult, Offload
+
+    plan = store.read_plan(job_id)
+    plan.spec.artifacts = [ArtifactItem(path="out/m.pt", url="https://x/m.pt", size_bytes=1)]
+    plan.spec.on_offload_fail = on_offload_fail
+    store.write_plan(plan)
+    env = store.read_envelope(job_id)
+    env.workload = Workload.FAILED
+    env.offload = Offload.FAILED
+    env.artifacts = [ArtifactResult(path="out/m.pt", url_id="u", status=s) for s in artifacts]
+    env.leave_up = leave_up
+    store.write_envelope(env)
+
+
+@pytest.mark.parametrize(
+    "artifacts, leave_up, on_offload_fail, kept",
+    [
+        (["failed"], False, "leave_up", True),
+        (["missing"], False, "leave_up", False),
+        (["failed"], False, "destroy", False),
+        (["missing"], True, "destroy", True),
+    ],
+)
+def test_the_orphan_release_follows_the_same_keep_rule_as_apply(
+    monkeypatch, mock_common_state, artifacts, leave_up, on_offload_fail, kept
+):
+    store = _persist_running_job(mock_common_state, job_id="orphan-keep")
+    _orphan_finished(store, "orphan-keep", artifacts, leave_up, on_offload_fail)
+    events = []
+    vm = _RunningVM(events, results=[None])
+    _use_vm(monkeypatch, mock_common_state, vm, events)
+
+    result = runner.invoke(app, ["job", "status", "orphan-keep"])
+
+    assert result.exit_code == 0, result.output
+    final = store.read_envelope("orphan-keep")
+    if kept:
+        assert "unassign" not in events
+        assert final.cleanup.value == "left_up"
+        assert any("still billing" in h for h in final.hints)
+    else:
+        assert "unassign" in events
+        assert final.cleanup.value == "released"
+
+
+def test_apply_records_leave_up_before_the_first_envelope_write(
+    tmp_path, monkeypatch, mock_common_state
+):
+    from colab_cli.commands.job import _store
+
+    seen = {}
+
+    def provision(self):
+        self._persist()
+        seen["first"] = _store().read_envelope(self.job_id).leave_up
+        from types import SimpleNamespace
+
+        self.session_state = SimpleNamespace(name="phases", url="https://vm", token="x")
+        self.env.endpoint = "m-test"
+
+    _apply_with(monkeypatch, tmp_path, mock_common_state, provision=provision, _args=["--leave-up"])
+
+    assert seen["first"] is True

@@ -1328,16 +1328,6 @@ class Orchestrator:
 
     # -- cleanup -----------------------------------------------------------
 
-    def leave_up_requested(self) -> bool:
-        """`on_offload_fail: leave_up` keeps the VM only when an artifact
-        upload was attempted and failed: the bytes are on the VM to rescue.
-        A required artifact that was never produced also fails offload, but
-        there is nothing on the VM to rescue, and its records are copied
-        off before release."""
-        return self.spec.on_offload_fail == "leave_up" and any(
-            artifact.status == "failed" for artifact in self.env.artifacts
-        )
-
     def cleanup(self, leave_up: bool = False) -> None:
         """Always runs. Records its own outcome; never edits the verdict.
         `leave_up` is the caller's decision to keep the VM."""
@@ -1351,43 +1341,7 @@ class Orchestrator:
             self._persist()
             return
         if leave:
-            # A surviving descendant only matters while the VM lives: an
-            # `unassign` takes the whole machine, escapee included. But if
-            # we are deliberately leaving it up, cleanup did not do its job
-            # -- there is now an unbounded GPU consumer the caller never
-            # asked for, on a machine that keeps billing. That is a cleanup
-            # failure in substance, and recording it as one is what makes
-            # `ok` false; a hint an agent can skip past is not a guard.
-            if self.env.surviving_descendants:
-                self.env.cleanup = Cleanup.FAILED
-                self.env.record_failure(Phase.CLEANUP)
-                # `cleanup = FAILED` is on its own enough to make `ok`
-                # false, so the escapee never needs to overwrite the
-                # workload's verdict to be actionable. Writing `reason` or
-                # `retry_class` unconditionally here would replace
-                # "a required artifact was not produced" / `fix_code` with
-                # `fix_human`, and send an agent to a human about a broken
-                # script. Fill them only when the workload left them empty;
-                # the detail always lands in `hints`.
-                self.env.hints.append(
-                    f"cleanup: VM left up with pids "
-                    f"{self.env.surviving_descendants} still holding its "
-                    f"resources; `mighty-colab job destroy {self.job_id}` "
-                    "releases the VM and everything on it"
-                )
-                if self.env.reason is None:
-                    self.env.reason = (
-                        f"VM left up with {len(self.env.surviving_descendants)} "
-                        "surviving descendant(s) still holding its resources"
-                    )
-                if self.env.retry_class is None:
-                    self.env.retry_class = RetryClass.FIX_HUMAN
-            else:
-                self.env.cleanup = Cleanup.LEFT_UP
-                self.env.hints.append(
-                    f"VM left running deliberately and is still billing: "
-                    f"`mighty-colab job destroy {self.job_id}` when done"
-                )
+            record_vm_kept(self.env, self.job_id)
             self._persist()
             return
         # Last chance: whatever explains this run is on the VM, and the VM
@@ -1476,6 +1430,52 @@ def _extract_tagged(text: str, tag: str, raw: bool = False):
             except json.JSONDecodeError:
                 return None
     return None
+
+
+def keep_vm(env: JobEnvelope, spec: Optional[JobSpec], *, secret_removed: bool) -> bool:
+    """Whether to keep the VM after the job: `--leave-up` was given, or an
+    artifact upload was attempted and failed under `on_offload_fail:
+    leave_up`, so the file is on the VM to rescue. A required artifact that
+    was never produced also fails offload, but leaves nothing to rescue.
+    Never when the transfer credential's deletion is unconfirmed: the
+    release removes it with the VM. `spec` is None when the plan cannot be
+    read; then only `--leave-up` counts."""
+    if not secret_removed:
+        return False
+    upload_failed = spec is not None and spec.on_offload_fail == "leave_up" and any(
+        artifact.status == "failed" for artifact in env.artifacts
+    )
+    return env.leave_up or upload_failed
+
+
+def record_vm_kept(env: JobEnvelope, job_id: str) -> None:
+    """Record the VM kept up on purpose. A surviving descendant on it is a
+    cleanup failure: an unbounded consumer nobody asked for, on a machine
+    that keeps billing."""
+    if env.surviving_descendants:
+        env.cleanup = Cleanup.FAILED
+        env.record_failure(Phase.CLEANUP)
+        # `cleanup = FAILED` alone makes `ok` false; the workload's reason
+        # and retry class are filled only when it left them empty, so a
+        # broken script is not sent to a human.
+        env.hints.append(
+            f"cleanup: VM left up with pids {env.surviving_descendants} still "
+            f"holding its resources; `mighty-colab job destroy {job_id}` "
+            "releases the VM and everything on it"
+        )
+        if env.reason is None:
+            env.reason = (
+                f"VM left up with {len(env.surviving_descendants)} "
+                "surviving descendant(s) still holding its resources"
+            )
+        if env.retry_class is None:
+            env.retry_class = RetryClass.FIX_HUMAN
+    else:
+        env.cleanup = Cleanup.LEFT_UP
+        env.hints.append(
+            f"VM left running deliberately and is still billing: "
+            f"`mighty-colab job destroy {job_id}` when done"
+        )
 
 
 def release_assignment(client, endpoint: str) -> Tuple[Cleanup, Optional[str]]:

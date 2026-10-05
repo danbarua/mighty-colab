@@ -606,6 +606,9 @@ class JobEnvelope(BaseModel):
     retry_class: Optional[RetryClass] = None
     reason: Optional[str] = None
     hints: List[str] = Field(default_factory=list)
+    # `job apply --leave-up` was given, so whoever finishes the job keeps
+    # the VM; left out when false.
+    leave_up: bool = Field(default=False, exclude_if=lambda value: not value)
     attempt: int = 1
     next_poll_after: int = 15
 

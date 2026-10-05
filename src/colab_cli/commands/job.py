@@ -73,6 +73,8 @@ from colab_cli.job.orchestrator import (
     deadline_reason,
     observe_remote,
     raw_verdict,
+    keep_vm,
+    record_vm_kept,
     release_assignment,
     replace_hint,
     request_cancel,
@@ -722,6 +724,9 @@ def apply(
         auth_provider=state.auth_provider,
         config_path=state.config_path,
     )
+    # Recorded before the first envelope write, so a detached
+    # `job status --poll` that finishes the job honours it too.
+    orch.env.leave_up = leave_up
 
 
     # An explicit --timeout bounds this whole call from now (an agent's
@@ -886,12 +891,11 @@ def apply(
         # failure must still release the VM, or the cost of a typo is an
         # A100 left assigned. An unconfirmed credential deletion also
         # overrides every leave-up request.
-        keep = leave_up or orch.leave_up_requested()
+        keep = keep_vm(orch.env, p.spec, secret_removed=secret_removed)
         if not secret_removed:
             # A cleanup event, not the job's verdict: the workload's own
             # reason and retry advice stay. The release removes the secret
             # with the VM.
-            keep = False
             if orch.env.reason is None:
                 orch.env.reason = "transfer credential deletion could not be confirmed"
             if orch.env.retry_class is None:
@@ -1239,6 +1243,24 @@ def _cancel_orphan_after_deadline(env, store, job_id: str, transport, passed: st
 
 
 def _release_orphaned_job(env, session, state, store, transport) -> None:
+    """Finish an orphaned job whose workload is terminal: keep the VM when
+    `keep_vm` says so (the secret was already confirmed removed to get
+    here), otherwise copy its records and release it."""
+    try:
+        plan = store.read_plan(env.job_id)
+    except ValueError as error:
+        _logger.warning(
+            "job status %s: plan unreadable (%s); only --leave-up decides whether "
+            "the VM is kept",
+            env.job_id,
+            error,
+        )
+        plan = None
+    if keep_vm(env, plan.spec if plan else None, secret_removed=True):
+        record_vm_kept(env, env.job_id)
+        env.supervisor = Supervisor.FINISHED
+        store.write_envelope(env)
+        return
     _copy_before_release(env, transport, store)
     stop_session_keep_alive(session)
     _release(env, state, "recovery teardown failed")
