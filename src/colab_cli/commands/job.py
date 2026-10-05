@@ -866,9 +866,7 @@ def apply(
         # failure must still release the VM, or the cost of a typo is an
         # A100 left assigned. An unconfirmed credential deletion also
         # overrides every leave-up request.
-        keep = leave_up or p.spec.on_offload_fail == "leave_up" and (
-            orch.env.offload is Offload.FAILED
-        )
+        keep = leave_up or orch.leave_up_requested()
         if not secret_removed:
             # A cleanup event, not the job's verdict: the workload's own
             # reason and retry advice stay. The release removes the secret
@@ -889,7 +887,7 @@ def apply(
             orch.detach()
             store.write_envelope(orch.env)
         else:
-            orch.cleanup(force_leave_up=keep)
+            orch.cleanup(leave_up=keep)
         store.clear_supervisor_identity(p.job_id)
         claim.release()
         if hand_off_log is not None and orch.env.cleanup is Cleanup.PENDING:

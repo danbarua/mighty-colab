@@ -1339,14 +1339,22 @@ class Orchestrator:
 
     # -- cleanup -----------------------------------------------------------
 
-    def cleanup(self, force_leave_up: bool = False) -> None:
-        """Always runs. Records its own outcome; never edits the verdict."""
+    def leave_up_requested(self) -> bool:
+        """`on_offload_fail: leave_up` keeps the VM only when an artifact
+        upload was attempted and failed: the bytes are on the VM to rescue.
+        A required artifact that was never produced also fails offload, but
+        there is nothing on the VM to rescue, and its records are copied
+        off before release."""
+        return self.spec.on_offload_fail == "leave_up" and any(
+            artifact.status == "failed" for artifact in self.env.artifacts
+        )
+
+    def cleanup(self, leave_up: bool = False) -> None:
+        """Always runs. Records its own outcome; never edits the verdict.
+        `leave_up` is the caller's decision to keep the VM."""
         self._close_runtime()
         self._set_phase(Phase.CLEANUP)
-        leave = force_leave_up or (
-            self.env.offload is Offload.FAILED
-            and self.spec.on_offload_fail == "leave_up"
-        )
+        leave = leave_up
         if not self.env.endpoint:
             self._stop_keep_alive()
             self._drop_session()

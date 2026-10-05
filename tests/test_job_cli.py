@@ -406,8 +406,8 @@ def test_unconfirmed_credential_cleanup_overrides_leave_up(
     def launch(_self, _path):
         raise PhaseError(Phase.RUN, "launch failed", RetryClass.RETRY_SAME)
 
-    def cleanup(self, force_leave_up=False):
-        forced["leave_up"] = force_leave_up
+    def cleanup(self, leave_up=False):
+        forced["leave_up"] = leave_up
         self.env.cleanup = Cleanup.FAILED
 
     monkeypatch.setattr(Orchestrator, "provision", provision)
@@ -3039,7 +3039,7 @@ def _apply_with(monkeypatch, tmp_path, mock_common_state, **overrides):
         "poll": lambda _self, _transport, deadline: None,
         "job_transport": lambda _self: MagicMock(),
         "cleanup_secret_channel": lambda _self: calls.append("cleanup_secret_channel") or True,
-        "cleanup": lambda self, force_leave_up=False: setattr(self.env, "cleanup", Cleanup.RELEASED),
+        "cleanup": lambda self, leave_up=False: setattr(self.env, "cleanup", Cleanup.RELEASED),
     }
     stage = overrides.pop("_stage_payload", lambda _orch, _plan: None)
     defaults.update(overrides)
@@ -3193,8 +3193,8 @@ def test_ctrl_c_before_launch_releases_the_vm(tmp_path, monkeypatch, mock_common
     def install(_self):
         raise KeyboardInterrupt
 
-    def cleanup(self, force_leave_up=False):
-        released.append(force_leave_up)
+    def cleanup(self, leave_up=False):
+        released.append(leave_up)
         self.env.cleanup = Cleanup.RELEASED
 
     result, _calls = _apply_with(
@@ -3222,7 +3222,7 @@ def test_ctrl_c_after_launch_keeps_the_job_recoverable(tmp_path, monkeypatch, mo
     result, _calls = _apply_with(
         monkeypatch, tmp_path, mock_common_state,
         launch=_launch_running, poll=poll,
-        cleanup=lambda self, force_leave_up=False: released.append(True),
+        cleanup=lambda self, leave_up=False: released.append(True),
         detach=lambda self: detached.append(True),
     )
 
@@ -3252,8 +3252,8 @@ def test_a_passed_timeout_cancels_and_releases(tmp_path, monkeypatch, mock_commo
         self.env.workload = Workload.UNKNOWN
         self.env.supervisor = Supervisor.FINISHED
 
-    def cleanup(self, force_leave_up=False):
-        calls.append(("cleanup", force_leave_up))
+    def cleanup(self, leave_up=False):
+        calls.append(("cleanup", leave_up))
         self.env.cleanup = Cleanup.RELEASED
 
     result, _ = _apply_with(
@@ -3305,7 +3305,7 @@ def test_sigterm_before_launch_releases_the_vm(tmp_path, monkeypatch, mock_commo
     def install(_self):
         os.kill(os.getpid(), signal.SIGTERM)
 
-    def cleanup(self, force_leave_up=False):
+    def cleanup(self, leave_up=False):
         released.append(True)
         self.env.cleanup = Cleanup.RELEASED
 
@@ -3344,7 +3344,7 @@ def test_sigterm_after_launch_hands_off_to_a_detached_poll(
     result, _ = _apply_with(
         monkeypatch, tmp_path, mock_common_state,
         launch=_launch_running, poll=poll,
-        cleanup=lambda self, force_leave_up=False: released.append(True),
+        cleanup=lambda self, leave_up=False: released.append(True),
         detach=lambda self: None,
     )
 

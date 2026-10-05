@@ -9,6 +9,18 @@ request and `issue #N` an issue in `danbarua/mighty-colab`.
 The other documents in `docs/job/` describe the current system. This one
 records what changed and what each claim rests on.
 
+### 2026-10-05: A missing output no longer keeps the VM billing
+
+A required artifact that was never produced (the run crashed, was OOM- or
+`wall_clock`-killed, or wrote the file elsewhere) fails offload, and the
+default `on_offload_fail: leave_up` kept the VM up and billing although
+there was nothing on it to rescue. `leave_up` now keeps the VM only after an
+attempted upload failed. `cleanup` also stopped recomputing the decision on
+its own, which could keep a VM up after apply had overridden `leave_up`
+because the transfer credential's deletion was not confirmed.
+
+Evidence: unit tests in `tests/test_job_orchestrator.py`.
+
 ### 2026-10-05: Plan, apply's preflight and provision say why they refuse; URL expiry counts install
 
 Plan reported a host that does not resolve as a private address, flagged

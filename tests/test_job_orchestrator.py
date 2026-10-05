@@ -37,6 +37,7 @@ import requests
 from colab_cli.auto_update import get_app_version
 from colab_cli.job.models import (
     Accelerator,
+    ArtifactResult,
     ArtifactItem,
     Budgets,
     Cleanup,
@@ -1115,7 +1116,7 @@ def test_leave_up_records_the_endpoint_and_a_destroy_hint(tmp_path):
     orch = _orch(tmp_path, client=client)
     orch.env.endpoint = "m-s-abc"
 
-    orch.cleanup(force_leave_up=True)
+    orch.cleanup(leave_up=True)
 
     assert orch.env.cleanup is Cleanup.LEFT_UP
     client.unassign.assert_not_called()
@@ -1128,7 +1129,7 @@ def test_cleanup_closes_the_kernel_client_when_the_vm_is_left_up(tmp_path):
     orch._runtime_handle()
     orch.env.endpoint = "m-s-abc"
 
-    orch.cleanup(force_leave_up=True)
+    orch.cleanup(leave_up=True)
 
     runtime.stop.assert_called_once_with()
 def test_cleanup_stops_keep_alive_before_release(tmp_path, monkeypatch):
@@ -1165,7 +1166,7 @@ def test_leave_up_preserves_keep_alive(tmp_path, monkeypatch):
         name="job-unit-job", keep_alive_pid=4242
     )
 
-    orch.cleanup(force_leave_up=True)
+    orch.cleanup(leave_up=True)
 
     assert killed == []
     client.unassign.assert_not_called()
@@ -1483,7 +1484,7 @@ def test_cleanup_does_not_copy_records_when_the_vm_is_left_up(tmp_path):
     orch = _orch(tmp_path, transport_factory=lambda _s: transport)
     orch.env.endpoint = "m-s-abc"
 
-    orch.cleanup(force_leave_up=True)
+    orch.cleanup(leave_up=True)
 
     assert events == []
 
@@ -2511,3 +2512,78 @@ def test_a_long_json_assign_body_says_how_much_was_cut(tmp_path):
         orch.provision()
 
     assert orch.env.provision_attempts[0].body.endswith(" [... 209 characters omitted]")
+
+
+# -- leave_up keeps the VM only for a failed upload --------------------------
+
+
+def _artifact_orch(tmp_path, client, on_offload_fail="leave_up"):
+    spec = _spec(
+        artifacts=[ArtifactItem(path="/content/out/model.pt", url="https://x/m.pt")],
+        on_offload_fail=on_offload_fail,
+    )
+    orch = _orch(tmp_path, spec=spec, client=client)
+    orch.env.endpoint = "m-s-abc"
+    return orch
+
+
+def test_a_crash_before_writing_a_required_artifact_releases_the_vm(tmp_path):
+    """Nothing was produced, so nothing on the VM needs rescuing; its
+    records are copied off before release."""
+    client = MagicMock()
+    orch = _artifact_orch(tmp_path, client)
+    orch._absorb_result(
+        {
+            "workload": "failed",
+            "exit_code": 1,
+            "exception": {"type": "ValueError", "message": "bad", "traceback": ""},
+            "artifacts": [{"path": "/content/out/model.pt", "url_id": "https://x/m.pt#1",
+                           "status": "missing"}],
+        }
+    )
+
+    assert orch.env.offload is Offload.FAILED
+    assert orch.env.retry_class is RetryClass.FIX_CODE
+    assert orch.leave_up_requested() is False
+    orch.cleanup(leave_up=orch.leave_up_requested())
+
+    client.unassign.assert_called_once_with("m-s-abc")
+    assert orch.env.cleanup is Cleanup.RELEASED
+
+
+def test_a_failed_upload_keeps_the_vm_under_leave_up(tmp_path):
+    orch = _artifact_orch(tmp_path, MagicMock())
+    orch._absorb_result(
+        {
+            "workload": "succeeded",
+            "exit_code": 0,
+            "artifacts": [{"path": "/content/out/model.pt", "url_id": "https://x/m.pt#1",
+                           "status": "failed",
+                           "error": {"exception": "HTTPStatusError", "reason": "HTTP 413",
+                                     "http_status": 413, "category": "http"}}],
+        }
+    )
+
+    assert orch.leave_up_requested() is True
+
+
+def test_on_offload_fail_destroy_never_keeps_the_vm(tmp_path):
+    orch = _artifact_orch(tmp_path, MagicMock(), on_offload_fail="destroy")
+    orch.env.artifacts = [ArtifactResult(path="/content/out/model.pt", url_id="u", status="failed")]
+
+    assert orch.leave_up_requested() is False
+
+
+def test_cleanup_releases_when_told_to_even_after_a_failed_upload(tmp_path):
+    """The caller decides: apply overrides leave_up when the credential
+    file's deletion was not confirmed, and cleanup must not keep the VM
+    on its own."""
+    client = MagicMock()
+    orch = _artifact_orch(tmp_path, client)
+    orch.env.offload = Offload.FAILED
+    orch.env.artifacts = [ArtifactResult(path="/content/out/model.pt", url_id="u", status="failed")]
+
+    orch.cleanup(leave_up=False)
+
+    client.unassign.assert_called_once_with("m-s-abc")
+    assert orch.env.cleanup is Cleanup.RELEASED

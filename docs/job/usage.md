@@ -337,7 +337,7 @@ Normal apply paths attempt cleanup in a `finally` block, including unexpected ex
 These leave a VM running and billing:
 
 - `--leave-up`.
-- `on_offload_fail: leave_up` (the default) when an artifact upload failed.
+- `on_offload_fail: leave_up` (the default) when an artifact upload was attempted and failed, so the file can be rescued from the VM. A required artifact that was never produced (the run crashed or was killed first) also fails offload, but the VM is released: there is nothing on it to rescue, and its records are copied first. An unconfirmed deletion of the transfer credential file releases the VM in every case.
 - Ctrl-C after the runner was launched. The run continues and the VM stays assigned and billing until the job is released: run `job status <id> --poll` to collect the result and release it when the job ends, or `job destroy <id>` to stop it now. SIGTERM (an agent harness ending a long tool call) or SIGHUP after launch does this for you: `apply` starts a detached `job status --poll` on its way out, which releases the VM when the job ends. (`--timeout`, and any of these signals before launch, release the VM themselves.) A SIGKILL cannot be handled, so drive long jobs with `job apply --async` and `job status --poll`.
 - Hard process death of `apply`, which can also leave a non-terminal record; local state is not proof of release.
 
