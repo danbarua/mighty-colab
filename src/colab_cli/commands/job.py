@@ -614,6 +614,24 @@ def apply(
         )
         raise typer.Exit(1)
 
+    # The plan's own errors first: they already say why, for example why
+    # the source lock could not be built, which the source check below
+    # would only report as a missing lock.
+    if p.has_errors:
+        _refuse_plan(
+            p.job_id,
+            "[colab] This plan has errors and will not be applied. "
+            "Fix the spec and re-plan.",
+            [d for d in p.diagnostics if d.severity == "error"],
+        )
+    if p.has_warnings and not p.spec.ignore_warnings:
+        _refuse_plan(
+            p.job_id,
+            "[colab] This plan has warnings. Set ignore_warnings: true in the "
+            "spec to accept them explicitly.",
+            [d for d in p.diagnostics if d.severity == "warn"],
+        )
+
     from colab_cli.job.payload_bundle import CONTENTS_UPLOAD_CEILING, verify_source_files
 
     try:
@@ -647,21 +665,6 @@ def apply(
         )
         raise typer.Exit(1)
 
-
-    if p.has_errors:
-        _refuse_plan(
-            p.job_id,
-            "[colab] This plan has errors and will not be applied. "
-            "Fix the spec and re-plan.",
-            [d for d in p.diagnostics if d.severity == "error"],
-        )
-    if p.has_warnings and not p.spec.ignore_warnings:
-        _refuse_plan(
-            p.job_id,
-            "[colab] This plan has warnings. Set ignore_warnings: true in the "
-            "spec to accept them explicitly.",
-            [d for d in p.diagnostics if d.severity == "warn"],
-        )
 
     # Expiry is revalidated here, not trusted from plan time: a plan is
     # durable and may be applied long after its signatures were minted.

@@ -3561,3 +3561,30 @@ def test_status_without_an_envelope_points_at_apply_log(tmp_path, mock_common_st
 
     [row] = [r for r in _job_list_rows(store) if r["job_id"] == "early-fail"]
     assert row["reason"].startswith("apply wrote no envelope")
+
+
+def test_apply_refuses_with_the_plan_errors_before_checking_the_source_lock(
+    tmp_path, mock_common_state
+):
+    """A plan whose source lock failed already says why; apply's own check
+    would only say the lock is missing."""
+    _json_mode(mock_common_state)
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "train.py").write_text("print(1)\n")
+    (src / "alias.py").symlink_to(src / "train.py")
+    spec = tmp_path / "job.yaml"
+    spec.write_text(
+        "name: lock\naccelerator:\n  prefer: []\n  accept_cpu: true\n"
+        f"code:\n  kind: bundle\n  root: {src}\n  entry: train.py\n"
+    )
+    planned = json.loads(
+        _clean(runner.invoke(app, ["job", "plan", str(spec), "--no-probe"]).output)
+        .strip().splitlines()[-1]
+    )
+
+    result = runner.invoke(app, ["job", "apply", "--job-id", planned["job_id"]])
+
+    envelope = json.loads(_clean(result.output).strip().splitlines()[-1])
+    assert [d["code"] for d in envelope["diagnostics"]] == ["source_unreadable"]
+    assert "no source lock" not in result.output
