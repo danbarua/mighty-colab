@@ -108,6 +108,18 @@ def listed_endpoints(observer: Path) -> set[str] | None:
     return {s.get("endpoint") for s in sessions}
 
 
+def log_compute_units(observer: Path) -> None:
+    """The account's compute-unit balance, to see when Colab updates it."""
+    try:
+        result = mc(observer, "--json", "usage", timeout=120)
+        ccu = envelope_line(result.stdout)
+        log(f"observer: compute units balance={ccu.get('current_balance')} "
+            f"rate={ccu.get('consumption_rate_hourly')}/h "
+            f"assignments={ccu.get('assignments_count')}")
+    except Exception as error:  # noqa: BLE001 - recorded; the next observation retries
+        log(f"observer: usage failed: {type(error).__name__}: {error}")
+
+
 def pid_alive(pid: int | None) -> bool:
     if not pid:
         return False
@@ -138,6 +150,8 @@ class Job:
         self.finished = False
         self.outcome: dict | None = None
         self.deferred_reason: str | None = None
+        self.collect_deadline: float | None = None
+        self.collector: subprocess.Popen | None = None
 
     @property
     def job_dir(self) -> Path:
@@ -169,9 +183,8 @@ class Job:
             "    time.sleep(min(60, max(0, end - time.time())))\n"
             "print('done', flush=True)\n"
         )
-        run_stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         (self.dir / "job.yaml").write_text(
-            f"name: soak-{self.name.lower()}-{run_stamp}\n"
+            f"name: soak-{self.name.lower()}\n"
             "accelerator: {prefer: [], accept_cpu: true}\n"
             f"code: {{kind: file, root: {self.dir}, entry: sleeper.py}}\n"
             f"budgets: {{wall_clock: {SOAK_SECONDS + 600}}}\n"
@@ -272,22 +285,32 @@ class Job:
     def due(self) -> bool:
         return self.launched_at is not None and now() >= self.launched_at + SOAK_SECONDS
 
-    def collect(self) -> None:
-        """Ends the job: B's apply finishes it; A and C are finished by
-        `job status --poll`, which absorbs the result and releases the VM."""
+    def start_collect(self) -> None:
+        """Ends the job without blocking the observer: B's apply finishes
+        it; A and C are finished by `job status --poll`, which absorbs the
+        result and releases the VM."""
+        self.collect_deadline = now() + RESULT_TIMEOUT
         if self.spec["supervised"]:
-            deadline = now() + RESULT_TIMEOUT
-            while pid_alive(self.apply_pid) and now() < deadline:
-                time.sleep(15)
-            if pid_alive(self.apply_pid):
-                log(f"{self.name}: apply still running {RESULT_TIMEOUT}s after the workload ended")
+            return
+        cmd = ["uv", "run", "mighty-colab", "--auth=adc", "--config", str(self.config),
+               "--json", "job", "status", str(self.job_id), "--poll", "--interval", "15"]
+        with open(self.dir / "status-poll.out", "w", encoding="utf-8") as out:
+            self.collector = subprocess.Popen(
+                cmd, cwd=REPO_ROOT, stdout=out, stderr=subprocess.STDOUT
+            )
+        log(f"{self.name}: job status --poll started (pid {self.collector.pid})")
+
+    def check_collect(self) -> None:
+        if self.spec["supervised"]:
+            running = pid_alive(self.apply_pid)
         else:
-            try:
-                result = mc(self.config, "--json", "job", "status", self.job_id,
-                            "--poll", "--interval", "15", timeout=RESULT_TIMEOUT)
-                log(f"{self.name}: job status --poll exited {result.returncode}")
-            except subprocess.TimeoutExpired:
-                log(f"{self.name}: job status --poll still running after {RESULT_TIMEOUT}s")
+            running = self.collector.poll() is None
+        if running and now() < self.collect_deadline:
+            return
+        if running:
+            log(f"{self.name}: still running {RESULT_TIMEOUT}s after the workload ended")
+            if self.collector is not None:
+                self.collector.kill()
         self.outcome = self.envelope()
         self.finished = True
         env = self.outcome or {}
@@ -344,18 +367,27 @@ def run_batch(jobs: list[Job], observer: Path) -> list[Job]:
         log(f"{job.name}: launched on {job.endpoint}")
         job.leave_unattended()
         running.append(job)
+    last_observed = 0.0
     while any(not j.finished for j in running):
-        listed = listed_endpoints(observer)
+        if now() - last_observed >= OBSERVE_SECONDS:
+            last_observed = now()
+            listed = listed_endpoints(observer)
+            log_compute_units(observer)
+            for job in running:
+                job.observe(listed)
         for job in running:
-            job.observe(listed)
-        for job in running:
+            if job.finished:
+                continue
+            if job.collect_deadline is not None:
+                job.check_collect()
+                continue
             ended = job.due() or (
                 not job.spec["supervised"] and job.lost_at is not None
             ) or (job.spec["supervised"] and not pid_alive(job.apply_pid))
-            if not job.finished and ended:
-                job.collect()
+            if ended:
+                job.start_collect()
         if any(not j.finished for j in running):
-            time.sleep(OBSERVE_SECONDS)
+            time.sleep(min(30, OBSERVE_SECONDS))
     return [Job(j.name, j.spec) for j in deferred]
 
 
@@ -383,6 +415,9 @@ def main() -> int:
         harness_failed = True
         log(f"soak: stopped: {type(error).__name__}: {error}")
     finally:
+        for job in all_jobs:
+            if job.collector is not None and job.collector.poll() is None:
+                job.collector.kill()
         for job in all_jobs:
             if job.job_id and (job.outcome or {}).get("cleanup") not in {"released", "already_absent"}:
                 job.destroy()
