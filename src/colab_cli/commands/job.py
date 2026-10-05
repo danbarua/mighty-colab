@@ -71,6 +71,7 @@ from colab_cli.job.orchestrator import (
     await_runner_result,
     copy_vm_records,
     deadline_reason,
+    degraded_reason,
     observe_remote,
     raw_verdict,
     keep_vm,
@@ -1438,8 +1439,7 @@ def status(
                     if kind == "degraded":
                         env.supervisor = Supervisor.DEGRADED
                         env.reason = (
-                            "transport failing; the assignment is still listed, "
-                            "so the job is not known dead"
+                            degraded_reason(transport) + "; the job is not known dead"
                         )
                     if kind == "launch_invalid":
                         identity = {

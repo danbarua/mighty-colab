@@ -1054,10 +1054,7 @@ class Orchestrator:
             if status.name == "DEGRADED":
                 consecutive_degraded += 1
                 self.env.supervisor = Supervisor.DEGRADED
-                self.env.reason = (
-                    f"transport failing for {consecutive_degraded} polls; "
-                    "the assignment is still listed"
-                )
+                self.env.reason = degraded_reason(transport, consecutive_degraded)
             else:
                 consecutive_degraded = 0
                 self.env.supervisor = Supervisor.RUNNING
@@ -1603,6 +1600,22 @@ class WatchdogStaleness:
             "watchdog has stopped, or cannot write its record (for example a "
             "full disk), so whether the runner is alive is unknown"
         )
+
+
+def degraded_reason(transport, polls: Optional[int] = None) -> str:
+    """Why reading the VM is failing: the transport's last recorded
+    problem, and what the last assignment listing showed."""
+    problem = getattr(transport, "last_problem", None)
+    listing_note = getattr(transport, "listing_note", None)
+    listing = listing_note() if callable(listing_note) else None
+    text = (
+        f"transport failing for {polls} polls" if polls is not None else "transport failing"
+    )
+    if isinstance(problem, str):
+        text += f" (last: {problem})"
+    if isinstance(listing, str):
+        text += f"; {listing}"
+    return text
 
 
 def replace_hint(hints: List[str], prefix: str, text: Optional[str]) -> None:
