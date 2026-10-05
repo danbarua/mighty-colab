@@ -480,9 +480,10 @@ def apply(
         typer.Option(
             "--timeout",
             help=(
-                "Local supervisor budget (s), default wall_clock + 600. When it "
-                "passes with no verdict, the job is cancelled, its result "
-                "collected if it arrives, and the VM released."
+                "Budget (s) for this whole apply call. Without it, the "
+                "deadline is wall_clock + 600 s after launch. When the "
+                "deadline passes with no verdict, the job is cancelled, its "
+                "result collected if it arrives, and the VM released."
             ),
         ),
     ] = None,
