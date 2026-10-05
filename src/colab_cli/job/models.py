@@ -501,6 +501,37 @@ class InputResult(BaseModel):
     error: Optional[TransferError] = None
 
 
+class ProvisionAttempt(BaseModel):
+    """One accelerator candidate tried during provision."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    accelerator: str
+    # `refused_cpu`: a GPU request answered with a CPU VM, released because
+    # the spec does not accept CPU.
+    outcome: Literal["granted", "failed", "refused_cpu"]
+    granted: Optional[str] = None
+    http_status: Optional[int] = None
+    # Exception type and message, query strings and URL userinfo removed.
+    error: Optional[str] = None
+    # A JSON response body's first characters, or a note saying a body of
+    # another type was not kept (Colab answers some failures with an HTML
+    # page that carries no detail).
+    body: Optional[str] = None
+    retry_class: Optional[RetryClass] = None
+
+    @property
+    def summary(self) -> str:
+        if self.outcome == "granted":
+            return f"{self.accelerator}: granted as {self.granted}"
+        if self.outcome == "refused_cpu":
+            return (
+                f"{self.accelerator}: granted as {self.granted} and released, "
+                "because accept_cpu is false"
+            )
+        return f"{self.accelerator}: {self.error}"
+
+
 InstallFailure = Literal["resolution", "build", "auth", "transient", "timeout", "unknown"]
 
 
@@ -565,6 +596,11 @@ class JobEnvelope(BaseModel):
     # Left out when empty, so envelopes of jobs whose install succeeded on
     # the first try stay readable by older CLIs sharing the job store.
     install_attempts: List[InstallAttempt] = Field(
+        default_factory=list, exclude_if=lambda attempts: not attempts
+    )
+    # Each accelerator tried, kept when any of them was not granted;
+    # left out when the first candidate was granted.
+    provision_attempts: List[ProvisionAttempt] = Field(
         default_factory=list, exclude_if=lambda attempts: not attempts
     )
     retry_class: Optional[RetryClass] = None

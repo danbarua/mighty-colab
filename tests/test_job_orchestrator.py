@@ -528,8 +528,11 @@ def test_provision_timeout_is_retryable_without_claiming_session_loss(tmp_path):
     with pytest.raises(PhaseError) as exc:
         orch.provision()
 
-    assert exc.value.retry_class is RetryClass.RETRY_DIFFERENT
+    # No response from assign: try the same spec again.
+    assert exc.value.retry_class is RetryClass.RETRY_SAME
     assert orch.env.endpoint is None
+    [attempt] = orch.env.provision_attempts
+    assert attempt.error == "ReadTimeout: stalled assign"
 
 
 def test_provision_starts_keep_alive_after_persisting_the_session(
@@ -2345,3 +2348,166 @@ def test_verify_accepts_urls_that_outlast_the_run(tmp_path):
                        dest="in.bin", size_bytes=1)]
     )
     _orch(tmp_path, spec=spec)._check_url_expiry()
+
+
+
+# -- provision attempts ------------------------------------------------------
+
+
+def _assign_error(status, reason, body="", content_type="text/html"):
+    """The real shape of a failed assign (seen 2026-10-04 for a CPU VM:
+    `Failed to issue request POST .../tun/m/assign?nbh=...: Service
+    Unavailable`)."""
+    from colab_cli.client import ColabRequestError
+
+    response = MagicMock()
+    response.status_code = status
+    response.headers = {"Content-Type": content_type}
+    return ColabRequestError(
+        "Failed to issue request POST https://colab.research.google.com/tun/m/assign"
+        f"?nbh=e92e31f1_8d0d&variant=DEFAULT&accelerator=NONE&authuser=0: {reason}",
+        request=MagicMock(),
+        response=response,
+        response_body=body,
+    )
+
+
+@pytest.mark.parametrize(
+    "status, retry",
+    [
+        (400, RetryClass.FIX_HUMAN),
+        (401, RetryClass.FIX_HUMAN),
+        (403, RetryClass.FIX_HUMAN),
+        (408, RetryClass.RETRY_SAME),
+        (429, RetryClass.RETRY_SAME),
+        (503, RetryClass.RETRY_DIFFERENT),
+        (409, RetryClass.RETRY_DIFFERENT),
+    ],
+)
+def test_a_failed_assign_is_classified_by_status(tmp_path, status, retry):
+    client = MagicMock()
+    client.assign.side_effect = _assign_error(status, "Reason")
+    orch = _orch(tmp_path, spec=_spec(accelerator=Accelerator(prefer=[], accept_cpu=True)),
+                 client=client)
+
+    with pytest.raises(PhaseError) as caught:
+        orch.provision()
+
+    assert caught.value.retry_class is retry
+    [attempt] = orch.env.provision_attempts
+    assert attempt.http_status == status
+    assert attempt.retry_class is retry
+
+
+def test_a_failed_assign_keeps_no_signed_or_identifying_query(tmp_path):
+    client = MagicMock()
+    client.assign.side_effect = _assign_error(503, "Service Unavailable", body="<html>503</html>")
+    orch = _orch(tmp_path, spec=_spec(accelerator=Accelerator(prefer=[], accept_cpu=True)),
+                 client=client)
+
+    with pytest.raises(PhaseError) as caught:
+        orch.provision()
+
+    [attempt] = orch.env.provision_attempts
+    assert attempt.error == (
+        "ColabRequestError: Failed to issue request POST "
+        "https://colab.research.google.com/tun/m/assign?<redacted> Service Unavailable"
+    )
+    assert attempt.body == "[text/html body of 16 characters not kept]"
+    assert "nbh=" not in caught.value.reason
+    assert "NONE: ColabRequestError" in caught.value.reason
+
+
+def test_a_json_assign_body_is_kept(tmp_path):
+    client = MagicMock()
+    client.assign.side_effect = _assign_error(
+        400, "Bad Request", body='{"error": {"message": "quota"}}', content_type="application/json"
+    )
+    orch = _orch(tmp_path, spec=_spec(accelerator=Accelerator(prefer=["A100"])), client=client)
+
+    with pytest.raises(PhaseError):
+        orch.provision()
+
+    assert orch.env.provision_attempts[0].body == '{"error": {"message": "quota"}}'
+
+
+def test_mixed_candidates_take_the_strongest_class(tmp_path):
+    client = MagicMock()
+    client.assign.side_effect = [_assign_error(503, "Service Unavailable"),
+                                 _assign_error(400, "Bad Request")]
+    orch = _orch(tmp_path, spec=_spec(accelerator=Accelerator(prefer=["T4", "L4"])), client=client)
+
+    with pytest.raises(PhaseError) as caught:
+        orch.provision()
+
+    assert caught.value.retry_class is RetryClass.FIX_HUMAN
+    assert [a.accelerator for a in orch.env.provision_attempts] == ["T4", "L4"]
+
+
+def test_a_parse_failure_in_the_client_is_do_not_retry(tmp_path):
+    client = MagicMock()
+    client.assign.side_effect = ValueError("unexpected assign response")
+    orch = _orch(tmp_path, spec=_spec(accelerator=Accelerator(prefer=["T4"])), client=client)
+
+    with pytest.raises(PhaseError) as caught:
+        orch.provision()
+
+    assert caught.value.retry_class is RetryClass.DO_NOT_RETRY
+
+
+def test_earlier_failures_are_kept_when_a_later_candidate_is_granted(tmp_path, keep_alive_spawn):
+    client = MagicMock()
+    client.assign.side_effect = [_assign_error(503, "Service Unavailable"),
+                                 _cpu_assignment("m-s-cpu")]
+    orch = _orch(tmp_path, spec=_spec(accelerator=Accelerator(prefer=["T4"], accept_cpu=True)),
+                 client=client)
+
+    orch.provision()
+
+    assert [(a.accelerator, a.outcome) for a in orch.env.provision_attempts] == [
+        ("T4", "failed"), ("NONE", "granted"),
+    ]
+
+
+def test_a_first_try_grant_records_no_attempts(tmp_path, keep_alive_spawn):
+    client = MagicMock()
+    client.assign.return_value = _cpu_assignment("m-s-cpu")
+    orch = _orch(tmp_path, spec=_spec(accelerator=Accelerator(prefer=[], accept_cpu=True)),
+                 client=client)
+
+    orch.provision()
+
+    assert orch.env.provision_attempts == []
+    assert "provision_attempts" not in orch.env.model_dump(mode="json")
+
+
+def test_the_assignment_limit_keeps_its_body(tmp_path):
+    from colab_cli.client import TooManyAssignmentsError
+
+    cause = _assign_error(412, "Precondition Failed", body='{"limit": 2}',
+                          content_type="application/json")
+    client = MagicMock()
+    client.assign.side_effect = TooManyAssignmentsError(
+        str(cause), response=cause.response, response_body=cause.response_body
+    )
+    orch = _orch(tmp_path, spec=_spec(accelerator=Accelerator(prefer=["T4"])), client=client)
+
+    with pytest.raises(PhaseError) as caught:
+        orch.provision()
+
+    assert caught.value.retry_class is RetryClass.FIX_HUMAN
+    assert 'response body: {"limit": 2}' in caught.value.reason
+    assert "nbh=" not in caught.value.reason
+
+
+def test_a_long_json_assign_body_says_how_much_was_cut(tmp_path):
+    client = MagicMock()
+    client.assign.side_effect = _assign_error(
+        400, "Bad Request", body='{"m": "' + "x" * 500 + '"}', content_type="application/json"
+    )
+    orch = _orch(tmp_path, spec=_spec(accelerator=Accelerator(prefer=["A100"])), client=client)
+
+    with pytest.raises(PhaseError):
+        orch.provision()
+
+    assert orch.env.provision_attempts[0].body.endswith(" [... 209 characters omitted]")

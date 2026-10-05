@@ -46,6 +46,7 @@ from colab_cli.job.models import (
     Cleanup,
     InputResult,
     InstallAttempt,
+    ProvisionAttempt,
     JobEnvelope,
     JobSpec,
     Offload,
@@ -115,6 +116,49 @@ RESTART_TIMEOUT = 60.0
 
 def _now() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+# Characters of a JSON assign-failure body kept in a provision attempt.
+ASSIGN_BODY_CHARS = 300
+
+
+def _failed_assign(want: str, error: BaseException) -> ProvisionAttempt:
+    """A provision attempt that raised: its HTTP status, the error with the
+    assign URL's query removed, a JSON body excerpt or why the body was not
+    kept, and its retry class."""
+    import requests
+
+    from colab_cli.client import response_body_if_json
+    from colab_cli.utils import get_status_code
+
+    status = get_status_code(error)
+    raw_body = getattr(error, "response_body", None) or ""
+    body = response_body_if_json(error, limit=len(raw_body))
+    if body is not None:
+        body = redact_credentials(" ".join(body.split()))
+        if len(body) > ASSIGN_BODY_CHARS:
+            omitted = len(body) - ASSIGN_BODY_CHARS
+            body = body[:ASSIGN_BODY_CHARS] + f" [... {omitted} characters omitted]"
+    else:
+        raw = raw_body
+        if raw:
+            response = getattr(error, "response", None)
+            content_type = (
+                getattr(response, "headers", {}).get("Content-Type", "unknown type")
+                if response is not None
+                else "unknown type"
+            )
+            body = f"[{content_type} body of {len(raw)} characters not kept]"
+    return ProvisionAttempt(
+        accelerator=want,
+        outcome="failed",
+        http_status=status,
+        error=describe_error(error),
+        body=body,
+        retry_class=verdict.assign_retry_class(
+            status, isinstance(error, requests.exceptions.RequestException)
+        ),
+    )
 
 
 def _vm_time(epoch) -> Optional[str]:
@@ -326,13 +370,12 @@ class Orchestrator:
 
         self._set_phase(Phase.PROVISION)
         session_name = f"job-{self.job_id}"
-        attempts: List[Tuple[str, str]] = []
+        attempts: List[ProvisionAttempt] = []
 
         candidates = list(self.spec.accelerator.prefer)
         if self.spec.accelerator.accept_cpu:
             candidates.append("NONE")
 
-        last_exc: Optional[Exception] = None
         for want in candidates:
             self.env.requested_accelerator = want
             try:
@@ -349,16 +392,23 @@ class Orchestrator:
                 # Not a capacity problem and not fixable by asking for a
                 # different accelerator -- the account is already at its
                 # limit, and retrying just burns the retry budget.
+                attempt = _failed_assign(want, e)
+                attempt.retry_class = RetryClass.FIX_HUMAN
+                attempts.append(attempt)
+                self.env.provision_attempts = attempts
                 raise PhaseError(
                     Phase.PROVISION,
-                    f"account is at its concurrent-assignment limit: {e}",
+                    f"account is at its concurrent-assignment limit: {attempt.error}"
+                    + (f"; response body: {attempt.body}" if attempt.body else ""),
                     RetryClass.FIX_HUMAN,
                     ["run `mighty-colab sessions` and stop what you are not using"],
                 ) from e
-            except Exception as e:  # noqa: BLE001 - classified below
-                last_exc = e
-                attempts.append((want, str(e)[:200]))
-                self.emit(f"[job] {want} unavailable, trying next preference")
+            except Exception as e:  # noqa: BLE001 - each attempt is classified
+                attempt = _failed_assign(want, e)
+                attempts.append(attempt)
+                self.emit(
+                    f"[job] {want} unavailable ({attempt.error}), trying next preference"
+                )
                 continue
 
             granted = getattr(res.accelerator, "name", str(res.accelerator))
@@ -380,7 +430,14 @@ class Orchestrator:
                         RetryClass.RETRY_SAME,
                     )
                 self.env.endpoint = None
-                attempts.append((want, f"granted {granted}"))
+                attempts.append(
+                    ProvisionAttempt(
+                        accelerator=want,
+                        outcome="refused_cpu",
+                        granted=granted,
+                        retry_class=RetryClass.RETRY_DIFFERENT,
+                    )
+                )
                 continue
 
             proxy = res.runtime_proxy_info
@@ -396,23 +453,38 @@ class Orchestrator:
             # Endpoint must be durable before keep-alive or any later
             # fallible step: a crash here is recoverable from envelope.json.
             self.env.session = session_name
+            if attempts:
+                attempts.append(
+                    ProvisionAttempt(accelerator=want, outcome="granted", granted=granted)
+                )
+                self.env.provision_attempts = attempts
             self._persist()
             self._start_keep_alive()
             self.emit(f"[job] provisioned {res.endpoint} accel={granted}")
             return
 
-        detail = "; ".join(f"{a}: {r}" for a, r in attempts) or str(last_exc)
-        raise PhaseError(
-            Phase.PROVISION,
-            f"no acceptable accelerator from {candidates}: {detail}",
-            RetryClass.RETRY_DIFFERENT,
-            [
+        self.env.provision_attempts = attempts
+        retry = verdict.strongest(a.retry_class for a in attempts)
+        hints = {
+            RetryClass.FIX_HUMAN: [
+                "Colab refused the account: a 400 means no quota or entitlement "
+                "for that accelerator on this account's plan; 401/403 are its "
+                "credentials or OAuth scope.",
+            ],
+            RetryClass.RETRY_DIFFERENT: [
                 "Colab capacity varies by hour; a different accelerator in "
                 "`accelerator.prefer` is usually available sooner than the "
                 "same one later.",
                 "Set `accelerator.accept_cpu: true` only if the workload is "
                 "genuinely useful without a GPU.",
             ],
+        }.get(retry, [])
+        raise PhaseError(
+            Phase.PROVISION,
+            f"no acceptable accelerator from {candidates}: "
+            + "; ".join(a.summary for a in attempts),
+            retry,
+            hints,
         )
 
     def _start_keep_alive(self) -> None:
