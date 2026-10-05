@@ -3968,3 +3968,4 @@ def test_a_forced_teardown_keeps_the_reason_it_replaces(monkeypatch, mock_common
 
     final = store.read_envelope("replaced")
     assert "before the forced teardown: transport failing for 3 polls (last: result.json: ReadTimeout)" in final.hints
+

@@ -399,21 +399,34 @@ def pid_alive(pid: Optional[int]) -> bool:
     return True
 
 
-def kill_process(pid: int):
-    """Safely terminates a process by PID."""
+def kill_process(pid: int) -> bool:
+    """SIGTERM `pid` and wait up to half a second for it to exit. Returns
+    True when it is gone (or the pid is no longer ours to signal), False
+    when it is still running; that and any signalling error are logged."""
     if not pid:
-        return
+        return True
     try:
         os.kill(pid, signal.SIGTERM)
-        # Give it a moment to exit
-        for _ in range(5):
-            time.sleep(0.1)
-            os.kill(pid, 0)
-    except OSError:
-        # Already dead
-        pass
-    except Exception:
-        logging.debug(f"Failed to kill process {pid}")
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        logging.warning("pid %s is not ours to signal (reused?); not stopped", pid)
+        return True
+    except OSError as error:
+        logging.warning("SIGTERM to pid %s failed: %s", pid, error)
+        return False
+    for _ in range(5):
+        time.sleep(0.1)
+        try:
+            # Our own child stays a zombie until reaped.
+            if os.waitpid(pid, os.WNOHANG)[0] == pid:
+                return True
+        except ChildProcessError:
+            pass
+        if not pid_alive(pid):
+            return True
+    logging.warning("pid %s still running 0.5s after SIGTERM", pid)
+    return False
 
 
 def setup_logging(log_to_stderr: bool, debug: bool = False):

@@ -2713,3 +2713,23 @@ def test_an_unknown_remote_phase_is_a_hint(tmp_path):
     orch._absorb_result({"workload": "succeeded", "exit_code": 0, "phase": "teleport"})
 
     assert any("the runner reported phase 'teleport'" in h for h in orch.env.hints)
+
+
+def test_the_write_that_finishes_a_job_appends_its_outcome_once(tmp_path):
+    store = JobStore(tmp_path / "jobs")
+    env = JobEnvelope(job_id="done-job", workload=Workload.FAILED, offload=Offload.NOT_REQUIRED,
+                      cleanup=Cleanup.PENDING, supervisor=Supervisor.FINISHED,
+                      retry_class=RetryClass.FIX_CODE, reason="the workload exited 1: ValueError: x")
+    env.record_failure(Phase.RUN)
+    store.write_envelope(env)
+    env.cleanup = Cleanup.RELEASED
+    store.write_envelope(env)
+    store.write_envelope(env)
+
+    events = [json.loads(line) for line in (store.job_dir("done-job") / "events.jsonl").read_text().splitlines()]
+    outcomes = [e for e in events if e.get("event") == "outcome"]
+    assert len(outcomes) == 1
+    assert {k: outcomes[0][k] for k in ("workload", "cleanup", "failed_phase", "retry_class", "reason")} == {
+        "workload": "failed", "cleanup": "released", "failed_phase": "run",
+        "retry_class": "fix_code", "reason": "the workload exited 1: ValueError: x",
+    }

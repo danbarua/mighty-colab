@@ -26,8 +26,10 @@ its parent's first write, and then reports `not_found` for a job that is
 about to exist.
 """
 
+import datetime
 import fcntl
 import json
+import logging
 import os
 import shutil
 import stat
@@ -46,6 +48,8 @@ from colab_cli.job.runtime_payload.redact import describe_error
 
 # Validation problems named in a plan error before the rest are counted.
 PLAN_ERRORS_SHOWN = 5
+
+_logger = logging.getLogger(__name__)
 
 PLAN_FILE = "plan.json"
 ENVELOPE_FILE = "envelope.json"
@@ -242,14 +246,16 @@ class ApplyClaim:
         if self.fd >= 0:
             try:
                 fcntl.flock(self.fd, fcntl.LOCK_UN)
-            except OSError:
-                pass
+            except OSError as error:
+                _logger.warning("apply lock %s: unlock failed: %s", self.path, error)
             os.close(self.fd)
             self.fd = -1
         try:
             self.path.unlink()
-        except OSError:
+        except FileNotFoundError:
             pass
+        except OSError as error:
+            _logger.warning("apply lock %s: not removed: %s", self.path, error)
 
 def redacted_model_json(model) -> str:
     return json.dumps(_redact(model.model_dump(mode="json")), indent=2)
@@ -294,8 +300,33 @@ class JobStore:
     # -- envelope --------------------------------------------------------
 
     def write_envelope(self, envelope: JobEnvelope) -> Path:
+        """Write the envelope; the write that first makes it `done` also
+        appends the outcome to events.jsonl, whichever command finished
+        the job."""
         path = self.job_dir(envelope.job_id) / ENVELOPE_FILE
+        was_done = False
+        if envelope.done and path.exists():
+            previous, _problem = self.read_envelope_or_problem(envelope.job_id)
+            was_done = previous is not None and previous.done
         _atomic_write(path, envelope.model_dump_json(indent=2))
+        if envelope.done and not was_done:
+            self.append_event(
+                envelope.job_id,
+                {
+                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "event": "outcome",
+                    "workload": envelope.workload.value,
+                    "offload": envelope.offload.value,
+                    "cleanup": envelope.cleanup.value,
+                    "failed_phase": (
+                        envelope.failed_phase.value if envelope.failed_phase else None
+                    ),
+                    "retry_class": (
+                        envelope.retry_class.value if envelope.retry_class else None
+                    ),
+                    "reason": envelope.reason,
+                },
+            )
         return path
 
     def read_envelope(self, job_id: str) -> Optional[JobEnvelope]:
@@ -390,10 +421,15 @@ class JobStore:
             return None
 
     def clear_supervisor_identity(self, job_id: str) -> None:
+        path = self.job_dir(job_id) / SUPERVISOR_IDENTITY_FILE
         try:
-            (self.job_dir(job_id) / SUPERVISOR_IDENTITY_FILE).unlink()
-        except OSError:
+            path.unlink()
+        except FileNotFoundError:
             pass
+        except OSError as error:
+            # A left-over identity file makes a later `job status` think
+            # the supervisor may be alive.
+            _logger.warning("%s: not removed: %s", path, error)
 
     # -- listing ---------------------------------------------------------
 

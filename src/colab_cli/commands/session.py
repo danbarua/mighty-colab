@@ -784,14 +784,32 @@ def spawn_keep_alive(
         DETACHED_PROCESS = 0x00000008
         kwargs["creationflags"] = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
 
-    p = subprocess.Popen(
-        cmd,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        stdin=subprocess.DEVNULL,
-        **kwargs,
-    )
+    # A crash outside the daemon's own loop (startup, auth, the session
+    # store) logs nothing anywhere else; its traceback lands here.
+    log_path = keep_alive_log_path(session_name, config_path)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(log_path, "a", encoding="utf-8") as log:
+        p = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=log,
+            stdin=subprocess.DEVNULL,
+            **kwargs,
+        )
     return p.pid
+
+
+def keep_alive_log_path(session_name: str, config_path=None):
+    """The keep-alive daemon's stderr: `keep-alive/<session>.log` beside
+    the session state file."""
+    from pathlib import Path
+
+    base = (
+        Path(config_path).expanduser().parent
+        if config_path
+        else Path("~/.config/colab-cli").expanduser()
+    )
+    return base / "keep-alive" / f"{session_name}.log"
 
 
 def keep_alive(
