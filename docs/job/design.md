@@ -361,4 +361,4 @@ These paths are covered by unit tests only: a websocket drop during install (one
 - **Optional uploads.** A failed PUT for an optional artifact fails scalar `offload`.
 - **Kernel replacement.** The explicit `restart-kernel` path is verified while a detached consumer runs; a platform-initiated kernel replacement or crash is not.
 - **`restart-kernel` during install.** `restart-kernel -s job-<id>` cannot reach the job's kernel while install runs: the kernel id reaches the session record only after the first execute call returns.
-- **`jobs prune` does not check `apply.lock` or `supervisor.json`.** See `store-and-cleanup.md`.
+- **`jobs prune` and a starting synchronous apply.** A synchronous `job apply` has no envelope, lock or log in the seconds before it claims `apply.lock`, and `jobs prune` can delete its directory then. See `store-and-cleanup.md`.
