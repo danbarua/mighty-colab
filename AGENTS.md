@@ -67,9 +67,12 @@ Design/reference docs (`docs/**/*.md`) describe **what the system does now**, in
 ## Release Tagging Workflow
 Releases are automated by the `release` Claude Code skill
 (`.claude/skills/release/SKILL.md`) — bump version, roll the Unreleased
-CHANGELOG section into a dated section, tag, push. Run it by asking for a
-release (e.g. "cut a release"). Do not perform any part of this manually or
-propose a release proactively.
+CHANGELOG section into a dated section, tag, push. Pushing the tag starts
+`.github/workflows/release.yml`, which runs the tests, builds the package,
+publishes it to PyPI through trusted publishing (the `pypi` environment),
+and creates the GitHub Release from the version's CHANGELOG section. Run the
+skill by asking for a release (e.g. "cut a release"). Do not perform any part
+of this manually or propose a release proactively.
 
 ## Implementation Principles
 1.  **Direct Execution**: Code for `auth`, `drivemount`, etc., should be injected and executed on the VM kernel.
