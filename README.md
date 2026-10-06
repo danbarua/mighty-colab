@@ -18,6 +18,7 @@ contracts and failure handling that unattended workflows need.
 **[Watch the demo](https://github.com/user-attachments/assets/656226a9-af13-4fdb-8eda-d7de747336a2)**
 · **[Read the agent field notes](docs/AGENT_USABILITY_LEARNINGS.md)**
 · **[Open the operator skill](skills/colab-operator/SKILL.md)**
+· **[Run unattended jobs](docs/job/README.md)**
 
 > [!NOTE]
 > Linux and macOS only. Python 3.12 or newer is required.
@@ -36,6 +37,7 @@ correct, but an unattended agent cannot.
 | --- | --- |
 | A remote script raises, but the caller cannot reliably tell what happened | Schema-validated `--json` envelopes with separate CLI and remote-job outcomes |
 | Training outlives a shell or MCP tool call | `exec-async` returns immediately; `log --tail` provides bounded, incremental polling |
+| A long run must finish, upload its results and release the VM with nobody watching | `job`: a spec-driven run, detached from the kernel, with a recorded verdict and a retry class |
 | The agent restarts while the Colab VM keeps running | Server-side session discovery, `adopt`, orphan recovery, and durable result sidecars |
 | Cleanup runs on every path, including partial failure | Idempotent `stop` for already-absent sessions; genuine teardown failures stay loud and retryable |
 | Multiple agent processes touch the same local state | Locked history plus `--config` isolation for parallel runs |
@@ -193,7 +195,7 @@ See the live, end-to-end
 [`new → exec → exec-async → log → stop` lifecycle](integration/repro_json_jq_lifecycle/test.sh)
 for a complete `jq`-driven example.
 
-## Long jobs that fit short tool calls
+## Background runs that fit short tool calls
 
 Blocking on training for an hour is a poor fit for an agent harness or an MCP
 request/response cycle. Start the job in the background instead:
@@ -215,6 +217,30 @@ Use the returned `next_offset` on the next poll to avoid rereading old output.
 Only one background job runs per session, and a finished job never blocks the
 next one. Its terminal JSON result is written beside the log and survives
 session teardown, so an agent can recover the verdict later.
+
+## Unattended runs with `job`
+
+`exec-async` runs a script in a session you manage: you install the packages,
+move the files, read the log, decide the outcome and stop the VM. `job` does
+all of that for you. You describe the run in a YAML spec; `job` provisions the
+VM, installs the dependencies, stages the code and data, and launches the run
+as a process detached from the kernel, so a dropped connection does not end
+it. When the run ends, `job` uploads the artifacts, releases the VM, and
+records the outcome:
+
+```bash
+mighty-colab --auth=adc --json job plan job.yaml            # validates; allocates nothing
+mighty-colab --auth=adc --json job apply --job-id <id> --async
+mighty-colab --auth=adc --json job status <id> --poll       # waits for the outcome
+```
+
+The envelope reports the workload, the uploads and the release separately.
+When something failed, it names the phase that failed (`failed_phase`) and
+what to do next (`retry_class`: `fix_code`, `fix_human`, `retry_same`,
+`retry_different`, `refresh_urls` or `do_not_retry`), with the HTTP status,
+response body or installer output that explains it. If the process that
+started the job dies, `job status --poll` collects the result and releases the
+VM. See [`docs/job/README.md`](docs/job/README.md).
 
 ## Recover instead of reallocating
 
@@ -242,12 +268,13 @@ adds:
 
 | Addition | Agent benefit |
 | --- | --- |
+| `job` / `jobs` | Unattended, spec-driven runs that provision, install, stage, upload and release on their own, and record a verdict with a retry class |
 | `--json` | Versioned, validated outcomes instead of scraping prose |
 | `exec-async` | Start long work without holding a caller open |
 | `log --tail --since-offset` | Bounded, incremental polling for agents and MCP clients |
 | `adopt [ENDPOINT]` / `adopt --orphanage` | Recover runtimes created by another process or UI |
 | `reinstall` | Install packages and restart the kernel so cached imports really update |
-| `mcp` | Expose non-interactive CLI commands as MCP tools |
+| `mcp` | Expose non-interactive CLI commands as MCP tools, with the `--json` envelope as structured content and job records as resources |
 | `--debug` | Opt into verbose client and transport diagnostics |
 | `sync [--git-aware]` | Gzip a file tree before transfer; optionally retain sparse Git identity and selected worktree status |
 | `usage` | Compute-unit balance, hourly consumption and eligible accelerators, also as `--json`; each job envelope records the balance at provision and release |
@@ -300,9 +327,12 @@ Minimal MCP client configuration:
 ```
 
 TTY-bound commands are intentionally excluded, and `log --follow` is replaced
-by bounded `log --tail` polling. MCP results are currently plain text;
-structured MCP output is a known follow-up to the CLI's new JSON contract. See
-the [`MCP server design`](docs/07_mcp_server.md).
+by bounded `log --tail` polling. A tool whose command supports `--json`
+returns the envelope as structured content beside the text. Job records are
+resources (`job://<id>`, `job://<id>/logs`, `jobs://`), and a `job://<id>`
+subscription sends a notification when the workload leaves `pending` and when
+the job is done. See the [`MCP server design`](docs/07_mcp_server.md) and
+[`docs/job/mcp.md`](docs/job/mcp.md).
 
 ## Read more
 
@@ -311,6 +341,7 @@ the [`MCP server design`](docs/07_mcp_server.md).
 - [Session and keep-alive architecture](docs/01_session_management.md)
 - [Execution, background jobs, and JSON output](docs/02_execution_and_interactive.md)
 - [Ephemeral jobs with `run`](docs/05_run_command.md)
+- [Unattended runs with `job`](docs/job/README.md)
 - [SSH-over-WebSocket runtime access](docs/06_ssh_access.md)
 - [Embedded MCP server](docs/07_mcp_server.md)
 - [Demo walkthroughs](docs/demos.md)
