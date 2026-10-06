@@ -45,8 +45,8 @@ class SessionState(BaseModel):
     # Reset to zero after every successful ping; incremented for every
     # consecutive HTTP/auth/network failure, regardless of status code.
     keep_alive_consecutive_failures: int = 0
-    # Created with `--no-keepalive`: no daemon was started, and `job status`
-    # does not respawn one.
+    # True when the session was created with `--no-keepalive`: no daemon was
+    # started, and `job status` does not respawn a daemon for the session.
     keep_alive_disabled: bool = False
     exec_pid: Optional[int] = None
     exec_log_path: Optional[str] = None

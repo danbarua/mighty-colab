@@ -18,8 +18,8 @@ runtimes alive "based on kernel activities and active connections". A
 has neither kernel activity nor a connection. `new`, `run` and `job apply`
 now accept `--no-keepalive`, which starts no keep-alive daemon. `job apply`
 records the flag in the envelope as `keep_alive_disabled`, `job status`
-never respawns a daemon for that job, and a lost assignment's reason says
-keep-alive was off.
+never respawns a daemon for that job, and the reason for a lost assignment
+states that keep-alive was off.
 
 Three CPU jobs ran a 180-minute sleep loop together, and one observer
 listed the account's assignments every 5 minutes:

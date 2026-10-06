@@ -634,7 +634,7 @@ def test_keep_alive_disabled_is_in_the_envelope_only_when_set():
     assert env.model_dump(mode="json")["keep_alive_disabled"] is True
 
 
-def test_a_lost_assignment_without_keep_alive_says_keep_alive_was_off(tmp_path):
+def test_a_lost_assignment_with_keep_alive_off_states_that_in_the_reason(tmp_path):
     transport = MagicMock()
     transport.read_json.return_value = (None, FakeStatus.SESSION_LOST)
     orch = _orch(tmp_path)
@@ -2892,7 +2892,7 @@ def test_a_left_up_vm_gets_no_release_reading(tmp_path):
     assert orch.env.compute_units_at_release is None
 
 
-def test_compute_unit_readings_are_left_out_of_the_envelope_until_read():
+def test_the_serialized_envelope_omits_compute_unit_readings_until_they_are_taken():
     dumped = JobEnvelope(job_id="j").model_dump(mode="json")
 
     assert "compute_units_at_provision" not in dumped

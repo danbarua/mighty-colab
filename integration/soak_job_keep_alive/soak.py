@@ -27,8 +27,8 @@ One observer lists the account's assignments every OBSERVE_SECONDS with
 its own empty session file, so it never touches the runtime proxy. The
 listing goes to Colab's assignment API, and if Colab counts that as
 activity it does so for all three jobs alike. For C it also checks the
-daemon pid and the age of its last recorded ping: a VM lost after the
-daemon died says nothing about keep-alive.
+daemon pid and the age of its last recorded ping, because a VM lost after
+the daemon died is not evidence about keep-alive.
 
 When the workload is due to have ended, `job status --poll` collects A's
 and C's verdicts and releases their VMs; B's apply does that itself. Every

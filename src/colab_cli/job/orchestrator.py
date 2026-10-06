@@ -122,8 +122,8 @@ def _now() -> str:
 
 # Characters of a JSON assign-failure body kept in a provision attempt.
 ASSIGN_BODY_CHARS = 300
-# Connect and read timeouts for the compute-unit reading: provisioning and
-# cleanup wait for it, and nothing depends on it.
+# Connect and read timeouts, in seconds, for the compute-unit reading.
+# Provisioning and cleanup wait for the reading, and no outcome depends on it.
 COMPUTE_UNITS_TIMEOUT = (5.0, 10.0)
 
 
@@ -511,9 +511,10 @@ class Orchestrator:
 
         session = self.session_state
         if self.env.keep_alive_disabled:
-            # `--no-keepalive`: no pre-flight ping and no daemon. The session
-            # is still stored: `job status`, `destroy` and the transport
-            # reach the VM through it.
+            # With `--no-keepalive`, provision sends no pre-flight ping and
+            # starts no daemon. Provision still stores the session, because
+            # `job status`, `destroy` and the transport reach the VM through
+            # the session record.
             session.keep_alive_disabled = True
             self.session_store.add(session)
             return
@@ -1668,8 +1669,9 @@ class WatchdogStaleness:
 
 
 def read_compute_units(client, env: JobEnvelope, when: str) -> Optional[ComputeUnitReading]:
-    """The account's compute units now; None when they cannot be read,
-    with a hint and a WARN log saying why. No outcome depends on it."""
+    """Return the account's compute units now. When the read fails, return
+    None, append a hint with the error to `env`, and log a WARN. No job
+    outcome depends on the reading."""
     try:
         ccu = client.get_ccu_info(timeout=COMPUTE_UNITS_TIMEOUT)
         return ComputeUnitReading(
@@ -1686,8 +1688,9 @@ def read_compute_units(client, env: JobEnvelope, when: str) -> Optional[ComputeU
 
 
 def lost_assignment_reason(env: JobEnvelope) -> str:
-    """Why the job ended when its assignment disappeared, saying when no
-    keep-alive daemon was pinging it (`job apply --no-keepalive`)."""
+    """Return the reason for a job whose assignment disappeared. For a job
+    applied with `--no-keepalive`, the reason states that no keep-alive
+    daemon pinged the assignment."""
     reason = "the assignment is gone from the server"
     if env.keep_alive_disabled:
         reason += (

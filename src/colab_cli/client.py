@@ -171,8 +171,8 @@ class CcuInfo(BaseModel):
     """`GET /tun/m/ccu-info`: the account's compute-unit balance, what its
     assignments consume per hour, and which accelerators it may request.
 
-    The accelerator lists are None when Colab leaves them out, so "not
-    sent" stays distinct from "none eligible".
+    Each accelerator list is None when Colab's response omits that list,
+    which keeps an omitted list distinct from an empty list.
     """
 
     model_config = ConfigDict(populate_by_name=True, extra="ignore")

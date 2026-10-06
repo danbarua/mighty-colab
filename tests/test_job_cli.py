@@ -4053,7 +4053,7 @@ def test_status_never_respawns_keep_alive_for_a_job_applied_with_no_keepalive(
     assert not any("keep-alive" in h for h in env.hints)
 
 
-def test_status_says_keep_alive_was_off_when_the_assignment_is_lost(
+def test_status_reason_states_keep_alive_was_off_when_the_assignment_is_lost(
     monkeypatch, mock_common_state
 ):
     import colab_cli.commands.job as job_command

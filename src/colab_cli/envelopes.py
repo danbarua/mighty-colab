@@ -169,8 +169,8 @@ class StopEnvelope(EnvelopeBase):
 
 
 class UsageEnvelope(EnvelopeBase):
-    """`usage --json`. The accelerator lists are left out when Colab did
-    not send them."""
+    """`usage --json`. The envelope omits each accelerator list that
+    Colab's response did not contain."""
 
     current_balance: float
     consumption_rate_hourly: float

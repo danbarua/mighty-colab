@@ -173,13 +173,16 @@ to the session history as `keep_alive_stopped`.
     GPUs and TPUs it may request. A port of upstream's `colab usage`
     (googlecolab/google-colab-cli#122).
 -   **Implementation**: `Client.get_ccu_info()` reads `GET /tun/m/ccu-info`
-    into `CcuInfo`. Colab also sends `eligibleGpus`, `ineligibleGpus` and
-    `eligibleTpus`; a list Colab leaves out is left out of the output, so
-    "not sent" stays distinct from "none".
--   **`--json`**: `current_balance`, `consumption_rate_hourly`,
-    `assignments_count`, and the accelerator lists when sent. A failed
-    read exits 1 with reason `usage_unavailable`, `http_status`, and the
-    error with any JSON response body in `message`. It is also an MCP tool.
+    into `CcuInfo`. Colab's response also contains `eligibleGpus`,
+    `ineligibleGpus` and `eligibleTpus`, and `usage` prints them. When the
+    response omits a list, `usage` omits that list from its output, so an
+    omitted list is distinguishable from an empty list.
+-   **`--json`**: The envelope contains `current_balance`,
+    `consumption_rate_hourly`, `assignments_count`, and each accelerator
+    list that Colab's response contained. When the read fails, `usage`
+    exits 1 with reason `usage_unavailable` and `http_status`, and
+    `message` contains the error and any JSON response body. `usage` is
+    also an MCP tool.
 -   **When the balance changes**: Colab updates the balance every few
     minutes, not when a VM is released. On 2026-10-06 it stayed unchanged
     for 45 s after a release and dropped while VMs ran with nothing

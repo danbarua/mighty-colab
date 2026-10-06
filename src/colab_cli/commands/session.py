@@ -391,7 +391,7 @@ def new(
     )
 
     if no_keepalive:
-        # `--no-keepalive`: no pre-flight ping and no daemon.
+        # With `--no-keepalive`, `new` sends no pre-flight ping and starts no daemon.
         s.keep_alive_disabled = True
         state.store.add(s)
     else:

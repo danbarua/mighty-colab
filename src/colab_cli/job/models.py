@@ -505,9 +505,10 @@ class ComputeUnitReading(BaseModel):
     """The account's compute units at one moment (`GET /tun/m/ccu-info`).
 
     Account-wide: every VM on the account draws on `balance`, and Colab
-    updates it every few minutes, not when a VM is released. The
+    updates `balance` every few minutes, not when a VM is released. The
     difference between two readings is what the whole account spent over
-    roughly that interval; `assignments` shows whether other VMs ran.
+    approximately that interval. `assignments` is the number of
+    assignments the account had at the moment of the reading.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -626,16 +627,18 @@ class JobEnvelope(BaseModel):
     # `job apply --leave-up` was given, so whoever finishes the job keeps
     # the VM; left out when false.
     leave_up: bool = Field(default=False, exclude_if=lambda value: not value)
-    # The account's compute units after the VM was granted and after it
-    # was released; left out when not read (a failed read is a hint).
+    # The account's compute units after Colab granted the VM and after the
+    # VM was released. The serialized envelope omits a reading that was not
+    # taken or whose read failed; a failed read appends a hint.
     compute_units_at_provision: Optional[ComputeUnitReading] = Field(
         default=None, exclude_if=lambda value: value is None
     )
     compute_units_at_release: Optional[ComputeUnitReading] = Field(
         default=None, exclude_if=lambda value: value is None
     )
-    # `job apply --no-keepalive` was given: no keep-alive daemon pinged the
-    # assignment, and `job status` does not respawn one; left out when false.
+    # True when `job apply --no-keepalive` was given: no keep-alive daemon
+    # pinged the assignment, and `job status` does not respawn a daemon for
+    # the job. Omitted from the serialized envelope when false.
     keep_alive_disabled: bool = Field(default=False, exclude_if=lambda value: not value)
     attempt: int = 1
     next_poll_after: int = 15
