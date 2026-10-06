@@ -4115,3 +4115,44 @@ def test_async_apply_passes_no_keepalive_to_the_detached_apply(
     )
 
     assert ("--no-keepalive" in seen["args"]) is flag_present
+
+
+def test_a_release_by_job_status_or_destroy_records_the_compute_units(mock_common_state, monkeypatch):
+    import colab_cli.commands.job as job_command
+    from colab_cli.client import CcuInfo
+    from colab_cli.job.models import Cleanup
+
+    monkeypatch.setattr(
+        job_command, "release_assignment", lambda _client, _endpoint: (Cleanup.RELEASED, None)
+    )
+    mock_common_state.client.get_ccu_info.return_value = CcuInfo(
+        current_balance=107.9, consumption_rate_hourly=0.0, assignments_count=0
+    )
+    env = JobEnvelope(job_id="released", endpoint="m-s-endpoint")
+
+    job_command._release(env, mock_common_state, "unassign failed")
+
+    assert env.cleanup is Cleanup.RELEASED
+    assert env.compute_units_at_release.balance == 107.9
+
+
+def test_job_status_text_shows_the_compute_unit_readings():
+    from colab_cli.commands.job import _human
+    from colab_cli.job.models import ComputeUnitReading
+
+    env = JobEnvelope(
+        job_id="j",
+        compute_units_at_provision=ComputeUnitReading(
+            at="2026-10-06T00:00:00Z", balance=108.5576, rate_hourly=0.16, assignments=2
+        ),
+        compute_units_at_release=ComputeUnitReading(
+            at="2026-10-06T03:10:00Z", balance=107.6, rate_hourly=0.08, assignments=1
+        ),
+    )
+
+    text = _human(env)
+
+    assert (
+        "  compute:    108.56 units at provision (2 assignments), 107.60 at release "
+        "(1 assignment); the account's balance, updated every few minutes"
+    ) in text

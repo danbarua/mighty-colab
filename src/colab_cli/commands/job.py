@@ -78,6 +78,7 @@ from colab_cli.job.orchestrator import (
     lost_assignment_reason,
     record_vm_kept,
     pull_runner_log,
+    read_compute_units,
     release_assignment,
     replace_hint,
     request_cancel,
@@ -277,6 +278,20 @@ def _emit_command_message(
         typer.echo(message, err=bool(exit_code))
 
 
+def _compute_units_line(env: JobEnvelope) -> str:
+    def reading(r, when: str) -> str:
+        noun = "assignment" if r.assignments == 1 else "assignments"
+        return f"{r.balance:.2f} {when} ({r.assignments} {noun})"
+
+    parts = []
+    if env.compute_units_at_provision:
+        parts.append(reading(env.compute_units_at_provision, "units at provision"))
+    if env.compute_units_at_release:
+        when = "at release" if parts else "units at release"
+        parts.append(reading(env.compute_units_at_release, when))
+    return ", ".join(parts) + "; the account's balance, updated every few minutes"
+
+
 def _human(env: JobEnvelope) -> str:
     lines = [
         f"[job] {env.job_id}",
@@ -297,6 +312,8 @@ def _human(env: JobEnvelope) -> str:
             f"  accel:      requested={env.requested_accelerator} "
             f"actual={env.actual_accelerator}"
         )
+    if env.compute_units_at_provision or env.compute_units_at_release:
+        lines.append("  compute:    " + _compute_units_line(env))
     if env.exception:
         lines.append(
             f"  exception:  {env.exception.get('type')}: {env.exception.get('message')}"
@@ -1096,6 +1113,7 @@ def _release(env, state, failure: str) -> None:
         env.cleanup = Cleanup.ALREADY_ABSENT
         return
     env.cleanup, detail = release_assignment(state.client, env.endpoint)
+    env.compute_units_at_release = read_compute_units(state.client, env, "release")
     if env.cleanup is Cleanup.FAILED:
         env.record_failure(Phase.CLEANUP)
     if detail:

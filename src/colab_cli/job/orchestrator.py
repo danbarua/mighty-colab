@@ -44,6 +44,7 @@ from colab_cli.job import RESULT_SCHEMA_VERSION, SCHEMA_VERSION
 from colab_cli.job.models import (
     ArtifactResult,
     Cleanup,
+    ComputeUnitReading,
     InputResult,
     InstallAttempt,
     ProvisionAttempt,
@@ -121,6 +122,9 @@ def _now() -> str:
 
 # Characters of a JSON assign-failure body kept in a provision attempt.
 ASSIGN_BODY_CHARS = 300
+# Connect and read timeouts for the compute-unit reading: provisioning and
+# cleanup wait for it, and nothing depends on it.
+COMPUTE_UNITS_TIMEOUT = (5.0, 10.0)
 
 
 def _failed_assign(want: str, error: BaseException) -> ProvisionAttempt:
@@ -461,6 +465,9 @@ class Orchestrator:
                 self.env.provision_attempts = attempts
             self._persist()
             self._start_keep_alive()
+            self.env.compute_units_at_provision = read_compute_units(
+                self.client, self.env, "provision"
+            )
             self.emit(f"[job] provisioned {res.endpoint} accel={granted}")
             return
 
@@ -1405,6 +1412,9 @@ class Orchestrator:
         self._stop_keep_alive()
         try:
             self.env.cleanup, detail = release_assignment(self.client, self.env.endpoint)
+            self.env.compute_units_at_release = read_compute_units(
+                self.client, self.env, "release"
+            )
             if self.env.cleanup is Cleanup.FAILED:
                 self.env.record_failure(Phase.CLEANUP)
             if detail:
@@ -1654,6 +1664,24 @@ class WatchdogStaleness:
             "watchdog has stopped, or cannot write its record (for example a "
             "full disk), so whether the runner is alive is unknown"
         )
+
+
+def read_compute_units(client, env: JobEnvelope, when: str) -> Optional[ComputeUnitReading]:
+    """The account's compute units now; None when they cannot be read,
+    with a hint and a WARN log saying why. No outcome depends on it."""
+    try:
+        ccu = client.get_ccu_info(timeout=COMPUTE_UNITS_TIMEOUT)
+        return ComputeUnitReading(
+            at=_now(),
+            balance=ccu.current_balance,
+            rate_hourly=ccu.consumption_rate_hourly,
+            assignments=ccu.assignments_count,
+        )
+    except Exception as error:  # noqa: BLE001 - recorded; the job goes on
+        detail = describe_error(error)
+        _logger.warning("job %s: compute units not read at %s: %s", env.job_id, when, detail)
+        env.hints.append(f"compute units not read at {when}: {detail}")
+        return None
 
 
 def lost_assignment_reason(env: JobEnvelope) -> str:

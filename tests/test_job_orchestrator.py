@@ -2807,3 +2807,91 @@ def test_a_keep_alive_preflight_http_error_keeps_its_json_body(tmp_path, keep_al
     assert "HTTP 500" in hint
     assert 'response body: {"error": {"message": "backend unavailable"}}' in hint
     assert "nbh=" not in hint
+
+
+# --------------------------------------------------------------------------
+# Compute-unit readings
+# --------------------------------------------------------------------------
+
+
+def _ccu(balance, rate=0.08, assignments=1):
+    from colab_cli.client import CcuInfo
+
+    return CcuInfo(
+        current_balance=balance, consumption_rate_hourly=rate, assignments_count=assignments
+    )
+
+
+def test_provision_records_the_compute_units_after_the_grant(tmp_path):
+    client = MagicMock()
+    client.assign.return_value = _cpu_assignment("m-s-job")
+    client.get_ccu_info.return_value = _ccu(108.5, rate=0.16, assignments=2)
+    orch = _orch(
+        tmp_path,
+        spec=_spec(accelerator=Accelerator(prefer=[], accept_cpu=True)),
+        client=client,
+    )
+
+    orch.provision()
+
+    reading = orch.env.compute_units_at_provision
+    assert (reading.balance, reading.rate_hourly, reading.assignments) == (108.5, 0.16, 2)
+    assert reading.at
+
+
+def test_a_compute_unit_read_that_fails_is_a_hint_and_provisioning_continues(
+    tmp_path, caplog
+):
+    client = MagicMock()
+    client.assign.return_value = _cpu_assignment("m-s-job")
+    client.get_ccu_info.side_effect = requests.exceptions.ReadTimeout("slow ccu-info")
+    orch = _orch(
+        tmp_path,
+        spec=_spec(accelerator=Accelerator(prefer=[], accept_cpu=True)),
+        client=client,
+    )
+
+    with caplog.at_level("WARNING"):
+        orch.provision()
+
+    assert orch.env.endpoint == "m-s-job"
+    assert orch.env.compute_units_at_provision is None
+    assert "compute units not read at provision: ReadTimeout: slow ccu-info" in orch.env.hints
+    assert "compute units not read at provision" in caplog.text
+
+
+def test_cleanup_records_the_compute_units_after_the_release(tmp_path, monkeypatch):
+    client = MagicMock()
+    client.get_ccu_info.return_value = _ccu(107.9, rate=0.0, assignments=0)
+    orch = _orch(tmp_path, client=client)
+    orch.env.endpoint = "m-s-job"
+    order = []
+    monkeypatch.setattr(
+        "colab_cli.job.orchestrator.release_assignment",
+        lambda _client, _endpoint: order.append("release") or (Cleanup.RELEASED, None),
+    )
+    client.get_ccu_info.side_effect = lambda **_kw: order.append("read") or _ccu(107.9, 0.0, 0)
+
+    orch.cleanup()
+
+    assert order == ["release", "read"]
+    reading = orch.env.compute_units_at_release
+    assert (reading.balance, reading.assignments) == (107.9, 0)
+
+
+def test_a_left_up_vm_gets_no_release_reading(tmp_path):
+    client = MagicMock()
+    orch = _orch(tmp_path, client=client)
+    orch.env.endpoint = "m-s-job"
+
+    orch.cleanup(leave_up=True)
+
+    client.get_ccu_info.assert_not_called()
+    assert orch.env.compute_units_at_release is None
+
+
+def test_compute_unit_readings_are_left_out_of_the_envelope_until_read():
+    dumped = JobEnvelope(job_id="j").model_dump(mode="json")
+
+    assert "compute_units_at_provision" not in dumped
+    assert "compute_units_at_release" not in dumped
