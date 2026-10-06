@@ -328,7 +328,7 @@ mighty-colab job status <id> --poll
 
 This command observes remote result, launch, and watchdog records. With `--poll` it continues until a remote verdict, a dead runner, a lost assignment, or a never-started orphan can be classified. For an orphaned supervisor it then finishes pending cleanup; a live runner or a healthy concurrent supervisor remains untouched. The returned envelope can therefore still have `done: false` when the job is legitimately running.
 
-The keep-alive daemon that stops Colab reclaiming the idle VM can die with a killed `job apply`. Every `job status` call on a job whose cleanup is still pending respawns the daemon if it is dead and adds a hint saying so, except for a job applied with `--no-keepalive`. Nothing else respawns it, so poll an orphaned job with `job status` until it finishes.
+The keep-alive daemon pings Colab so that it does not reclaim the idle VM, and the daemon can die with a killed `job apply`. Every `job status` call on a job whose cleanup is still pending respawns the daemon if it is dead and adds a hint saying so, except for a job applied with `--no-keepalive`. Nothing else respawns it, so poll an orphaned job with `job status` until it finishes.
 
 After a killed apply, run `status --poll`; it uses the control-result GET fallback when the VM result is unavailable. Then inspect the account and destroy the allocation explicitly.
 
@@ -358,7 +358,7 @@ Be aware of these before trusting a long run:
 
 - Retry/recreate/resume and `control.log` are not implemented; planning rejects non-default policy values.
 - Caller-owned source specs and generated `.mighty-colab-secrets.json` sidecars still contain full signed URLs and require credential handling.
-- The longest recorded runs are 96 minutes (A100) and 70 minutes (CPU); no recorded run has crossed a second token expiry, at about two hours.
+- The longest recorded runs are 96 minutes (A100) and 180 minutes (CPU). A 180-minute CPU job polled by `apply` crossed two expiries of the runtime-proxy token; no recorded run has crossed a third, at about three hours.
 - A platform-initiated kernel replacement or crash is unverified; the explicit `restart-kernel` path is verified.
 
 `docs/job/design.md` lists every known gap, and `docs/job/chronology.md` lists what has been verified live and when.

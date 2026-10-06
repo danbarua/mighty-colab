@@ -9,6 +9,53 @@ request and `issue #N` an issue in `danbarua/mighty-colab`.
 The other documents in `docs/job/` describe the current system. This one
 records what changed and what each claim rests on.
 
+### 2026-10-06: Jobs ran 3 hours without keep-alive; `--no-keepalive` and compute-unit readings
+
+Upstream google-colab-cli removed its keep-alive pings on 2026-09-25
+(googlecolab/google-colab-cli#144), saying Colab's backend now keeps
+runtimes alive "based on kernel activities and active connections". A
+`job` runner is detached from the kernel, so a job whose `apply` has died
+has neither kernel activity nor a connection. `new`, `run` and `job apply`
+now accept `--no-keepalive`, which starts no keep-alive daemon. `job apply`
+records the flag in the envelope as `keep_alive_disabled`, `job status`
+never respawns a daemon for that job, and a lost assignment's reason says
+keep-alive was off.
+
+Three CPU jobs ran a 180-minute sleep loop together, and one observer
+listed the account's assignments every 5 minutes:
+
+| job | keep-alive | supervisor after launch | VM listed |
+|---|---|---|---|
+| A | off (`--no-keepalive`) | none: `apply` SIGKILLed, nothing read the VM | at all 36 observations |
+| B | off (`--no-keepalive`) | `apply --async`, reading the VM every 15 s | at all 36 observations |
+| C | on; the daemon was alive and its last ping was at most 60 s old at every observation | none: `apply` SIGKILLed | at all 36 observations |
+
+All three workloads succeeded, and `job status --poll` (A, C) or `apply`
+(B) collected the result and released the VM. A's event record has no
+entry between `run` and `outcome`. On CPU, then, an idle job's VM stayed
+assigned for 3 hours with no keep-alive ping and no connection. The run
+does not show whether the backend counted the sleeping runner as activity
+or whether its idle timeout is longer than 3 hours. It covered one CPU VM
+per variant; GPU VMs were not tested. B is also the first recorded run
+whose reads crossed a second expiry of the runtime-proxy token.
+
+`mighty-colab usage` ports upstream's `colab usage` (#122): it reads `GET
+/tun/m/ccu-info` for the balance, the hourly rate, the assignment count and
+the GPUs and TPUs the account may request. Each job envelope records a
+reading once the VM is granted (`compute_units_at_provision`) and once it
+is released (`compute_units_at_release`). Colab does not update the
+balance when a VM is released: the balance stayed unchanged for 45 s after
+a release, and it dropped while VMs ran with nothing released. During the
+soak, the balance at every 5-minute reading was about 0.020 units lower
+than at the reading before, which is the 0.24 units per hour the three CPU
+VMs consumed. The account held four CPU assignments at once.
+
+Evidence: `integration/soak_job_keep_alive` on 04f3d18 (soak.log and the
+three job directories); `integration/repro_job_no_keepalive_usage` on
+aaba827 (a `--no-keepalive` job ran with no daemon, `sessions --json`
+reported its keep-alive `disabled`, and its envelope recorded
+`keep_alive_disabled` and both readings).
+
 ### 2026-10-05: MCP tool results carry the envelope; every job record is a resource
 
 Tools called over MCP returned the human text only, so an agent saw no
