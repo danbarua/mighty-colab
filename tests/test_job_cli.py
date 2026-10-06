@@ -2982,24 +2982,32 @@ def test_jobs_list_and_prune_survive_an_unreadable_envelope(mock_common_state):
             supervisor=Supervisor.FINISHED,
         )
     )
-    bad = store.job_dir("from-a-newer-cli")
-    bad.mkdir(parents=True)
-    (bad / "envelope.json").write_text('{"job_id": "from-a-newer-cli", "future_field": 1}')
+    truncated = store.job_dir("truncated")
+    truncated.mkdir(parents=True)
+    (truncated / "envelope.json").write_text('{"job_id": "truncated", "work')
+    newer = store.job_dir("from-a-newer-cli")
+    newer.mkdir(parents=True)
+    (newer / "envelope.json").write_text(json.dumps({
+        "job_id": "from-a-newer-cli", "workload": "succeeded", "offload": "not_required",
+        "cleanup": "released", "supervisor": "finished", "future_field": 1,
+    }))
     _json_mode(mock_common_state)
 
     listed = runner.invoke(app, ["jobs", "list"])
     assert listed.exit_code == 0, listed.output
-    rows = {r["job_id"]: r for r in json.loads(listed.output)["jobs"]}
+    rows = {r["job_id"]: r for r in json.loads(listed.stdout)["jobs"]}
     assert rows["readable"]["workload"] == "succeeded"
-    assert "unreadable" in rows["from-a-newer-cli"]["reason"]
-    assert "future_field" in rows["from-a-newer-cli"]["reason"]
+    assert "unreadable" in rows["truncated"]["reason"]
+    # Fields this CLI does not define do not make an envelope unreadable;
+    # the CLI logs them to stderr, which `--json` keeps off stdout.
+    assert rows["from-a-newer-cli"]["workload"] == "succeeded"
 
     pruned = runner.invoke(app, ["jobs", "prune", "--dry-run"])
     assert pruned.exit_code == 0, pruned.output
-    payload = json.loads(pruned.output)
-    assert {r["job_id"] for r in payload["removed"]} == {"readable"}
+    payload = json.loads(pruned.stdout)
+    assert {r["job_id"] for r in payload["removed"]} == {"readable", "from-a-newer-cli"}
     skipped = {r["job_id"]: r["reason"] for r in payload["skipped"]}
-    assert "unreadable" in skipped["from-a-newer-cli"]
+    assert "unreadable" in skipped["truncated"]
 
 
 def _envelope(output):

@@ -56,9 +56,10 @@ from colab_cli.job.models import (
     RetryClass,
     Supervisor,
     Workload,
+    unknown_fields,
 )
 from colab_cli.job import verdict
-from colab_cli.job.store import RUNNER_LOG_FILE, JobStore
+from colab_cli.job.store import RUNNER_LOG_FILE, JobStore, warn_unknown_fields
 from colab_cli.job.runtime_payload import RUNTIME_PAYLOAD_VERSION
 from colab_cli.job.runtime_payload.redact import describe_error, redact_credentials, redact_url
 from colab_cli.job.spec_io import fetch_control_result, url_id
@@ -1332,6 +1333,15 @@ class Orchestrator:
             ArtifactResult(**artifact)
             for artifact in (result.get("artifacts", []) or [])
         ]
+        warn_unknown_fields(
+            f"result.json of job {env.job_id}",
+            [
+                path
+                for name, records in (("inputs", env.inputs), ("artifacts", env.artifacts))
+                for index, record in enumerate(records)
+                for path in unknown_fields(record, f"{name}[{index}].")
+            ],
+        )
 
         # A stage failure means the consumer never ran and the runner never
         # reached offload: nothing was uploaded because nothing was tried.
