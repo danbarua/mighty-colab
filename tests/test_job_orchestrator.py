@@ -600,6 +600,62 @@ def test_provision_persists_the_endpoint_before_keep_alive(tmp_path, keep_alive_
     assert orch.env.endpoint == "m-s-job"
 
 
+def test_provision_without_keep_alive_stores_the_session_and_starts_no_daemon(
+    tmp_path, keep_alive_spawn
+):
+    client = MagicMock()
+    client.assign.return_value = _cpu_assignment("m-s-job")
+    stored = []
+    session_store = MagicMock()
+    session_store.add.side_effect = lambda s: stored.append(
+        (s.keep_alive_disabled, s.keep_alive_pid)
+    )
+    orch = _orch(
+        tmp_path,
+        spec=_spec(accelerator=Accelerator(prefer=[], accept_cpu=True)),
+        client=client,
+        session_store=session_store,
+    )
+    orch.env.keep_alive_disabled = True
+
+    orch.provision()
+
+    # `job status`, `destroy` and the transport find the VM through this record.
+    assert stored == [(True, None)]
+    client.keep_alive_assignment.assert_not_called()
+    keep_alive_spawn.assert_not_called()
+    assert orch.env.endpoint == "m-s-job"
+
+
+def test_keep_alive_disabled_is_in_the_envelope_only_when_set():
+    env = JobEnvelope(job_id="j")
+    assert "keep_alive_disabled" not in env.model_dump(mode="json")
+    env.keep_alive_disabled = True
+    assert env.model_dump(mode="json")["keep_alive_disabled"] is True
+
+
+def test_a_lost_assignment_with_keep_alive_off_states_that_in_the_reason(tmp_path):
+    transport = MagicMock()
+    transport.read_json.return_value = (None, FakeStatus.SESSION_LOST)
+    orch = _orch(tmp_path)
+    orch.env.keep_alive_disabled = True
+
+    orch.poll(transport, deadline=time.time() + 5, interval=0)
+
+    assert orch.env.reason.startswith("the assignment is gone from the server")
+    assert "keep-alive was off (--no-keepalive)" in orch.env.reason
+    assert orch.env.retry_class is RetryClass.RETRY_SAME
+
+
+def test_a_lost_assignment_with_keep_alive_has_the_plain_reason(tmp_path):
+    transport = MagicMock()
+    transport.read_json.return_value = (None, FakeStatus.SESSION_LOST)
+    orch = _orch(tmp_path)
+
+    orch.poll(transport, deadline=time.time() + 5, interval=0)
+
+    assert "keep-alive" not in orch.env.reason
+
 
 def test_provision_scope_error_releases_the_vm_without_a_daemon(
     tmp_path, keep_alive_spawn
@@ -2061,8 +2117,9 @@ def test_a_keep_alive_preflight_network_error_is_recorded_and_tolerated(
 def test_a_keep_alive_daemon_that_cannot_start_fails_provisioning(
     tmp_path, keep_alive_spawn
 ):
-    """Without the daemon Colab reclaims the idle VM mid-run, with no record
-    of why. Failing at provision says so while the cause is known."""
+    """A job applied with keep-alive on that cannot start its daemon fails
+    at provision with the cause, and the reason names `--no-keepalive` as
+    the way to run without a daemon."""
     client = MagicMock()
     client.assign.return_value = _cpu_assignment("m-s-job")
     keep_alive_spawn.side_effect = OSError(24, "Too many open files")
@@ -2078,6 +2135,7 @@ def test_a_keep_alive_daemon_that_cannot_start_fails_provisioning(
     assert exc.value.phase is Phase.PROVISION
     assert exc.value.retry_class is RetryClass.FIX_HUMAN
     assert "Too many open files" in exc.value.reason
+    assert "apply with --no-keepalive to run without one" in exc.value.reason
     assert orch.env.endpoint == "m-s-job"
 
 
@@ -2751,3 +2809,91 @@ def test_a_keep_alive_preflight_http_error_keeps_its_json_body(tmp_path, keep_al
     assert "HTTP 500" in hint
     assert 'response body: {"error": {"message": "backend unavailable"}}' in hint
     assert "nbh=" not in hint
+
+
+# --------------------------------------------------------------------------
+# Compute-unit readings
+# --------------------------------------------------------------------------
+
+
+def _ccu(balance, rate=0.08, assignments=1):
+    from colab_cli.client import CcuInfo
+
+    return CcuInfo(
+        current_balance=balance, consumption_rate_hourly=rate, assignments_count=assignments
+    )
+
+
+def test_provision_records_the_compute_units_after_the_grant(tmp_path):
+    client = MagicMock()
+    client.assign.return_value = _cpu_assignment("m-s-job")
+    client.get_ccu_info.return_value = _ccu(108.5, rate=0.16, assignments=2)
+    orch = _orch(
+        tmp_path,
+        spec=_spec(accelerator=Accelerator(prefer=[], accept_cpu=True)),
+        client=client,
+    )
+
+    orch.provision()
+
+    reading = orch.env.compute_units_at_provision
+    assert (reading.balance, reading.rate_hourly, reading.assignments) == (108.5, 0.16, 2)
+    assert reading.at
+
+
+def test_a_compute_unit_read_that_fails_is_a_hint_and_provisioning_continues(
+    tmp_path, caplog
+):
+    client = MagicMock()
+    client.assign.return_value = _cpu_assignment("m-s-job")
+    client.get_ccu_info.side_effect = requests.exceptions.ReadTimeout("slow ccu-info")
+    orch = _orch(
+        tmp_path,
+        spec=_spec(accelerator=Accelerator(prefer=[], accept_cpu=True)),
+        client=client,
+    )
+
+    with caplog.at_level("WARNING"):
+        orch.provision()
+
+    assert orch.env.endpoint == "m-s-job"
+    assert orch.env.compute_units_at_provision is None
+    assert "compute units not read at provision: ReadTimeout: slow ccu-info" in orch.env.hints
+    assert "compute units not read at provision" in caplog.text
+
+
+def test_cleanup_records_the_compute_units_after_the_release(tmp_path, monkeypatch):
+    client = MagicMock()
+    client.get_ccu_info.return_value = _ccu(107.9, rate=0.0, assignments=0)
+    orch = _orch(tmp_path, client=client)
+    orch.env.endpoint = "m-s-job"
+    order = []
+    monkeypatch.setattr(
+        "colab_cli.job.orchestrator.release_assignment",
+        lambda _client, _endpoint: order.append("release") or (Cleanup.RELEASED, None),
+    )
+    client.get_ccu_info.side_effect = lambda **_kw: order.append("read") or _ccu(107.9, 0.0, 0)
+
+    orch.cleanup()
+
+    assert order == ["release", "read"]
+    reading = orch.env.compute_units_at_release
+    assert (reading.balance, reading.assignments) == (107.9, 0)
+
+
+def test_a_left_up_vm_gets_no_release_reading(tmp_path):
+    client = MagicMock()
+    orch = _orch(tmp_path, client=client)
+    orch.env.endpoint = "m-s-job"
+
+    orch.cleanup(leave_up=True)
+
+    client.get_ccu_info.assert_not_called()
+    assert orch.env.compute_units_at_release is None
+
+
+def test_the_serialized_envelope_omits_compute_unit_readings_until_they_are_taken():
+    dumped = JobEnvelope(job_id="j").model_dump(mode="json")
+
+    assert "compute_units_at_provision" not in dumped
+    assert "compute_units_at_release" not in dumped

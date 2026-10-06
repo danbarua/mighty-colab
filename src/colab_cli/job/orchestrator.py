@@ -44,6 +44,7 @@ from colab_cli.job import RESULT_SCHEMA_VERSION, SCHEMA_VERSION
 from colab_cli.job.models import (
     ArtifactResult,
     Cleanup,
+    ComputeUnitReading,
     InputResult,
     InstallAttempt,
     ProvisionAttempt,
@@ -121,6 +122,9 @@ def _now() -> str:
 
 # Characters of a JSON assign-failure body kept in a provision attempt.
 ASSIGN_BODY_CHARS = 300
+# Connect and read timeouts, in seconds, for the compute-unit reading.
+# Provisioning and cleanup wait for the reading, and no outcome depends on it.
+COMPUTE_UNITS_TIMEOUT = (5.0, 10.0)
 
 
 def _failed_assign(want: str, error: BaseException) -> ProvisionAttempt:
@@ -461,6 +465,9 @@ class Orchestrator:
                 self.env.provision_attempts = attempts
             self._persist()
             self._start_keep_alive()
+            self.env.compute_units_at_provision = read_compute_units(
+                self.client, self.env, "provision"
+            )
             self.emit(f"[job] provisioned {res.endpoint} accel={granted}")
             return
 
@@ -489,7 +496,7 @@ class Orchestrator:
         )
 
     def _start_keep_alive(self) -> None:
-        """Own the TFE daemon for this assignment.
+        """Store the session and own the TFE daemon for this assignment.
 
         Persist the session first so the detached child cannot observe an
         empty store and exit with `session_not_found`.
@@ -503,6 +510,14 @@ class Orchestrator:
         from colab_cli.utils import get_status_code
 
         session = self.session_state
+        if self.env.keep_alive_disabled:
+            # With `--no-keepalive`, provision sends no pre-flight ping and
+            # starts no daemon. Provision still stores the session, because
+            # `job status`, `destroy` and the transport reach the VM through
+            # the session record.
+            session.keep_alive_disabled = True
+            self.session_store.add(session)
+            return
         try:
             self.client.keep_alive_assignment(session.endpoint)
         except ColabRequestError as exc:
@@ -548,7 +563,8 @@ class Orchestrator:
             raise PhaseError(
                 Phase.PROVISION,
                 f"the keep-alive daemon could not be started ({describe_error(exc)}); "
-                "without it Colab reclaims the idle VM while the job runs",
+                "the job was applied with keep-alive on, so it stops here: apply "
+                "with --no-keepalive to run without one",
                 RetryClass.FIX_HUMAN,
             ) from exc
         self.session_store.add(session)
@@ -1055,9 +1071,7 @@ class Orchestrator:
                 self._absorb_or_keep(result, transport)
                 return
             if status.name == "SESSION_LOST":
-                self._finish_without_result(
-                    "the assignment is gone from the server", transport
-                )
+                self._finish_without_result(lost_assignment_reason(self.env), transport)
                 return
             if status.name == "DEGRADED":
                 consecutive_degraded += 1
@@ -1400,6 +1414,9 @@ class Orchestrator:
         self._stop_keep_alive()
         try:
             self.env.cleanup, detail = release_assignment(self.client, self.env.endpoint)
+            self.env.compute_units_at_release = read_compute_units(
+                self.client, self.env, "release"
+            )
             if self.env.cleanup is Cleanup.FAILED:
                 self.env.record_failure(Phase.CLEANUP)
             if detail:
@@ -1649,6 +1666,39 @@ class WatchdogStaleness:
             "watchdog has stopped, or cannot write its record (for example a "
             "full disk), so whether the runner is alive is unknown"
         )
+
+
+def read_compute_units(client, env: JobEnvelope, when: str) -> Optional[ComputeUnitReading]:
+    """Return the account's compute units now. When the read fails, return
+    None, append a hint with the error to `env`, and log a WARN. No job
+    outcome depends on the reading."""
+    try:
+        ccu = client.get_ccu_info(timeout=COMPUTE_UNITS_TIMEOUT)
+        return ComputeUnitReading(
+            at=_now(),
+            balance=ccu.current_balance,
+            rate_hourly=ccu.consumption_rate_hourly,
+            assignments=ccu.assignments_count,
+        )
+    except Exception as error:  # noqa: BLE001 - recorded; the job goes on
+        detail = describe_error(error)
+        _logger.warning("job %s: compute units not read at %s: %s", env.job_id, when, detail)
+        env.hints.append(f"compute units not read at {when}: {detail}")
+        return None
+
+
+def lost_assignment_reason(env: JobEnvelope) -> str:
+    """Return the reason for a job whose assignment disappeared. For a job
+    applied with `--no-keepalive`, the reason states that no keep-alive
+    daemon pinged the assignment."""
+    reason = "the assignment is gone from the server"
+    if env.keep_alive_disabled:
+        reason += (
+            "; keep-alive was off (--no-keepalive), so nothing pinged the "
+            "assignment while the job ran: if this recurs, apply without "
+            "--no-keepalive"
+        )
+    return reason
 
 
 def degraded_reason(transport, polls: Optional[int] = None) -> str:

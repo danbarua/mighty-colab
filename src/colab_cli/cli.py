@@ -43,6 +43,7 @@ JSON_CAPABLE_COMMANDS = {
     "stop",
     "sessions",
     "status",
+    "usage",
     # The whole `job` group. Its subcommands all emit the same envelope
     # shape, and the group name is what the callback sees as the invoked
     # subcommand, so one entry covers plan/apply/status/destroy/list.

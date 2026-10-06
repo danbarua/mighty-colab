@@ -14,7 +14,7 @@ log:
 2026-05-12: Added an optional `timeout=` parameter to `ColabRuntime.execute_code` that flows through to both the `execute()` and `execute_interactive()` branches. `colab auth` and `colab drivemount` now pass `timeout=600` (10 min) via a shared `INTERACTIVE_AUTOMATION_TIMEOUT_SEC` constant in `commands/automation.py`. Background: `jupyter_kernel_client` defaults to a 10s wall-clock timeout that is consumed even when the kernel is idle waiting on `input_request`. With the drivefs hook intercepting that request and prompting the user to OAuth in their browser, any user that takes >10s to click through (essentially everyone) hit `TimeoutError` and saw "drivemount failed" even though the mount had actually succeeded server-side. The fix is scoped narrowly to the two human-in-the-loop subcommands; non-interactive paths (`colab exec`, `colab run`, `colab install`, `colab repl --pipe`, `colab console --pipe`) keep the upstream default since they receive continuous iopub traffic that resets the practical inactivity ceiling.
 ---
 
-# Design: Automation and Utility (`auth`, `install`, `log`, `pay`, `version`, `update`, `whoami`)
+# Design: Automation and Utility (`auth`, `install`, `log`, `pay`, `usage`, `version`, `update`, `whoami`)
 
 ## Overview
 
@@ -166,7 +166,30 @@ to the session history as `keep_alive_stopped`.
 -   **Implementation**: Uses
     `webbrowser.open("https://colab.research.google.com/signup")`.
 
-### 6. Version Information (`colab version`)
+### 6. Compute-Unit Usage (`mighty-colab usage`)
+
+-   **Action**: Show the account's compute-unit balance, what its
+    assignments consume per hour, how many assignments it has, and which
+    GPUs and TPUs it may request. A port of upstream's `colab usage`
+    (googlecolab/google-colab-cli#122).
+-   **Implementation**: `Client.get_ccu_info()` reads `GET /tun/m/ccu-info`
+    into `CcuInfo`. Colab's response also contains `eligibleGpus`,
+    `ineligibleGpus` and `eligibleTpus`, and `usage` prints them. When the
+    response omits a list, `usage` omits that list from its output, so an
+    omitted list is distinguishable from an empty list.
+-   **`--json`**: The envelope contains `current_balance`,
+    `consumption_rate_hourly`, `assignments_count`, and each accelerator
+    list that Colab's response contained. When the read fails, `usage`
+    exits 1 with reason `usage_unavailable` and `http_status`, and
+    `message` contains the error and any JSON response body. `usage` is
+    also an MCP tool.
+-   **When the balance changes**: Colab updates the balance every few
+    minutes, not when a VM is released. On 2026-10-06 it stayed unchanged
+    for 45 s after a release and dropped while VMs ran with nothing
+    released. Each job envelope records a reading at provision and at
+    release (`docs/job/usage.md`).
+
+### 7. Version Information (`colab version`)
 
 -   **Action**: Show the current version of the Colab CLI.
 -   **Implementation**:
@@ -176,7 +199,7 @@ to the session history as `keep_alive_stopped`.
         Git commit hash using `git rev-parse --short HEAD`.
     -   Dynamic versioning is supported in the build system via `hatch-vcs`.
 
-### 7. Auto-Update (`colab update`)
+### 8. Auto-Update (`colab update`)
 
 -   **Action**: Check if a new version of the Colab CLI is available.
 -   **Auto-check**: The CLI automatically checks for updates once every 24 hours
@@ -233,7 +256,7 @@ to the session history as `keep_alive_stopped`.
     automation. If the upgrade command exits non-zero, `colab update --install`
     propagates the same exit code.
 
-### 8. Identity Inspection (`colab whoami`) [developer-only]
+### 9. Identity Inspection (`colab whoami`) [developer-only]
 
 -   **Action**: Resolve the active credentials, mint an access token, and
     print the email, audience, scopes, and expiry of that token.
@@ -275,7 +298,7 @@ to the session history as `keep_alive_stopped`.
       - openid
     ```
 
-### 9. README and AGENT (`colab README`, `colab AGENT`)
+### 10. README and AGENT (`colab README`, `colab AGENT`)
 
 -   **Action**: Print the bundled `README.md` or `AGENTS.md` file.
 -   **Implementation**:

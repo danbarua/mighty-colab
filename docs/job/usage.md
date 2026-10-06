@@ -31,7 +31,7 @@ Use `mighty-colab sessions` after every interrupted run and explicitly destroy a
 
 ```bash
 mighty-colab job plan SPEC_FILE [--out PATH] [--no-probe]
-mighty-colab job apply [PLAN_FILE] [--job-id ID] [--timeout S] [--leave-up] [--async]
+mighty-colab job apply [PLAN_FILE] [--job-id ID] [--timeout S] [--leave-up] [--async] [--no-keepalive]
 mighty-colab job status JOB_ID [--poll] [--interval S]
 mighty-colab job destroy JOB_ID [--cancel-only] [--wait S]
 
@@ -45,7 +45,7 @@ local record collection as a whole, and doesn't touch the VM.
 
 `plan` never allocates a VM. It writes redacted `spec.json` and `plan.json` records, writes a redacted explicit `--out` path, and creates an adjacent mode-0600 `.mighty-colab-secrets.json` sidecar when query credentials exist. Keep that sidecar beside the plan: `apply` validates and hydrates it before allocation. By default planning also performs one-byte ranged GET probes of declared data URLs; `--no-probe` disables those reads. Plans are written even with warnings or errors; `apply` refuses errors and refuses warnings unless the spec sets `ignore_warnings: true`.
 
-`apply` accepts either a plan-file positional argument or `--job-id`. Apply's deadline is `wall_clock` + 600 seconds after launch; `--timeout N` replaces it with N seconds for the whole call from its start. When the deadline passes with no verdict, apply cancels the job, waits up to 300 seconds for its result, and releases the VM; the watchdog's `wall_clock` kill still applies on the VM. `job status --poll` gives an orphaned job the same default deadline; a plain `job status` only reports a job past it. `--leave-up` keeps the VM after completion. `--async` starts `apply` as a detached background process and returns at once with the job ID, the process ID and the path of its log (`apply.log` in the job directory); follow it with `job status --poll`.
+`apply` accepts either a plan-file positional argument or `--job-id`. Apply's deadline is `wall_clock` + 600 seconds after launch; `--timeout N` replaces it with N seconds for the whole call from its start. When the deadline passes with no verdict, apply cancels the job, waits up to 300 seconds for its result, and releases the VM; the watchdog's `wall_clock` kill still applies on the VM. `job status --poll` gives an orphaned job the same default deadline; a plain `job status` only reports a job past it. `--leave-up` keeps the VM after completion. `--async` starts `apply` as a detached background process and returns at once with the job ID, the process ID and the path of its log (`apply.log` in the job directory); follow it with `job status --poll`. `--no-keepalive` starts no keep-alive daemon for the job's VM; it is recorded in the envelope as `keep_alive_disabled`, `job status` does not respawn a daemon for the job, and when the assignment disappears, the reason states that keep-alive was off.
 
 `destroy --cancel-only` writes cancellation intent that runner and watchdog consume, but deliberately does not unassign the VM; failure to write the intent is an error. A full `destroy` of a running job writes the same intent and waits up to `--wait` seconds (default 300) for the runner to stop the job, upload artifacts and write its result before release. If the job's `job apply` is still running, `destroy` waits for that supervisor to release the VM instead of releasing it a second time.
 
@@ -148,6 +148,8 @@ Examples:
 
 - `workload: succeeded` + `cleanup: failed` means the result may be fine, but release was not confirmed and the VM may still bill. Run `job destroy` and check `sessions`.
 - `workload: failed` + `cleanup: released` is a cleanly reported workload failure with no confirmed allocation left behind.
+
+`compute_units_at_provision` and `compute_units_at_release` record the account's compute units once the VM was granted and once it was released: the time, `balance`, `rate_hourly` and the number of `assignments`. The balance is account-wide, and Colab updates it every few minutes rather than at release, so the difference between the two readings is what the whole account spent over approximately the job's lifetime. Each reading records how many assignments the account had at that moment; a VM that was assigned and released between the two readings appears in neither count. When a read fails, the envelope gets a hint and omits that reading. `job status` prints both on a `compute:` line. `mighty-colab usage` reads the same numbers at any time.
 
 ### Where it failed: `failed_phase`
 
@@ -326,7 +328,7 @@ mighty-colab job status <id> --poll
 
 This command observes remote result, launch, and watchdog records. With `--poll` it continues until a remote verdict, a dead runner, a lost assignment, or a never-started orphan can be classified. For an orphaned supervisor it then finishes pending cleanup; a live runner or a healthy concurrent supervisor remains untouched. The returned envelope can therefore still have `done: false` when the job is legitimately running.
 
-The keep-alive daemon that stops Colab reclaiming the idle VM can die with a killed `job apply`. Every `job status` call on a job whose cleanup is still pending respawns the daemon if it is dead and adds a hint saying so. Nothing else respawns it, so poll an orphaned job with `job status` until it finishes.
+The keep-alive daemon pings Colab so that it does not reclaim the idle VM, and the daemon can die with a killed `job apply`. Every `job status` call on a job whose cleanup is still pending respawns the daemon if it is dead and adds a hint saying so, except for a job applied with `--no-keepalive`. Nothing else respawns it, so poll an orphaned job with `job status` until it finishes.
 
 After a killed apply, run `status --poll`; it uses the control-result GET fallback when the VM result is unavailable. Then inspect the account and destroy the allocation explicitly.
 
@@ -356,7 +358,7 @@ Be aware of these before trusting a long run:
 
 - Retry/recreate/resume and `control.log` are not implemented; planning rejects non-default policy values.
 - Caller-owned source specs and generated `.mighty-colab-secrets.json` sidecars still contain full signed URLs and require credential handling.
-- The longest recorded runs are 96 minutes (A100) and 70 minutes (CPU); no recorded run has crossed a second token expiry, at about two hours.
+- The longest recorded runs are 96 minutes (A100) and 180 minutes (CPU). A 180-minute CPU job polled by `apply` crossed two expiries of the runtime-proxy token; no recorded run has crossed a third, at about three hours.
 - A platform-initiated kernel replacement or crash is unverified; the explicit `restart-kernel` path is verified.
 
 `docs/job/design.md` lists every known gap, and `docs/job/chronology.md` lists what has been verified live and when.

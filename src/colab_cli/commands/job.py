@@ -75,8 +75,10 @@ from colab_cli.job.orchestrator import (
     observe_remote,
     raw_verdict,
     keep_vm,
+    lost_assignment_reason,
     record_vm_kept,
     pull_runner_log,
+    read_compute_units,
     release_assignment,
     replace_hint,
     request_cancel,
@@ -149,6 +151,7 @@ def spawn_apply_async(
     timeout: Optional[int],
     leave_up: bool,
     log_path: str,
+    keep_alive: bool = True,
     auth_provider=None,
     config_path: Optional[str] = None,
 ) -> int:
@@ -175,6 +178,8 @@ def spawn_apply_async(
         args.extend(["--timeout", str(timeout)])
     if leave_up:
         args.append("--leave-up")
+    if not keep_alive:
+        args.append("--no-keepalive")
     return _spawn_detached(args, log_path, auth_provider, config_path)
 
 
@@ -273,6 +278,20 @@ def _emit_command_message(
         typer.echo(message, err=bool(exit_code))
 
 
+def _compute_units_line(env: JobEnvelope) -> str:
+    def reading(r, when: str) -> str:
+        noun = "assignment" if r.assignments == 1 else "assignments"
+        return f"{r.balance:.2f} {when} ({r.assignments} {noun})"
+
+    parts = []
+    if env.compute_units_at_provision:
+        parts.append(reading(env.compute_units_at_provision, "units at provision"))
+    if env.compute_units_at_release:
+        when = "at release" if parts else "units at release"
+        parts.append(reading(env.compute_units_at_release, when))
+    return ", ".join(parts) + "; the account's balance, updated every few minutes"
+
+
 def _human(env: JobEnvelope) -> str:
     lines = [
         f"[job] {env.job_id}",
@@ -293,6 +312,8 @@ def _human(env: JobEnvelope) -> str:
             f"  accel:      requested={env.requested_accelerator} "
             f"actual={env.actual_accelerator}"
         )
+    if env.compute_units_at_provision or env.compute_units_at_release:
+        lines.append("  compute:    " + _compute_units_line(env))
     if env.exception:
         lines.append(
             f"  exception:  {env.exception.get('type')}: {env.exception.get('message')}"
@@ -497,6 +518,18 @@ def apply(
             help="Spawn apply as a detached background process and return immediately",
         ),
     ] = False,
+    no_keepalive: Annotated[
+        bool,
+        typer.Option(
+            "--no-keepalive",
+            "--no-keep-alive",
+            help=(
+                "Start no keep-alive daemon for the job's VM; `job status` "
+                "does not respawn one. Recorded in the envelope as "
+                "keep_alive_disabled."
+            ),
+        ),
+    ] = False,
 ):
     """Execute a plan: provision through teardown.
 
@@ -542,6 +575,7 @@ def apply(
             timeout=timeout,
             leave_up=leave_up,
             log_path=log_path,
+            keep_alive=not no_keepalive,
             auth_provider=state.auth_provider,
             config_path=state.config_path,
         )
@@ -729,6 +763,7 @@ def apply(
     # Recorded before the first envelope write, so a detached
     # `job status --poll` that finishes the job honours it too.
     orch.env.leave_up = leave_up
+    orch.env.keep_alive_disabled = no_keepalive
 
 
     # An explicit --timeout bounds this whole call from now (an agent's
@@ -1078,6 +1113,7 @@ def _release(env, state, failure: str) -> None:
         env.cleanup = Cleanup.ALREADY_ABSENT
         return
     env.cleanup, detail = release_assignment(state.client, env.endpoint)
+    env.compute_units_at_release = read_compute_units(state.client, env, "release")
     if env.cleanup is Cleanup.FAILED:
         env.record_failure(Phase.CLEANUP)
     if detail:
@@ -1308,8 +1344,9 @@ def _release_orphaned_job(env, session, state, store, transport) -> None:
     store.write_envelope(env)
 
 
-def _ensure_keep_alive(session, state) -> Optional[str]:
+def _ensure_keep_alive(session, state, env) -> Optional[str]:
     """Respawn keep-alive if the daemon has died, returning a hint if so.
+    A job applied with `--no-keepalive` never gets one.
 
     Issue #54: `spawn_keep_alive` starts a genuinely detached process
     (`start_new_session=True`), but it has been observed dying anyway when
@@ -1329,7 +1366,7 @@ def _ensure_keep_alive(session, state) -> Optional[str]:
     """
     from colab_cli.common import pid_alive
 
-    if pid_alive(session.keep_alive_pid):
+    if env.keep_alive_disabled or pid_alive(session.keep_alive_pid):
         return None
     from colab_cli.commands.session import spawn_keep_alive
 
@@ -1429,7 +1466,7 @@ def status(
                 "on this machine"
             )
         if session is not None:
-            keep_alive_hint = _ensure_keep_alive(session, state)
+            keep_alive_hint = _ensure_keep_alive(session, state, env)
             if keep_alive_hint:
                 env.hints.append(keep_alive_hint)
             transport = JobTransport(session, state.client, state.store)
@@ -1467,7 +1504,7 @@ def status(
                             f"{deadline[1]}; `job status {job_id} --poll` cancels it "
                             f"and releases the VM, `job destroy {job_id}` stops it now",
                         )
-                    keep_alive_hint = _ensure_keep_alive(session, state)
+                    keep_alive_hint = _ensure_keep_alive(session, state, env)
                     if keep_alive_hint:
                         env.hints.append(keep_alive_hint)
                     # Same Contents connection already open for the result
@@ -1507,7 +1544,7 @@ def status(
                     if kind == "session_lost":
                         env.workload = Workload.UNKNOWN
                         env.record_failure(Phase.RUN)
-                        env.reason = "the assignment is gone from the server"
+                        env.reason = lost_assignment_reason(env)
                         env.retry_class = RetryClass.RETRY_SAME
                         env.supervisor = Supervisor.FINISHED
                         break

@@ -1032,3 +1032,26 @@ def test_run_with_timeout_flag(
     code_calls = mock_runtime.execute_code.call_args_list
     body_call = next(c for c in code_calls if "hello from script" in c.args[0])
     assert body_call.kwargs.get("timeout") == 3600.0
+
+
+def test_run_no_keepalive_starts_no_daemon(
+    mock_client,
+    mock_store,
+    mock_runtime_class,
+    mock_spawn_keep_alive,
+    assign_response,
+    script_path,
+):
+    mock_client.assign.return_value = assign_response
+    mock_runtime_class.return_value.execute_code.return_value = []
+    persisted = {}
+    mock_store.add.side_effect = lambda session: persisted.update(session=session)
+    mock_store.get.side_effect = lambda _name: persisted.get("session")
+
+    result = runner.invoke(app, ["run", "--no-keepalive", str(script_path)])
+
+    assert result.exit_code == 0, result.output
+    mock_spawn_keep_alive.assert_not_called()
+    mock_client.keep_alive_assignment.assert_not_called()
+    assert persisted["session"].keep_alive_disabled is True
+    mock_client.unassign.assert_called_once_with("ep-123")

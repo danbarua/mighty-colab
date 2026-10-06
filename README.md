@@ -250,6 +250,8 @@ adds:
 | `mcp` | Expose non-interactive CLI commands as MCP tools |
 | `--debug` | Opt into verbose client and transport diagnostics |
 | `sync [--git-aware]` | Gzip a file tree before transfer; optionally retain sparse Git identity and selected worktree status |
+| `usage` | Compute-unit balance, hourly consumption and eligible accelerators, also as `--json`; each job envelope records the balance at provision and release |
+| `--no-keepalive` on `new`, `run`, `job apply` | Start no keep-alive daemon. Upstream states that Colab's backend now keeps runtimes alive based on kernel activity and active connections |
 | Chunked uploads | Move large files without the single-request failure mode |
 
 The fork also tightens failure behavior around remote exceptions, package

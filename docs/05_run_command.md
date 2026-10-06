@@ -111,7 +111,7 @@ anything GPU-specific.
 
 ## Behavior
 
-1. **Allocate**: Creates a fresh session (mirrors `colab new` end-to-end: `assign` → keep-alive pre-flight → spawn keep-alive daemon → persist `SessionState`). Session name defaults to `run-<6 hex>`.
+1. **Allocate**: Creates a fresh session (mirrors `colab new` end-to-end: `assign` → keep-alive pre-flight → spawn keep-alive daemon → persist `SessionState`). With `--no-keepalive` there is no pre-flight and no daemon, and the session records `keep_alive_disabled`. Session name defaults to `run-<6 hex>`.
 2. **Execute**: Reads the script file. Prepends a deterministic prelude (`_build_script_prelude()`, `commands/execution.py` -- shared with `exec -f`, see `docs/02_execution_and_interactive.md`) that re-sets `sys.argv`, `__name__`, and `__file__` so the script body sees the same execution context as `python script.py arg1 arg2`:
    ```python
    import sys

@@ -222,6 +222,18 @@ def run_command(
             ),
         ),
     ] = False,
+    no_keepalive: Annotated[
+        bool,
+        typer.Option(
+            "--no-keepalive",
+            "--no-keep-alive",
+            help=(
+                "Start no keep-alive daemon for the session's VM. Recorded on "
+                "the session; `sessions --json` reports keep_alive_health "
+                "disabled."
+            ),
+        ),
+    ] = False,
     keep: Annotated[
         bool,
         typer.Option(
@@ -450,50 +462,56 @@ def run_command(
         ),
     )
 
-    # Pre-flight keep-alive: same scope-detection dance as `colab new` so a
-    # missing OAuth scope doesn't leak a billable assignment.
-    try:
-        state.client.keep_alive_assignment(endpoint)
-    except ColabRequestError as e:
-        if get_status_code(e) == 403 and _is_scope_error(e):
-            if state.json_output:
-                emit_json(
-                    build_envelope(
-                        "error",
-                        "run",
-                        exit_code=1,
-                        reason="auth_scope_missing",
-                        http_status=403,
-                    )
-                )
-            typer.echo(
-                "[colab] Keep-alive pre-flight failed: your credentials "
-                "are missing an OAuth scope required by Colab.\n",
-                err=True,
-            )
-            typer.echo(_scope_remediation_message(state.auth_provider), err=True)
-            try:
-                state.client.unassign(endpoint)
-            except Exception:
-                pass
-            raise typer.Exit(code=1)
-        # Other failures: don't block — the daemon will retry.
-        _record_keep_alive_failure(s)
+    if no_keepalive:
+        # With `--no-keepalive`, `run` sends no pre-flight ping and starts no daemon.
+        s.keep_alive_disabled = True
+        state.store.add(s)
     else:
-        # `else`, not just falling through past `except` -- must only run
-        # when the ping genuinely succeeded, not on a tolerated failure.
-        _record_keep_alive_success(s)
+        # Pre-flight keep-alive: same scope-detection dance as `colab new` so a
+        # missing OAuth scope doesn't leak a billable assignment.
+        try:
+            state.client.keep_alive_assignment(endpoint)
+        except ColabRequestError as e:
+            if get_status_code(e) == 403 and _is_scope_error(e):
+                if state.json_output:
+                    emit_json(
+                        build_envelope(
+                            "error",
+                            "run",
+                            exit_code=1,
+                            reason="auth_scope_missing",
+                            http_status=403,
+                        )
+                    )
+                typer.echo(
+                    "[colab] Keep-alive pre-flight failed: your credentials "
+                    "are missing an OAuth scope required by Colab.\n",
+                    err=True,
+                )
+                typer.echo(_scope_remediation_message(state.auth_provider), err=True)
+                try:
+                    state.client.unassign(endpoint)
+                except Exception:
+                    pass
+                raise typer.Exit(code=1)
+            # Other failures: don't block — the daemon will retry.
+            _record_keep_alive_failure(s)
+        else:
+            # `else`, not just falling through past `except` -- must only run
+            # when the ping genuinely succeeded, not on a tolerated failure.
+            _record_keep_alive_success(s)
 
-    # AGENTS.md item 17: persist BEFORE spawning the daemon so the daemon's
-    # initial state.store.get(name) doesn't race the parent.
-    state.store.add(s)
-    s.keep_alive_pid = spawn_keep_alive(
-        endpoint,
-        name,
-        auth_provider=state.auth_provider,
-        config_path=state.config_path,
-    )
-    state.store.add(s)
+        # AGENTS.md item 17: persist BEFORE spawning the daemon so the daemon's
+        # initial state.store.get(name) doesn't race the parent.
+        state.store.add(s)
+        s.keep_alive_pid = spawn_keep_alive(
+            endpoint,
+            name,
+            auth_provider=state.auth_provider,
+            config_path=state.config_path,
+        )
+        state.store.add(s)
+
     state.history.log_event(
         name,
         "session_created",
@@ -503,6 +521,7 @@ def run_command(
             "accelerator": accelerator.value,
             "machine_shape": s.machine_shape,
             "via": "run",
+            "keep_alive_disabled": no_keepalive,
         },
     )
     typer.echo(f"[colab] Session READY ({name}). Executing {script}...", err=True)
