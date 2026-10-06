@@ -10,6 +10,55 @@ below corresponds to a tag of the same name.
 
 ## [Unreleased]
 
+### Added
+
+- **`job` and `jobs`: unattended runs on a Colab VM.** `job plan` validates a
+  YAML spec and writes a plan. `job apply` provisions a VM, installs the
+  dependencies, stages the code and data, and launches the run as a process
+  detached from the kernel, so the run continues when the local `apply`
+  process dies. `job status` reports the job and, for a job whose `apply` is
+  gone, collects the result and releases the VM. `job destroy` cancels the
+  run and releases the VM. `jobs list` and `jobs prune` manage the local job
+  store. See `docs/job/usage.md` and `docs/job/spec.md`; `docs/job/chronology.md`
+  records each change and finding with its evidence.
+  - The envelope (`job status --json`) reports `workload`, `offload`,
+    `cleanup` and `supervisor` separately, plus `failed_phase`, a
+    `retry_class` that states what to do next, a `reason`, and `hints`.
+  - Inputs and artifacts move over signed URLs. A plan locks each source
+    file's size and SHA-256 and each input's digest. Every URL must resolve
+    to public addresses. No record that `job` writes contains a signed URL,
+    except a mode-0600 sidecar beside the plan.
+  - Dependencies install with uv, then with pip when uv fails, and a failed
+    install is classified.
+  - `job apply --async` returns at once. A SIGTERM or SIGHUP after launch
+    hands the job to a detached `job status --poll`. When no result arrives
+    by launch + `wall_clock` + 600 s, `job apply` or that detached poll
+    cancels the run and releases the VM.
+  - `job apply` runs a keep-alive daemon for the VM; `--no-keepalive` starts
+    none. `--leave-up` keeps the VM after the run.
+  - The envelope records the account's compute-unit balance when the VM is
+    granted and when it is released.
+  - Live end-to-end scripts are under `integration/repro_job_*`.
+- **MCP job resources.** The MCP server exposes `job://<id>` (the envelope),
+  `job://<id>/logs`, `job://<id>/files/<name>`, `jobs://`, `jobs://running`
+  and `jobs://done`. A `job://<id>` subscription sends a notification when the
+  workload leaves `pending` and when the job is done, and the server sends
+  `resources/list_changed` when a job is added or pruned.
+- **MCP tool results carry the `--json` envelope.** A tool whose command has
+  an envelope returns the envelope as structured content, beside the
+  command's text.
+- **`usage`** shows the account's compute-unit balance, its hourly
+  consumption, its number of assignments, and the GPUs and TPUs it may
+  request. It is a port of upstream's `colab usage`.
+- **`--no-keepalive` on `new` and `run`** starts no keep-alive daemon.
+  Upstream removed its keep-alive pings on 2026-09-25, stating that Colab's
+  backend now keeps runtimes alive based on kernel activity and active
+  connections.
+- **Keep-alive health in `sessions` and `status`.** Each session reports its
+  daemon's health, consecutive ping failures, the age of the last successful
+  ping, and a retention risk, in text and in `--json`.
+- **`sync`:** new gzip-first file and directory transfer command. Default mode snapshots the selected tree privately with `O_NOFOLLOW` before tar and omits `.git`; `--git-aware` sends a shallow, blob-filtered sparse repository plus selected tracked and non-ignored worktree changes, preserving offline `HEAD` and scoped status without shipping unrelated blobs.
+
 ### Fixed
 
 - **Expired proxy credentials deleted live local session bindings.** A proxy
@@ -21,110 +70,10 @@ below corresponds to a tag of the same name.
 - **`status` reported local bookkeeping as live VM state.** Plain-text and
   `--json` output now label busy/idle values `LAST-KNOWN-LOCAL`, making explicit
   that they come from the local command marker rather than a kernel query.
-- **`job destroy --cancel-only` did not stop detached workloads.** Runner and
-  watchdog now consume the intent, terminate the consumer with grace-period
-  escalation, and leave the VM assigned. Full destroy now reads and preserves
-  any remote workload verdict before unassigning; an absent verdict becomes
-  `unknown` instead of an invented cancellation.
-- **Signed URL credentials leaked into durable job records and kernel history.**
-  Generated specs, plans, manifests, envelopes, events, diagnostics, and launch
-  history now carry canonical URL identities and opaque references only. Full
-  URLs remain in mode-0600 local plan sidecars and a short-lived mode-0600 VM
-  handoff consumed through an inherited descriptor by an isolated runner.
-  Interrupted recovery confirms deletion or forces assignment teardown; source
-  bundles exclude secret records and reject signed-credential query parameters.
-- **`job apply` did not start or own keep-alive.** Provision now persists the
-  job session, starts the TFE daemon with the parent's `--auth` and `--config`,
-  and records pid plus last ping. Cleanup and destroy stop the daemon after
-  release or confirmed absence; `--leave-up` and `--cancel-only` leave it
-  running.
-- **Invalid or inactive job inputs could pass planning.** Data SHA-256 values now
-  require exactly 64 hexadecimal characters; unsupported retry, resume,
-  `control.log`, and `on_run_fail: skip` settings are plan errors; declared
-  artifact sizes now contribute to the remote disk-space gate.
-- **Unexpected supervisor exceptions could leave non-terminal job records.**
-  Non-debug apply now persists and emits a terminal verdict, while status and
-  destroy share complete remote result absorption including artifact/offload
-  state.
-- **A killed `job apply` left cleanup unfinished.** Provision now persists the
-  endpoint before keep-alive. `job status` treats a dead supervisor as
-  orphaned: it absorbs a complete remote result or classifies a dead runner
-  from `launch.json` identity plus `watchdog.json`, then finishes cleanup
-  without overwriting the remote workload if teardown fails.
-- **Job plans did not lock source bytes.** Plans now record each source file's
-  relative path, size, and SHA-256. Apply refuses added, removed, renamed, or
-  changed files before assignment and stages only locked bytes. Signed-URL
-  query canonicalization is unchanged.
-- **Two `job apply` processes could provision the same job twice.** Apply
-  now claims the job ID with an exclusive lock before assignment. A live
-  second owner fails before `assign`; a dead owner's lock is taken over;
-  a job that already has an endpoint is refused.
-- **Apply stage, restart, and assignment refresh could hang unbounded.**
-  Stage, poll, cancel, and recovery now share one `JobTransport`. Contents
-  requests and assignment re-resolution use connect/read deadlines, kernel
-  restart has an explicit timeout, timed-out writes confirm before retry,
-  and exhausted stalls stay degraded unless the assignment is proven gone.
-- **Job URL checks only inspected literal hosts.** Untrusted data, artifact,
-  and control URLs are now resolved. Any non-public IPv4/IPv6 answer is
-  rejected, including mixed DNS. Each request connects to an address from
-  that lookup; redirects are re-checked; HTTPS remains required.
-- **Control-result recovery was manual and GCS URL pairs could drift.** GCS
-  control-result PUT/GET pairs must now identify one object, and status/destroy
-  use the GET URL as a bounded terminal-result fallback when the VM is
-  unavailable. Unsupported retry, resume, control-log, and run-failure policy
-  values remain plan errors.
-- **Off-VM terminal results lacked build provenance.** The detached runner now
-  receives the CLI version fixed before launch and records it with a SHA-256
-  identity of the exact shipped runtime payload. Local envelopes and terminal
-  on-VM/off-VM results carry both values under explicit result schema version 2;
-  current readers continue to accept version-1 records, require complete
-  provenance from version-2 producers, reject unknown result schemas, and
-  leave persisted envelope state unchanged when any terminal field is invalid.
-- **A `setsid` grandchild could outlive a succeeded verdict.** Runner and
-  watchdog now signal processes tagged with `MIGHTY_JOB_ID` using
-  pid+starttime+boot_id identity checks. `succeeded` is refused while a
-  tagged descendant survives or when `/proc` detection is unavailable.
-- **Data GET and artifact PUT buffered whole objects.** Transfers now stream
-  while computing SHA-256. Plan rejects source files over 250 MB before
-  assignment and warns on large aggregate payloads. Verify reports source,
-  input, output, and free-space totals.
-
-- **Job CLI JSON could contradict the process result.** Job help now names all
-  five subcommands. Expected file, plan, and not-found errors emit validated
-  envelopes. Apply and destroy outer exit fields match their process status,
-  while status query success remains distinct from the nested workload verdict.
-- **`job` sessions did not retain the kernel that launched their detached
-  runner.** The session record now persists the runtime's kernel and Jupyter
-  session identifiers, so public `restart-kernel -s job-<id>` targets the
-  launch kernel instead of creating and restarting an unrelated kernel.
-- **`job apply` could remain alive after emitting its terminal envelope.**
-  Cleanup now closes the local kernel client on release and `--leave-up`
-  paths without changing the remote workload verdict.
-
-### Added
-- **`sync`:** new gzip-first file and directory transfer command. Default mode snapshots the selected tree privately with `O_NOFOLLOW` before tar and omits `.git`; `--git-aware` sends a shallow, blob-filtered sparse repository plus selected tracked and non-ignored worktree changes, preserving offline `HEAD` and scoped status without shipping unrelated blobs.
-
-- **Live cancel-only coverage** in `integration/repro_job_cancel_only/`: a
-  running CPU workload reaches `cancelled` while its assignment remains live,
-  then explicit full destroy removes the endpoint.
-- **Live launch-kernel restart coverage** in
-  `integration/repro_job_kernel_restart/`: a detached CPU consumer retains
-  its process identity, advances after the public kernel restart, exits 0, and
-  is followed by verified assignment teardown.
-
-- **Live signed URL secrecy coverage** in
-  `integration/repro_job_signed_url_redaction/`: a CPU job consumes a signed
-  data URL while a unique sentinel is absent from plan/apply output, durable
-  records, remote files, and kernel history; teardown leaves no active session.
-- **Live job keep-alive coverage** in `integration/repro_job_keep_alive/`: a
-  CPU job leaves the launch kernel idle, the daemon stays alive past a
-  post-preflight tick, destroy reaps it, and `sessions` is empty.
-- **Live supervisor crash recovery** in
-  `integration/repro_job_crash_recovery/`: apply is killed during `run`;
-  `status --poll` from a new process absorbs the remote success and releases
-  the assignment.
-
-
+- **Assignment requests could block indefinitely.** `assign`, `unassign` and
+  the assignment listing now use a 10 s connect and 30 s read timeout. A
+  timed-out assign is a retryable failure; a timed-out unassign keeps the
+  endpoint and marks cleanup failed instead of claiming the VM is gone.
 
 ## [0.8.0] - 2026-09-11
 

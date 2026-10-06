@@ -1,0 +1,122 @@
+name: Release
+
+# Runs when a version tag (vX.Y.Z) is pushed; the `release` skill pushes it.
+# hatch-vcs derives the package version from the tag. The jobs run in order,
+# and each starts only when the previous one succeeded:
+#   test -> build -> publish (PyPI) -> github-release
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: true
+          python-version: "3.12"
+
+      - run: uv run --frozen pytest tests/ -q
+
+      - run: uv run --frozen ruff check .
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # hatch-vcs reads the version from the tag, so the checkout needs
+          # the tags and the history that leads to them.
+          fetch-depth: 0
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          python-version: "3.12"
+
+      - run: uv build
+
+      # hatch-vcs builds a development version such as 0.8.1.dev3+g1234abc
+      # when the checked-out commit is not exactly the tagged one. Publishing
+      # that version would be wrong, so the job fails instead.
+      - name: Check that the built files carry the tag's version
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          ls -la dist/
+          contents="$(ls dist | tr '\n' ' ')"
+          for file in "mighty_colab-${version}-py3-none-any.whl" "mighty_colab-${version}.tar.gz"; do
+            if [ ! -f "dist/${file}" ]; then
+              echo "::error::dist/ has no ${file} for tag ${GITHUB_REF_NAME}; it contains: ${contents}"
+              exit 1
+            fi
+          done
+          if [ "$(ls dist | wc -l)" -ne 2 ]; then
+            echo "::error::dist/ should contain exactly the wheel and the sdist; it contains: ${contents}"
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    # PyPI's trusted publisher for this project is configured for this
+    # repository, this workflow file and this environment.
+    environment:
+      name: pypi
+      url: https://pypi.org/p/mighty-colab
+    permissions:
+      id-token: write # PyPI trusted publishing exchanges this OIDC token for an upload token
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dist
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+
+  github-release:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # gh release create
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dist
+          path: dist/
+
+      # The release notes are the tag's section of CHANGELOG.md, which the
+      # `release` skill writes before it pushes the tag. A tag without that
+      # section fails this job; the package is already on PyPI by then.
+      - name: Create the GitHub Release from the CHANGELOG section
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v heading="## [${version}]" '
+            index($0, heading) == 1 { in_section = 1; next }
+            /^## \[/ { in_section = 0 }
+            in_section
+          ' CHANGELOG.md > release-notes.md
+          if ! grep -q '[^[:space:]]' release-notes.md; then
+            echo "::error::CHANGELOG.md has no '## [${version}]' section, or the section is empty"
+            exit 1
+          fi
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file release-notes.md \
+            --verify-tag \
+            dist/*
