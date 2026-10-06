@@ -562,7 +562,8 @@ class Orchestrator:
             raise PhaseError(
                 Phase.PROVISION,
                 f"the keep-alive daemon could not be started ({describe_error(exc)}); "
-                "without it Colab reclaims the idle VM while the job runs",
+                "the job was applied with keep-alive on, so it stops here: apply "
+                "with --no-keepalive to run without one",
                 RetryClass.FIX_HUMAN,
             ) from exc
         self.session_store.add(session)

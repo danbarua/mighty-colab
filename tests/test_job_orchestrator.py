@@ -2117,8 +2117,9 @@ def test_a_keep_alive_preflight_network_error_is_recorded_and_tolerated(
 def test_a_keep_alive_daemon_that_cannot_start_fails_provisioning(
     tmp_path, keep_alive_spawn
 ):
-    """Without the daemon Colab reclaims the idle VM mid-run, with no record
-    of why. Failing at provision says so while the cause is known."""
+    """A job applied with keep-alive on that cannot start its daemon fails
+    at provision with the cause, and the reason names `--no-keepalive` as
+    the way to run without a daemon."""
     client = MagicMock()
     client.assign.return_value = _cpu_assignment("m-s-job")
     keep_alive_spawn.side_effect = OSError(24, "Too many open files")
@@ -2134,6 +2135,7 @@ def test_a_keep_alive_daemon_that_cannot_start_fails_provisioning(
     assert exc.value.phase is Phase.PROVISION
     assert exc.value.retry_class is RetryClass.FIX_HUMAN
     assert "Too many open files" in exc.value.reason
+    assert "apply with --no-keepalive to run without one" in exc.value.reason
     assert orch.env.endpoint == "m-s-job"
 
 
