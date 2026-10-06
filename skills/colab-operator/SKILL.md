@@ -54,6 +54,10 @@ If `mighty-colab` is not installed, install it with
   | `run` | creates one, stops it after | the run stops | one script, start to finish, in one call |
   | `job` | creates one, releases it after | the run continues on the VM | long or unattended work with inputs, outputs and a recorded verdict |
 
+  Use `job` for real work: it does the babysitting. Use `exec-async` for long
+  steps while you iterate in a session you keep, and `exec` for short steps
+  that build kernel state. `run` behaves like upstream's command.
+
 ## Machine-readable output (`--json`)
 
 - Pass `--json` before the subcommand, with the other global flags:
@@ -140,8 +144,9 @@ If `mighty-colab` is not installed, install it with
 
 ### Execute
 
-- **Preferred**: `mighty-colab exec -s <name> -f <script.py>` sends a local
-  script to the kernel and runs it; no upload is needed.
+- `mighty-colab exec -s <name> -f <script.py>` sends a local script to the
+  kernel and runs it; no upload is needed. It waits for the script; for
+  anything long, use `exec-async` below, or `job`.
 - **`exec -f` sends the file's text, not a file.** `sys.argv`,
   `__name__ == "__main__"` and `__file__` are set as for
   `python script.py`, but `__file__` is a sentinel
