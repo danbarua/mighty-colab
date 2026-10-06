@@ -37,7 +37,7 @@ import tempfile
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from colab_cli.job.models import JobEnvelope, JobSpec, Plan
+from colab_cli.job.models import JobEnvelope, JobSpec, Plan, unknown_fields
 from colab_cli.job.spec_io import (
     has_url_query,
     is_redacted_url,
@@ -50,6 +50,30 @@ from colab_cli.job.runtime_payload.redact import describe_error
 PLAN_ERRORS_SHOWN = 5
 
 _logger = logging.getLogger(__name__)
+
+# (source, unknown field paths) pairs already logged by this process, so a
+# record that is read repeatedly (by `job status --poll` or an MCP watcher)
+# is logged once.
+_UNKNOWN_FIELDS_LOGGED: set = set()
+
+
+def warn_unknown_fields(source: str, found: List[str]) -> None:
+    """Log a WARN naming `found`, the paths of fields in a record from
+    `source` that this CLI does not define, once per `source` and set of
+    paths in this process. The record keeps those fields, and writing the
+    record back writes them unchanged."""
+    if not found:
+        return
+    key = (source, tuple(found))
+    if key in _UNKNOWN_FIELDS_LOGGED:
+        return
+    _UNKNOWN_FIELDS_LOGGED.add(key)
+    _logger.warning(
+        "%s has fields this CLI does not define, probably written by a newer "
+        "CLI: %s; they are kept unchanged and not acted on",
+        source,
+        ", ".join(found),
+    )
 
 PLAN_FILE = "plan.json"
 ENVELOPE_FILE = "envelope.json"
@@ -333,14 +357,18 @@ class JobStore:
         path = self.job_dir(job_id) / ENVELOPE_FILE
         if not path.exists():
             return None
-        return JobEnvelope.model_validate_json(path.read_text())
+        envelope = JobEnvelope.model_validate_json(path.read_text())
+        warn_unknown_fields(str(path), unknown_fields(envelope))
+        return envelope
 
     def read_envelope_or_problem(
         self, job_id: str
     ) -> Tuple[Optional[JobEnvelope], Optional[str]]:
         """`(envelope, None)`, `(None, None)` for a job never applied, or
         `(None, problem)` when the envelope exists but cannot be read: a
-        truncated write, or fields from a newer CLI sharing this store.
+        truncated write, or a value this CLI cannot interpret, such as a
+        workload state added by a newer CLI. Fields this CLI does not
+        define do not make an envelope unreadable.
         For listings, where one bad record must not hide the others."""
         try:
             return self.read_envelope(job_id), None

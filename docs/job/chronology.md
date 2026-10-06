@@ -9,6 +9,24 @@ request and `issue #N` an issue in `danbarua/mighty-colab`.
 The other documents in `docs/job/` describe the current system. This one
 records what changed and what each claim rests on.
 
+### 2026-10-06: An envelope with fields this CLI does not define is readable
+
+The envelope models rejected unknown fields, a setting the first `job`
+commit applied to every model in `models.py`. The job spec needs it, so
+that a typo in a spec fails validation. For the envelope, it meant that a
+CLI could not read any envelope written by a newer CLI that added a field:
+`jobs list`, `jobs prune` and the MCP listings showed the job as `envelope
+unreadable`, and `job status` could not read the job. The envelope and its records now
+keep unknown fields, write them back unchanged, and log a WARN naming
+them. A value the CLI cannot interpret, such as a new workload state,
+still makes an envelope unreadable. The job spec and the plan still reject
+unknown fields.
+
+Evidence: `tests/test_job_envelope_compat.py` (an envelope with unknown
+top-level and nested fields is read, written back with those fields, and
+logged once; a new enum value is still unreadable; a runner record with an
+unknown key is absorbed; the spec still rejects unknown fields).
+
 ### 2026-10-06: Jobs ran 3 hours without keep-alive; `--no-keepalive` and compute-unit readings
 
 Upstream google-colab-cli removed its keep-alive pings on 2026-09-25

@@ -903,21 +903,20 @@ def test_subscribing_to_jobs_list_resource_is_a_silent_no_op(tmp_path):
 
 
 def test_list_job_resources_survives_an_unreadable_envelope(tmp_path):
-    """One envelope written by a newer CLI (or truncated) must not hide
-    every other job."""
+    """One unreadable (truncated) envelope must not hide every other job."""
     from colab_cli.job.models import JobEnvelope, Workload
     from colab_cli.mcp_server import list_job_resources
 
     store = _job_store(tmp_path)
     store.write_envelope(JobEnvelope(job_id="readable", workload=Workload.RUNNING))
-    bad = store.job_dir("from-a-newer-cli")
+    bad = store.job_dir("truncated")
     bad.mkdir(parents=True)
-    (bad / "envelope.json").write_text('{"job_id": "from-a-newer-cli", "future_field": 1}')
+    (bad / "envelope.json").write_text('{"job_id": "truncated", "work')
 
     resources = {r.name: r for r in list_job_resources(store)}
 
     assert "readable" in resources
-    assert "unreadable" in resources["from-a-newer-cli"].description
+    assert "unreadable" in resources["truncated"].description
 
 
 # --- tool results carry the --json envelope ----------------------------------

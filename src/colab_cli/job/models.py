@@ -440,6 +440,37 @@ class Plan(BaseModel):
 # --------------------------------------------------------------------------
 
 
+class EnvelopeRecord(BaseModel):
+    """Base class for the job envelope and the records it contains.
+
+    A newer CLI sharing the job store can write fields that this CLI does
+    not define. Parsing keeps those fields (`extra="allow"`), and writing
+    the record back writes them unchanged, so an older CLI can read and
+    finish a newer CLI's job without deleting them. `JobStore.read_envelope`
+    logs a WARN naming each unknown field. The spec and plan models keep
+    `extra="forbid"`, because a key the job spec does not define is a
+    mistake in the spec.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+
+def unknown_fields(record: BaseModel, prefix: str = "") -> List[str]:
+    """Return the dotted paths of the fields in `record`, and in the
+    records it contains, that this CLI does not define, such as
+    `future_field` or `artifacts[0].future_field`."""
+    found = [f"{prefix}{name}" for name in (record.model_extra or {})]
+    for name in type(record).model_fields:
+        value = getattr(record, name)
+        if isinstance(value, BaseModel):
+            found.extend(unknown_fields(value, f"{prefix}{name}."))
+        elif isinstance(value, list):
+            for index, item in enumerate(value):
+                if isinstance(item, BaseModel):
+                    found.extend(unknown_fields(item, f"{prefix}{name}[{index}]."))
+    return found
+
+
 # What kind of failure a transfer hit, as the runner classified it on the
 # VM: `http` (a response with a non-2xx status), `network` (no response:
 # DNS, refused, reset, timeout, TLS, upload cut short), `checksum` and
@@ -452,11 +483,9 @@ TransferCategory = Literal[
 ]
 
 
-class TransferError(BaseModel):
+class TransferError(EnvelopeRecord):
     """Why one data download or artifact upload failed, as the runner
     observed it."""
-
-    model_config = ConfigDict(extra="forbid")
 
     exception: str
     reason: str
@@ -474,9 +503,7 @@ class TransferError(BaseModel):
         return f"{self.exception}: {self.reason}"
 
 
-class ArtifactResult(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class ArtifactResult(EnvelopeRecord):
     path: str
     # Query strings carry the signature; never serialise them. `url_id` is a
     # stable, non-secret handle for the same object.
@@ -487,11 +514,9 @@ class ArtifactResult(BaseModel):
     error: Optional[TransferError] = None
 
 
-class InputResult(BaseModel):
+class InputResult(EnvelopeRecord):
     """One `data[]` input as the runner staged it: the bytes the run
     consumed, or why staging stopped there."""
-
-    model_config = ConfigDict(extra="forbid")
 
     dest: str
     url_id: str
@@ -501,7 +526,7 @@ class InputResult(BaseModel):
     error: Optional[TransferError] = None
 
 
-class ComputeUnitReading(BaseModel):
+class ComputeUnitReading(EnvelopeRecord):
     """The account's compute units at one moment (`GET /tun/m/ccu-info`).
 
     Account-wide: every VM on the account draws on `balance`, and Colab
@@ -511,18 +536,14 @@ class ComputeUnitReading(BaseModel):
     assignments the account had at the moment of the reading.
     """
 
-    model_config = ConfigDict(extra="forbid")
-
     at: str
     balance: float
     rate_hourly: float
     assignments: int
 
 
-class ProvisionAttempt(BaseModel):
+class ProvisionAttempt(EnvelopeRecord):
     """One accelerator candidate tried during provision."""
-
-    model_config = ConfigDict(extra="forbid")
 
     accelerator: str
     # `refused_cpu`: a GPU request answered with a CPU VM, released because
@@ -553,14 +574,12 @@ class ProvisionAttempt(BaseModel):
 InstallFailure = Literal["resolution", "build", "auth", "transient", "timeout", "unknown"]
 
 
-class InstallAttempt(BaseModel):
+class InstallAttempt(EnvelopeRecord):
     """One installer run during `install`, as recorded on the VM.
 
     Kept in the envelope when the install failed or fell back from uv to
     pip; the full output is in the job directory's install.log.
     """
-
-    model_config = ConfigDict(extra="forbid")
 
     installer: Literal["uv", "pip"]
     version: str
@@ -576,9 +595,7 @@ class InstallAttempt(BaseModel):
     key_lines: List[str] = Field(default_factory=list)
 
 
-class JobEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class JobEnvelope(EnvelopeRecord):
     schema_version: str = RESULT_SCHEMA_VERSION
     cli_version: str = ""
     runtime_payload_version: str = ""

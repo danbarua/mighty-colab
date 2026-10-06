@@ -85,10 +85,12 @@ what it removed and skipped, with reasons:
   that job) before deleting by hand; if either shows a live endpoint, run
   `mighty-colab job destroy <job_id>` first, then re-verify with
   `mighty-colab sessions`.
-- **An envelope that cannot be read** (truncated, or written by a newer CLI
-  with fields this one does not know) — skipped, because its state is
-  unknown. `jobs list` and the MCP job listings show the record with
-  `envelope unreadable (...)`.
+- **An envelope that cannot be read** (truncated, or carrying a value this
+  CLI cannot interpret, such as a workload state added by a newer CLI) —
+  skipped, because its state is unknown. `jobs list` and the MCP job
+  listings show the record with `envelope unreadable (...)`. Fields this
+  CLI does not define do not make an envelope unreadable: prune classifies
+  such an envelope by its `done` and `cleanup` values, like any other.
 - **`done=False`** — skipped. `apply` may still be running in another
   process on this or another machine, or a prior run was interrupted
   mid-flight. Run `job status --poll <job_id>` for a live read.
