@@ -252,7 +252,9 @@ class Job:
             log(f"{self.name}: keep-alive daemon pid {self.daemon_pid}")
 
     def observe(self, listed: set[str] | None) -> None:
-        if self.finished or self.endpoint is None:
+        # Once collection starts the job's own supervisor releases the VM,
+        # so a missing listing then is not a loss.
+        if self.finished or self.endpoint is None or self.collect_deadline is not None:
             return
         elapsed = now() - self.launched_at
         if listed is not None:
