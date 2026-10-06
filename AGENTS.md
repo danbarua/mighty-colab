@@ -1,123 +1,416 @@
-# Colab CLI: Agent Guidelines
+# Mighty Colab: Agent Guidelines
 
-## Architecture Overview
-- **CLI**: Modular `Typer` based entry point in `cli.py` with subcommands in `commands/`.
-- **Common**: `common.py` centralizes shared `State` (lazy-loading) and session resolution.
-- **Client**: `ColabClient` handles API interactions (assignment, unassignment).
-- **Auth**: `auth.py` exposes a single `get_credentials(config_path, provider)` facade that dispatches on the `AuthProvider` enum. Two providers are supported, selected via the global `--auth=oauth2|adc` flag (default `oauth2`):
-  - `oauth2`: public `google-auth-oauthlib` `InstalledAppFlow`, token cached at `~/.config/colab-cli/token.json`. Reads the client OAuth config from `-c/--client-oauth-config` (default `~/.colab-cli-oauth-config.json`), falling back to the **bundled** `src/colab_cli/oauth_config.json` resource (re-added in PR #41 / `9f44fe2`, 2026-05-29 — the earlier "removed in `20eb88e`" note was stale/incorrect; the file exists and `auth.py:_get_google_auth_credentials` loads it via `importlib.resources`). As of 2026-06-11 the flow is a **remote copy-paste flow**, not a localhost server: `_run_remote_flow` sets `redirect_uri=https://sdk.cloud.google.com/applicationdefaultauthcode.html` + `token_usage=remote`, prints the URL, and reads the pasted code via `input()`. NEVER revert to OOB (`urn:ietf:wg:oauth:2.0:oob`) — Google blocked it in 2022 ("OOB flow has been blocked"); the `sdk.cloud.google.com` redirect is registered only to the bundled cloud-SDK client (`764086051850-...`), so any other client id gets `redirect_uri_mismatch`. Server-side acceptance/rejection of these variants is verifiable GET-only by building the authorization URL and inspecting whether Google reaches sign-in vs. an OAuth error page (no resources allocated).
-  - `adc`: Google Application Default Credentials via `google.auth.default()`. The CLI passes `scopes=PUBLIC_SCOPES` (which includes `colaboratory`) and re-applies via `creds.with_scopes()` for credential types that support it. **User credentials minted by `gcloud auth application-default login` ignore the `scopes=` kwarg AND raise `NotImplementedError` on `with_scopes`**: ADC users must explicitly re-authenticate with `gcloud auth application-default login --scopes=openid,https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/userinfo.email,https://www.googleapis.com/auth/colaboratory`. `userinfo.email` is required by the session backend at `colab.research.google.com` (assign/unassign/sessions/keep-alive return 401 without it); `colaboratory` is retained for forward compatibility and other Colab features (keep-alive no longer uses `colab.pa.googleapis.com` — see the Keep-alive note below); `openid` and `cloud-platform` are mandated by `gcloud` itself, which rejects scope lists that omit `cloud-platform` with `Invalid value for [--scopes]`. Service-account / GCE / GKE / impersonated creds get the right scopes transparently via `with_scopes`.
-- **Backend Hosts**: Two distinct backends with different requirements:
-  - `colab.research.google.com` (session backend / `tun/m/...`): accepts the `userinfo.email` scope. Handles assign, unassign, the contents API, **and keep-alive** (see below).
-  - **Keep-alive (2026-06-15, issue #14)**: keep-alive is a **Tunnel Frontend (TFE) HTTP ping** — `GET https://colab.research.google.com/tun/m/<endpoint>/keep-alive/` with header `X-Colab-Tunnel: Google`, authenticated by the user's own Gaia bearer token (same host/credential as `assign`). TFE records `LastActiveTime` before forwarding, refreshing the idle timer. The VM usually doesn't answer on this path, so the request commonly **read-times-out even on success** — `client.keep_alive_assignment` therefore catches `requests.exceptions.ReadTimeout` and treats it as success, while genuine HTTP errors (e.g. 404 for a deleted assignment) propagate. This mirrors the official `colab-vscode` extension's `sendKeepAlive` (`src/colab/client.ts`). **DO NOT revert to the `colab.pa.googleapis.com` `RuntimeService/KeepAliveAssignment` RPC**: that RPC requires the caller to be a `serviceusage` consumer of Colab's internal project `1014160490159`, which no ordinary user account is, so it returned HTTP 403 `USER_PROJECT_DENIED` for every external user (issue #14) and silently idle-pruned their sessions within minutes. The browser only made that RPC work by riding the user's `google.com` cookie through an internal cookie-proxy (`colab.clients6.google.com`), which a headless bearer-token CLI cannot use. Verified live 2026-06-15 with a third-party account (the RPC 403'd; the tunnel ping succeeded and kept the VM alive).
-- **Runtime**: `ColabRuntime` wraps `jupyter-kernel-client` for execution.
-- **State**:
-  - `StateStore` persists session metadata in `~/.config/colab-cli/sessions.json`.
-  - Persistent settings are in `~/.config/colab-cli/settings.json`.
-- **History**: `HistoryLogger` records structured events in `~/.config/colab-cli/history/*.jsonl`.
-- **Structured output (`--json`)**: `exec`/`run`/`exec-async`/`log --tail`/`new`/`stop`/`sessions`/`status` support a global `--json` flag, emitting a Pydantic-validated envelope (`src/colab_cli/envelopes.py`) instead of human-readable output. `cli.py:main()` wraps the whole `app()` invocation in a catch-all (`_handle_uncaught_exception`) so *any* exception that escapes a command body — not just ones a command explicitly handles — still renders as an envelope (or a plain `[colab] Error: ...` line) instead of a raw Python traceback; `--debug` bypasses it and re-raises the real traceback. See `docs/01_session_management.md` and `docs/02_execution_and_interactive.md`'s 2026-08-12 changelog entries for the full design; not yet wired into the MCP server (`mcp_server.py` still returns unstructured text — a known, deliberately deferred gap).
+This file is for coding agents that change this repository. Agents that *use*
+the CLI read `skills/colab-operator/SKILL.md`, which `mighty-colab skill`
+prints.
+
+The installed command is `mighty-colab`. Upstream's command is `colab`; both
+can be installed on one machine, so always invoke `mighty-colab`.
+
+## Architecture
+
+- **CLI**: `cli.py` builds the Typer app, and each module in `commands/`
+  registers its commands. `mighty-colab help` lists them.
+- **Shared state**: `common.py` defines the lazily built `state` singleton (the
+  client, the session store, history and the global flags) and session-name
+  resolution.
+- **Client**: `client.Client` sends the control-plane requests to
+  `colab.research.google.com/tun/m/...`: assign, unassign, the assignment
+  listing, keep-alive and `ccu-info`. Assignment requests use a 10 s connect
+  and 30 s read timeout.
+- **Runtime**: `runtime.ColabRuntime` runs code on the VM's kernel through the
+  vendored `jupyter-kernel-client` (`src/colab_cli/_vendor/`).
+- **Local state** (all under `~/.config/colab-cli/`, overridable with
+  `--config`):
+  - `sessions.json`: session records (`state.StateStore`);
+  - `settings.json`: settings;
+  - `history/*.jsonl`: structured events (`history.HistoryLogger`);
+  - `keep-alive/<session>.log`: each keep-alive daemon's stderr;
+  - `jobs/<job_id>/`: job records (`job/store.py`).
+- **`--json`**: the commands in `cli.JSON_CAPABLE_COMMANDS` (`exec`, `run`,
+  `exec-async`, `log`, `new`, `stop`, `sessions`, `status`, `usage`, and the
+  `job` and `jobs` groups) print one envelope, validated by a model in
+  `envelopes.py` before it is printed. `cli.main()` catches any exception that
+  escapes a command and prints an error envelope, or a `[colab] Error: ...`
+  line without `--json`. `--debug` re-raises the exception instead.
+- **MCP**: `mcp_server.py` exposes the non-interactive commands as tools. A
+  tool whose command has an envelope runs once in JSON mode and returns the
+  envelope as structured content beside the command's text. Job records are
+  resources (`job://<id>`, `job://<id>/logs`, `job://<id>/files/<name>`,
+  `jobs://`). See `docs/07_mcp_server.md` and `docs/job/mcp.md`.
+- **`job`**: an unattended run on a VM, driven by a YAML spec. The run is
+  detached from the kernel and continues when the local `job apply` process
+  dies. The modules are in `src/colab_cli/job/`:
+  - `models.py`: the spec, plan and envelope models;
+  - `planner.py`, `spec_io.py`: plan-time validation, the source and URL
+    checks, and signed-URL identities;
+  - `orchestrator.py`: the `apply` state machine (provision, install,
+    restart, verify, stage, launch, poll, cleanup);
+  - `install.py`: dependency install, uv first and pip as the fallback;
+  - `transport.py`: the Contents-API reads and writes for a running job;
+  - `verdict.py`: maps a runner result to a `retry_class`;
+  - `store.py`: the local job records;
+  - `runtime_payload/`: the code that runs on the VM (`runner.py`,
+    `shim.py`, `watchdog.py`, `netpolicy.py`, `redact.py`, `ident.py`).
+  
+  `docs/job/design.md` describes the design, `docs/job/usage.md` and
+  `docs/job/spec.md` its use, and `docs/job/chronology.md` each change and
+  finding with its evidence.
+
+### Authentication
+
+`auth.get_credentials(config_path, provider)` returns credentials for the
+global `--auth=oauth2|adc` flag (default `oauth2`).
+
+- **`oauth2`**: `google-auth-oauthlib`'s `InstalledAppFlow`, with the token
+  cached at `~/.config/colab-cli/token.json`. The client config comes from
+  `-c/--client-oauth-config` (default `~/.colab-cli-oauth-config.json`), or
+  else from the bundled `src/colab_cli/oauth_config.json`.
+  - The flow is a remote copy-paste flow: `_run_remote_flow` sets
+    `redirect_uri=https://sdk.cloud.google.com/applicationdefaultauthcode.html`
+    and `token_usage=remote`, prints the URL, and reads the pasted code with
+    `input()`.
+  - Do not switch to the OOB flow (`urn:ietf:wg:oauth:2.0:oob`): Google
+    blocked it in 2022.
+  - The `sdk.cloud.google.com` redirect is registered only for the bundled
+    Cloud SDK client (`764086051850-...`). Any other client id gets
+    `redirect_uri_mismatch`.
+  - To check whether Google accepts a variant of the authorization URL,
+    build the URL and open it: a sign-in page means Google accepts it, and
+    an OAuth error page means it does not. No resources are allocated.
+- **`adc`**: `google.auth.default()` with `scopes=PUBLIC_SCOPES`, re-applied
+  with `creds.with_scopes()` for credential types that support it.
+  - User credentials from `gcloud auth application-default login` ignore
+    `scopes=` and raise `NotImplementedError` on `with_scopes`. ADC users
+    must therefore log in with the scopes named explicitly:
+    `gcloud auth application-default login --scopes=openid,https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/userinfo.email,https://www.googleapis.com/auth/colaboratory`.
+  - The session backend requires `userinfo.email`: assign, unassign,
+    `sessions` and keep-alive return 401 without it. `gcloud` rejects any
+    scope list without `openid` and `cloud-platform`. `colaboratory` is kept
+    for other Colab features.
+  - Service-account, GCE, GKE and impersonated credentials receive the
+    scopes through `with_scopes`.
+- **Two different authentications.** Do not confuse them:
+  - CLI to Colab's control plane: how `Client` authenticates its HTTP
+    requests. The `--auth` flag and `auth.get_credentials` decide it. Any
+    `--auth=oauth2` command starts the consent flow when `token.json` does
+    not exist; no separate command is needed.
+  - Credentials on the VM: the `mighty-colab auth` command injects the
+    user's GCP credentials into the running kernel (through the
+    `USE_AUTH_EPHEM='0'` gcloud path), so notebook code can call `gcloud` or
+    BigQuery. It does not fix a CLI-side 401 or 403; never suggest it for
+    one.
+
+### Keep-alive
+
+- The keep-alive daemon is the hidden `keep-alive` command, started detached
+  by `spawn_keep_alive`. Every 60 s, for at most 24 hours, it sends
+  `GET https://colab.research.google.com/tun/m/<endpoint>/keep-alive/` with
+  the header `X-Colab-Tunnel: Google` and the user's bearer token.
+- The Tunnel Frontend records the activity before it forwards the request to
+  the VM, and the VM often does not answer. `client.keep_alive_assignment`
+  therefore treats a `ReadTimeout` as success. HTTP errors, such as a 404 for
+  a deleted assignment, propagate.
+- `--no-keepalive` on `new`, `run` and `job apply` starts no daemon.
+  Upstream removed its keep-alive pings on 2026-09-25
+  (googlecolab/google-colab-cli#144). Three idle CPU jobs kept their VMs for
+  180 minutes with and without the daemon (`docs/job/chronology.md`,
+  2026-10-06); GPU VMs have not been tested.
+- Do not use the `colab.pa.googleapis.com` `RuntimeService/KeepAliveAssignment`
+  RPC. It requires the caller to be a `serviceusage` consumer of Colab's
+  internal project `1014160490159`, which ordinary accounts are not, so it
+  returns 403 `USER_PROJECT_DENIED` (issue #14). Without the
+  `X-Goog-User-Project` header it returns 400 `CONSUMER_INVALID`, because the
+  API key and the token belong to different projects. The browser reaches the
+  RPC through a cookie proxy (`colab.clients6.google.com`) that a bearer-token
+  client cannot use. Any other call to `colab.pa.googleapis.com` with a bearer
+  token meets the same entitlement check.
 
 ## Core Mandates
-- **Minimalism**: Favor standard library where possible (e.g., `urllib`) while utilizing `Typer` for CLI ergonomics.
-- **Piping**: Always consider piped input (`stdin`) vs. interactive TTY.
-- **Trace Alignment**: When implementing new endpoints, validate against captured browser traces (HAR files).
-- **TDD (Test-Driven Development)**: Always implement tests first. Verify they fail before implementing the solution to make them pass. Every design must include a testing strategy and specific test cases.
 
-- **Jupyter Protocol Deviations**: Google Colab uses custom extensions to the Jupyter protocol. Examples include `colab_request` messages over the `iopub` channel and `input_reply` wrapping `colab_reply` payloads on the `stdin` channel. These require monkey-patching or specialized handlers within `jupyter-kernel-client` (e.g., `wsclient.kernel_socket.on_message` interceptors).
+- **Minimalism**: prefer the standard library (for example `urllib`), and use
+  Typer for the CLI.
+- **Piping**: handle piped stdin as well as an interactive TTY.
+- **Trace alignment**: validate a new endpoint against captured browser
+  traces (HAR files).
+- **Test-driven development**: write the tests first, and confirm that they
+  fail before you implement the change. Every design states its testing
+  strategy and its test cases.
+- **Jupyter protocol deviations**: Colab extends the Jupyter protocol, for
+  example with `colab_request` messages on the `iopub` channel and
+  `input_reply` messages that wrap `colab_reply` payloads on `stdin`. These
+  need handlers inside `jupyter-kernel-client`, such as interceptors on
+  `wsclient.kernel_socket.on_message`.
+- **Integration testing**: unit tests with mocks are not enough. Before you
+  declare a feature complete, run an end-to-end test against a live Colab VM
+  with the CLI. The tests are in `integration/`; run one with
+  `uv run bash integration/<name>/test.sh` from the repository root.
+- **Failure detail**: when a job fails, its operator, human or AI, is away.
+  Unless the operator asked otherwise, `job` tries to clean up and leave no
+  VM running, so re-creating a failure means re-running a multi-process
+  workflow across several distributed systems, which costs significant time.
+  Every error record MUST carry the detail an operator needs to diagnose the
+  cause from the record alone. Reporting that an error occurred is never
+  sufficient. Examples of detail that must be kept:
+  - A package failed to install: which package, which version, from which
+    index? Was the cause user input (a bad pin), a package index or provider
+    failure, or a transient failure that can be retried? `retry_class`
+    carries that last distinction.
+  - A server returned an HTTP error: which operation failed, against which
+    target (its URL identity, never a signed query string), with which
+    status, and what did the response body say? Was it one file in an
+    otherwise successful batch, and what was different about that file
+    (size, name, type)?
 
-- **Integration Testing**: Unit tests and mocks are not enough. Before declaring any feature complete, you MUST perform a real-world, end-to-end integration test against a live Colab environment using the CLI. Never rely solely on mocked unit tests to verify a feature's correctness.
-    - Integration tests are located in `integration/` (e.g., `integration/repro_plot_redirection/test.sh`).
-    - To run an integration test, use: `uv run bash integration/repro_<name>/test.sh`.
-    - `uv run` ensures the `colab` command (entry point) is available in the shell environment.
-- **Failure Detail**: When a job fails, its operator, human or AI, is away. Unless the operator has asked otherwise, `job` makes a best-effort attempt to clean up and leave no VM running, so re-creating a failure means re-running a multi-process workflow across several distributed systems, which costs significant time. Every error record MUST carry the detail an operator needs to diagnose the cause from the record alone. Reporting that an error occurred is never sufficient. Examples of detail that must be kept:
-    - A package failed to install: which package, which version, from which index? Was the cause user input (a bad pin), a package index or provider failure, or a transient failure that can be retried? `retry_class` exists to carry that last distinction.
-    - A server returned an HTTP error: which operation failed, against which target (its URL identity, never a signed query string), with which status, and what did the response body say? Was it one file in an otherwise successful batch, and what was different about that file (size, name, type)?
-  Keep the exception type and message, HTTP status, a response body excerpt, exit codes, and the relevant part of tool output. Remove only credentials: signed-URL query strings, tokens, passwords, private keys. A record like `{"error": true, "message": "failed"}`, or one that keeps only an exception class name, is a defect. These examples are not exhaustive.
-- **Continuous Improvement**: Whenever the user provides feedback, workflow advice, or corrections, immediately encode that advice into this `AGENTS.md` file. The goal is to learn from review and never repeat the same errors.
+  Keep the exception type and message, the HTTP status, a response body
+  excerpt, exit codes, and the relevant part of tool output. Remove only
+  credentials: signed-URL query strings, tokens, passwords and private keys.
+  A record like `{"error": true, "message": "failed"}`, or one that keeps
+  only an exception class name, is a defect. These examples are not
+  exhaustive.
+- **Recording corrections**: when the user corrects how you work, or gives
+  advice that applies beyond the current task, add it to this file as a
+  rule. State what to do and, where it helps, one sentence on why. Do not
+  record when or how the correction came up; that belongs in the commit
+  message.
 
-## Git & Commit Conventions
-- Always create clean, scoped commits (one logical change per commit) and push when the work is verified.
-- Before committing, run `git status` and `git log --oneline -5` to confirm no other session has interleaved changes into the working tree. If unexpected staged/committed work appears, STOP and report before proceeding.
-- Never `git add -A` in this repo; stage explicit file paths only.
+## Git and Pull Requests
+
+- Make clean, scoped commits: one logical change per commit.
+- Before staging, run `git status` and `git log --oneline -5` to confirm that
+  no other session has changed the working tree. If you find unexpected
+  staged or committed work, stop and report it.
+- Stage explicit file paths. Never run `git add -A`.
+- `main` is protected by the `protect-main` ruleset. Every change to `main`
+  goes through a pull request, and the `test` check must pass. Nothing pushes
+  to `main` directly, and nothing force-pushes `main`.
+- Run `git fetch` immediately before pushing or merging. When `origin/main`
+  has moved, rebase the feature branch onto it and test again before you
+  push.
+- After resolving conflicts on a pull-request branch you own, rebase it onto
+  `origin/main`, test again, and push with `git push --force-with-lease`.
+  Never use a bare `--force`, and never rewrite a branch shared with another
+  contributor without first confirming ownership.
+- A trusted collaborator can comment `/update-branch` on an open
+  same-repository pull request. The workflow merges `main` into the branch
+  only when GitHub can merge cleanly; it never rebases or force-pushes.
+  Conflicts still need manual resolution.
+- Do not accumulate stacked unmerged pull requests. After a pull request
+  passes CI and live verification and is merged, fetch `main`, rebase the
+  next feature branch, and run its verification again before publishing it.
+- Before `git commit --amend`, confirm all three conditions:
+  1. the user asked for an amend, or a pre-commit hook changed files for an
+     otherwise successful commit;
+  2. you created HEAD in this conversation (`git log -1 --format='%an %ae'`);
+  3. the commit has not been pushed.
+
+  If any condition fails, create a new commit. Never amend a failed or
+  rejected commit.
+- After committing to a feature branch, suggest the command that reviews the
+  whole branch, for example `git diff main..<branch>`, not `git show <sha>`,
+  which shows one commit.
+- For parallel work, use a dedicated git worktree instead of sharing this
+  checkout.
 
 ## Documentation Discipline
-Design/reference docs (`docs/**/*.md`) describe **what the system does now**, in present tense, for a reader who was not in the room when it changed. They are not a memory crutch for a stateless agent and not a journal of the session that produced them.
 
-- **No changelog in frontmatter.** A `log:` block of dated entries duplicates `git log` and the linked PR, and every reader scrolls past it before reaching the content. Keep frontmatter only for a note a reader of that specific document needs. For `job`, the dated history of changes and findings lives in `docs/job/chronology.md`: one entry per change or finding, newest first, each citing its evidence. Evidence ranks: a repro script under `integration/`, then shipped code (a PR or commit), then a recorded live run. Observations ("three A100 runs past 87 minutes crossed the token boundary") go there, not into design prose.
-- **No notes addressed to a future AI session.** Phrasing like "documented here so the next person doesn't re-diagnose this as a defect" or "proven live this session" describes the writer's process, not the system. If a sentence would not make sense to a human maintainer who never talked to an AI about it, cut it or rewrite it as a fact about the system -- e.g. a design-rationale note explaining *why* a behavior is intentional, stated once, plainly.
-- **This is not a license to stop documenting changes.** `CHANGELOG.md` is the one place user-facing changes belong, in Keep a Changelog format, and it is intentionally NOT updated per-commit during this project's pre-release dogfooding phase -- only the `release` skill (`.claude/skills/release/SKILL.md`) rolls the `[Unreleased]` section forward, at release time, with a concise summary. Do not add to `CHANGELOG.md` outside that skill unless explicitly asked.
-- **Even upstream is not a clean baseline.** `docs/06_ssh_access.md`, the one doc in this repo byte-identical to `googlecolab/google-colab-cli` upstream, has the identical dated-frontmatter-changelog problem -- merged into Google's own tree via external PRs (#88, #105). "It's the established convention" is not evidence a convention is worth keeping.
+Design and reference docs (`docs/**/*.md`) describe **what the system does
+now**, in present tense, for a reader who was not there when it changed. They
+are not a memory aid for an agent and not a journal of the session that
+produced them.
 
-## Tools & Workflow
-- **Workflow**:
-    1.  **Draft**: Plan and start the task. Create a new git branch before working on new features or changes.
-    2.  **Refine**: Implement changes and verify with tests and linting. Run tests using `uv run pytest tests/` and resolve any lint errors using `uv run ruff check . --fix`.
-    3.  **Finalize**: Ensure everything is complete and correct. **Whenever features are added or behaviors change, you MUST re-review the corresponding design document in `docs/` and update it to reflect the new state — present tense, current behavior.** See "Documentation Discipline" below for what belongs in a doc versus a commit message. Finally, commit the finished changes to the git branch for review.
-    4.  **Integrate**: For isolated work, do not accumulate stacked unmerged pull requests. After a pull request passes CI and live verification, merge it to `main`, fetch current `main`, rebase the next feature branch, and re-run its verification before publication.
+- **No changelog in frontmatter.** A `log:` block of dated entries duplicates
+  `git log` and the linked pull request, and every reader scrolls past it
+  before reaching the content. Keep frontmatter only for a note that a reader
+  of that document needs. For `job`, the dated history of changes and
+  findings is `docs/job/chronology.md`: one entry per change or finding,
+  newest first, each citing its evidence. Evidence ranks: a repro script under
+  `integration/`, then shipped code (a pull request or commit), then a
+  recorded live run. Observations, such as "three A100 runs past 87 minutes
+  crossed the token boundary", go there, not into design prose.
+- **No notes addressed to a future AI session.** Phrasing like "documented
+  here so the next person doesn't re-diagnose this as a defect" or "proven
+  live this session" describes the writer's process, not the system. If a
+  sentence would not make sense to a human maintainer who never talked to an
+  AI about it, cut it or rewrite it as a fact about the system. A
+  design-rationale note that explains *why* a behavior is intentional is
+  such a fact; state it once, plainly.
+- **`CHANGELOG.md`** records the user-facing changes, in Keep a Changelog
+  format. It is not updated per commit. At release time, the `release` skill
+  drafts entries for the pull requests merged since the last tag, and the
+  user approves them before the skill commits. Do not add to `CHANGELOG.md`
+  outside that skill unless the user asks.
+- **Upstream is not a clean baseline.** `docs/06_ssh_access.md`, the one doc
+  identical to `googlecolab/google-colab-cli` upstream, has the same
+  dated-frontmatter changelog problem. That a convention is established is
+  not evidence that it is worth keeping.
+- **When features are added or behavior changes**, review the design
+  document in `docs/` for every command the change affects, not only the
+  shared subsystem's, and update each one to describe current behavior.
 
-## Extending Upstream CLIs
-- Mighty Colab may adapt upstream command behavior and flags when its correctness or usability contracts require it. Prefer a separately named command when that preserves upstream mergeability without weakening the Mighty Colab design; upstream behavior is context, not a prohibition.
+## Workflow
 
-## Subcommand Workflows
-- **Session Management**: `new`, `sessions`, `status`, `stop`.
-- **Execution**: `repl`, `exec`, `console`.
-- **Files**: `ls`, `rm`, `upload`, `download`, `edit`.
-- **Automation**: `auth`, `drivemount`, `install`, `log`, `pay`, `version`, `update`.
+1. **Draft**: plan the task, and create a git branch before changing
+   anything.
+2. **Refine**: implement the change and verify it with `uv run pytest tests/`
+   and `uv run ruff check .` (`--fix` for fixable lint).
+3. **Finalize**: update the design documents (see "Documentation
+   Discipline" above), then commit the finished change to the branch and open
+   a pull request.
 
-## Release Tagging Workflow
-Releases are automated by the `release` Claude Code skill
-(`.claude/skills/release/SKILL.md`) — bump version, roll the Unreleased
-CHANGELOG section into a dated section, tag, push. Pushing the tag starts
-`.github/workflows/release.yml`, which runs the tests, builds the package,
-publishes it to PyPI through trusted publishing (the `pypi` environment),
-and creates the GitHub Release from the version's CHANGELOG section. Run the
-skill by asking for a release (e.g. "cut a release"). Do not perform any part
-of this manually or propose a release proactively.
+## Testing and Live Runs
+
+- **Mocking interactivity**: commands that branch on `stdin.isatty()` use the
+  `is_stdin_tty` helper in `execution.py`. Mock it with
+  `mocker.patch("colab_cli.commands.execution.is_stdin_tty", return_value=...)`
+  so tests do not hang in CI or agent sandboxes.
+- **State isolation**: patch the `colab_cli.common.state` singleton in tests
+  to control session persistence and client behavior; `tests/conftest.py`
+  has the standard fixture (`mock_common_state`).
+- **Strip ANSI before asserting on CLI text.** Rich emits ANSI escape codes
+  under `CliRunner` whenever the environment forces color (for example
+  `FORCE_COLOR=1`, which agent sandboxes and CI runners often set), and it
+  colors `--rm` as two separate spans. A plain substring check such as
+  `"--rm" in result.output` then depends on the environment, not on the code.
+  Strip with `re.compile(r"\x1b\[[0-9;]*[a-zA-Z]").sub("", text)`, the same
+  pattern as `common._strip_ansi`.
+- **Test the real lifecycle.** A test of retention must invoke a retention
+  mode such as `run --keep`; default one-shot cleanup removes the binding, so
+  it is not evidence that a binding survives. Assert the final store
+  contents, not only an intermediate return value or message.
+- **Run the integration tests yourself.** Only interactive commands need the
+  user (see "Agent Execution Limits" below). Tests built on `new`, `stop` and
+  `log` are non-interactive; run them before you declare a fix complete.
+- **Use the repository's install.** A global install of `mighty-colab` can
+  shadow the project's editable install when `uv run` is invoked from
+  outside the repository. Run every command with the repository root as the
+  working directory, so that `uv run mighty-colab` resolves to
+  `.venv/bin/mighty-colab`; check with `which mighty-colab` and
+  `uv run which mighty-colab`. A shebang such as
+  `#!/usr/bin/env -S mighty-colab run ...` always resolves through `$PATH`.
+  To test shebang behavior after a code change, run
+  `uv tool install --reinstall --force --from . mighty-colab` first, then
+  check `mighty-colab version`, which includes the git short SHA.
+- **Live probes allocate real resources.** Every successful
+  `POST /tun/m/assign` reserves a billable VM. Prefer read-only probes. For a
+  call that changes state, record each endpoint you create, release it
+  (`mighty-colab stop`, or `state.client.unassign(endpoint)`) before you
+  finish, and confirm with `mighty-colab sessions` that nothing is left.
+- **Clean up orphaned assignments.** After a live test, run
+  `mighty-colab sessions`. For an assignment marked `[?]`, which no local
+  record tracks, run `mighty-colab adopt <ENDPOINT>` and then
+  `mighty-colab stop -s <ENDPOINT>`. Repeat `sessions` until it reports no
+  active sessions.
+- **gcloud context**: the workspace may select `CLOUDSDK_CONFIG` and the
+  active gcloud project through `direnv`; inspect that context instead of
+  inferring infrastructure from the checkout name. Pull-request checks run in
+  GitHub Actions, independent of the workstation's gcloud project. The job
+  data-plane GCS bucket and its Terraform belong to the LabKit consumer
+  project, not to this repository, and that bucket is valid for integration
+  tests; do not add an `infra/` tree here for it. When a test overrides the
+  directory's context, scope the override to that command, and name the
+  signer service account and `--region` explicitly.
 
 ## Implementation Principles
-1.  **Direct Execution**: Code for `auth`, `drivemount`, etc., should be injected and executed on the VM kernel.
-2.  **Contents API**: Use the Jupyter Contents API for file management as seen in the browser traces.
-3.  **Transparent Storage**: Local state must be overridable via flags.
-4.  **No netrc**: Avoid `netrc` for token persistence in this project.
-5.  **Mocking Interactivity**: When testing commands that branch on `stdin.isatty()`, use the `is_stdin_tty` helper in `execution.py` and mock it via `mocker.patch("colab_cli.commands.execution.is_stdin_tty", return_value=...)`. This ensures tests don't hang in CI/agent environments.
-6.  **State Isolation**: Always patch the `colab_cli.common.state` singleton in tests to control session persistence and client behavior. Refer to `tests/conftest.py` for the standard global fixture.
-7.  **Fire-and-Forget Architecture**: The Colab CLI is a "fire-and-forget" tool. Avoid using background threads for long-running tasks within the main command flows. For persistent needs such as keep-alive, utilize detached background daemon processes (with PID tracking in the session state).
-8.  **Verify the Local Install**: A globally-installed `colab` may exist on `PATH` (e.g. at `~/.local/bin/colab`) and can shadow the project's editable install when `uv run` is invoked from outside the repo. ALWAYS run shell commands with the repo as the working directory (e.g. via the `workdir` parameter, never `cd && cmd`) so `uv run mighty-colab ...` resolves to `.venv/bin/colab`. Confirm with `which colab` and `uv run which colab` if a CLI test produces unexpected results (e.g. flag-not-recognized errors for flags you just added). **Shebang invocations always resolve via `$PATH`**, so a script like `#!/usr/bin/env -S mighty-colab run ...` will pick up the stale global tool even when the editable install is current — when testing shebang-based behavior after a code change, always run `uv tool install --reinstall --force --from . colab` first, then verify with `colab version` (the version string includes the git short SHA). Encoded 2026-05-12 after the SystemExit-suppression fix appeared not to work in `examples/hello_colab.py` because the shebang resolved to a uv-tool install pinned to the prior commit.
-9.  **Isolate the Regression First**: When a user reports an error in code you just touched, do NOT assume your change caused it. First, reproduce the failure on `main` (or the branch point) to determine whether the bug is pre-existing. Only after confirming the regression is yours should you start debugging the new code. Encoded after spending a turn debugging "ADC broke `colab new`" only to discover `colab new --gpu A100` was already failing on `main` due to an A100-quota-vs-default issue unrelated to ADC.
-10. **Live Probes Allocate Real Resources**: Probing the Colab API to debug an issue creates real, billable assignments — every successful POST `/tun/m/assign` reserves a VM. Prefer GET-only (read) probes whenever possible. For any state-mutating call, (a) record every endpoint you create as you go, and (b) clean up via `client.unassign(endpoint)` (or `colab stop`) before declaring the investigation done. Then verify with `colab sessions` that nothing was orphaned.
-11. **Push Freshness**: The remote may have advanced during a session (other contributors land commits while you work). ALWAYS `git fetch <remote>` immediately before pushing or merging. If `git log main..<remote>/main` is non-empty, reset local `main` to the remote, rebase feature branches onto it, retest, then push. NEVER force-push `main` to recover from divergence.
-12. **Amend Safety**: Before `git commit --amend`, explicitly verify all three preconditions: (a) the user requested amend OR a pre-commit hook auto-modified files for an otherwise-successful commit, (b) HEAD was created by you in this conversation (`git log -1 --format='%an %ae'`), (c) the commit has not been pushed to a remote. If any precondition fails, create a new commit instead. NEVER amend a failed/rejected commit — fix the issue and create a new one.
-13. **Run Integration Tests Yourself**: Re-read AGENTS.md "Agent Execution Limitations" before claiming you can't run a test. The CANNOT-run list is exclusively interactive commands (`colab auth`, `colab drivemount`, `colab repl`, `colab console`). Tests built on `colab new` / `colab stop` / `colab log` are non-interactive and you MUST run them yourself before declaring a fix complete. Encoded after running through a full implement-and-document cycle for a fix that the integration test would have falsified in 30 seconds — the cure was `uv run bash integration/repro_keep_alive/test.sh`.
-14. **Heed Research Caveats**: When a research subagent surfaces a caveat ("the proto allows it but the policy may reject"), treat it as a TODO to verify, not as a footnote. The validation pattern: shell out to the actual service with the proposed inputs and confirm the response matches expectations BEFORE writing the code that depends on it. For policy-gated paths, run a one-shot probe before committing to a design.
-15. **Two distinct auths — never confuse them**: This codebase has two unrelated authentication concerns: (a) **CLI-to-Colab-control-plane**: how `Client` authenticates HTTP requests to `colab.research.google.com` and `colab.pa.googleapis.com`. Driven by the global `--auth={oauth2,adc}` flag and `auth.py:get_credentials`. The OAuth2 path is bootstrapped automatically by `google_auth_oauthlib`'s `InstalledAppFlow` on first invocation when `~/.config/colab-cli/token.json` doesn't exist; **no separate command is needed** — any `--auth=oauth2` invocation (e.g. `colab --auth=oauth2 sessions`) triggers the browser consent flow. (b) **VM-side credentials**: how the `colab auth` subcommand injects user GCP credentials *into* the running Colab kernel so notebook code (e.g. `gcloud`, BigQuery client) can make authenticated calls from inside the VM. This uses the `USE_AUTH_EPHEM='0'` gcloud-fallback path executed on the kernel via `ColabRuntime`. **NEVER tell a user to "run `colab auth`" as a prerequisite for fixing CLI-side auth issues** — they're orthogonal layers and the suggestion misleads.
-16. **Detached daemons inherit nothing useful**: When spawning a detached child process via `subprocess.Popen` (e.g. `spawn_keep_alive`), the child does NOT inherit the parent's parsed Typer flags. It re-parses argv from scratch, so any global flag the parent saw via `--auth=adc` or `--config /tmp/foo.json` MUST be re-emitted as part of the child's command line. Forgetting this causes silent fallback to Typer defaults: in 2026-04-30 this manifested as the keep-alive daemon (a) using OAUTH2 instead of the parent's ADC, and (b) reading from `~/.config/colab-cli/sessions.json` instead of the parent's `--config` path. Always propagate every relevant global flag in `cmd = [sys.executable, "-m", ...]` BEFORE the subcommand name (Typer requires global flags before the subcommand).
-17. **Persist-before-spawn for daemons that read shared state**: When a detached child reads from a state file the parent owns (e.g. `state.store.get(session_name)`), the parent MUST persist BEFORE spawning. Otherwise the child can race ahead of the parent's `add()` call and observe an empty store. Symptom in 2026-04-30: keep-alive daemon exits immediately with `keep_alive_stopped reason=session_not_found iters=1 duration=0.0s`. Fix: call `state.store.add(s)` once before `spawn_keep_alive`, and again after (to capture the PID).
-18. **[SUPERSEDED 2026-06-15 — keep-alive no longer calls `colab.pa.googleapis.com`; see issue #14 / the Keep-alive note above] `colab.pa.googleapis.com` rejects ADC user creds without `X-Goog-User-Project`**: When calling `colab.pa.googleapis.com` from ADC user credentials minted by `gcloud auth application-default login`, the bearer token carries the user's gcloud quota project. The mighty-colab API key sent alongside it belongs to a different project (Colab, `1014160490159`). The backend enforces project-match between the two and returns HTTP 400 `CONSUMER_INVALID` ("The API Key and the authentication credential are from different projects."). The old fix was to send `X-Goog-User-Project: 1014160490159` to pin the consumer project — but that in turn required `serviceusage.serviceUsageConsumer` on project `1014160490159`, which ordinary users lack, yielding HTTP 403 `USER_PROJECT_DENIED` (the issue #14 root cause). Both failure modes are now moot because keep-alive uses the TFE tunnel ping on `colab.research.google.com` instead. Retained here as institutional knowledge: if any future code path must call `colab.pa.googleapis.com` with a bearer token, it will face this same project-entitlement wall for non-internal accounts.
-19. **Pydantic validation requires a schema**: `_issue_request` accepts an optional `schema=` and historically called `TypeAdapter(schema).validate_python(...)` unconditionally. When `schema=None` (a caller that doesn't care about the response body — e.g. fire-and-forget RPCs like `KeepAliveAssignment` that return `[]`), this raises `pydantic.ValidationError: Input should be None`. Always guard with `if schema is None: return` after the empty-body short-circuit.
-20. **Suggest the branch-diff review command after committing**: The user reviews changes with `git diff main..<branch-name>` (full cumulative diff against `main`, not just the latest commit). After landing one or more commits on a feature branch, ALWAYS suggest the exact command — e.g. "Review with `git diff main..sort-help-commands`" — instead of `git show <sha>` (which only shows a single commit and misses context when a branch has multiple commits). Encoded 2026-05-05 after suggesting `git show 9d9c7da` for a branch the user wanted to review holistically.
-21. **Verify research-tool claims with primary sources**: Research tools and AI assistants can be confidently wrong, especially about edge cases or features outside their training corpus. When such a tool says "X is not used / not parsed / doesn't exist", treat it as a hypothesis to verify, not a fact. Always cross-check against the primary source (the actual code or config) — and when a tool names files, check whether the indirection chain it describes actually exists. The cost of believing the tool when it's wrong is shipping a non-functional feature; the cost of double-checking is small. Encoded 2026-05-05 after a `colab url` first-cut shipped the wrong URL format because of unverified output.
-22. **Clean up orphaned assignments before finishing live tests**: After running a live integration test, `colab sessions` may show server-side assignments that the local `colab stop` couldn't see (e.g. assignments leaked from earlier in the session, or from crashed prior runs). Always run `colab sessions` as the final cleanup step, and for any `[?]`-marked orphan, run `python -c "from colab_cli.common import state; state.client.unassign('<endpoint>')"` (the CLI doesn't expose a direct unassign-by-endpoint command). Re-verify with `colab sessions` returning "No active sessions". Encoded 2026-05-05 after the first `colab url` live test left an orphan from a prior conversation turn that would have idled-out and billed compute units.
-23. **Forward unknown args through Typer with `context_settings`**: Typer/Click consumes any token starting with `-`/`--` as a flag of the parent command unless told otherwise. For a subcommand like `colab run script.py --some-script-flag` (where `--some-script-flag` belongs to the user's script, not to `colab`), declare it with `app.command(name="run", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})` and accept the positional with `Annotated[Optional[List[str]], typer.Argument(...)] = None`. Also use `repr()` (not f-string interpolation) when embedding those forwarded strings into kernel-side Python source — `repr()` produces a safe round-trippable literal regardless of the user's shell-passed quotes, backslashes, or non-ASCII bytes. Encoded 2026-05-12 while implementing `colab run`.
-24. **A test asserting on `--help`/error text can pass for a human and fail for an agent (or CI)**: Rich (which Typer uses for `--help` rendering and colored tracebacks) emits raw ANSI escape codes even under `CliRunner` — non-interactively, no real TTY — whenever the environment forces color (e.g. `FORCE_COLOR=1`, common in AI agent sandboxes and CI runners). Rich also styles multi-character tokens like `--rm` as two separately-colored spans (`\x1b[1;36m-\x1b[0m\x1b[1;36m-rm\x1b[0m`), so a naive `"--rm" in result.output` substring check silently depends on whether the *running* environment forces color, not on anything about the code under test — invisible on a plain human terminal, guaranteed to fail in a color-forcing sandbox. Always strip ANSI before asserting on captured CLI text: `re.compile(r"\x1b\[[0-9;]*[a-zA-Z]").sub("", text)` (same pattern as `mcp_server.py`'s `_strip_ansi`). Encoded 2026-08-05 after `test_ssh_help_advertises_autocreate_flags` failed for an agent but passed in the user's own terminal.
-25. **Prefer mechanisms coherent with real, well-understood semantics over inventing new interception machinery**: When a check or shim needs to reproduce how the CLI behaves in some other context, reuse the *actual* substitution already in play there rather than building a parallel interception layer (monkey-patching a module attribute, intercepting `sys.path` calls, etc.) to simulate it. `_build_script_prelude` (`execution.py`) is the model: it gives text-transmitted code real `python script.py` semantics by setting `sys.argv`/`__name__`/`__file__` — the same three names the interpreter itself would set — rather than sandboxing or rewriting the script. `import_check.py`'s pre-flight reuses that exact same `__file__` sentinel (not a new one) to catch sibling-import failures before a VM is provisioned; because it relies only on Python's own import semantics (`importlib.util.spec_from_file_location` + `module_from_spec`, never setting `__name__ == "__main__"`), it inherits the interpreter's real "importing a module doesn't run its `if __name__ == "__main__":` block" guarantee for free, instead of having to invent and separately prove a new one. Monkey-patching itself isn't foreign to this codebase — `runtime.py`'s `_apply_ws_hook` is upstream Google code from the first commit (`git blame` confirms `2ef9825`) — but reach for it only when there's no real semantic hook to reuse; prefer the latter when one exists. Encoded 2026-08-12 while designing the `run` import pre-flight, after an earlier draft would have falsely passed the exact incident it was meant to catch by running the check against the script's real `__file__` instead of the sentinel `run` actually substitutes remotely.
-26. **Use the dedicated main checkout**: This workspace has a sibling `../mighty-colab-main` checkout kept on `main`. Use it for main-branch inspection and review baselines instead of moving an active feature checkout.
-27. **Update PR branches without rewriting history**: For an open same-repository pull request, a trusted collaborator can comment `/update-branch`. The workflow merges current `main` into the PR branch only when GitHub can do so cleanly; it never rebases or force-pushes. Conflicts still require manual resolution.
-28. **Rebase feature branches with a lease**: Manual conflict resolution on an owned pull-request branch SHOULD rebase the branch onto current `origin/main`, retest, and publish with `git push --force-with-lease`. NEVER use bare `--force`, NEVER rewrite `main`, and NEVER rewrite a branch shared with another contributor without first confirming ownership. The no-history-rewrite rule applies to `main`; it does not prohibit the normal leased update of an owned feature branch after rebase.
-29. **Honor directory-scoped gcloud context for live tests**: This workspace may select `CLOUDSDK_CONFIG` and the active gcloud project through `direnv`; inspect that context instead of inferring infrastructure ownership from the checkout name. Pull-request test gating runs in GitHub Actions and is independent of the workstation's active gcloud project. The job data-plane GCS bucket and its Terraform live in the LabKit consumer project, not in this repository, and that consumer-owned bucket is valid for mighty-colab integration tests. Do not add or expect an `infra/` tree here for that data plane. If a test intentionally overrides the directory context, scope the override to the command and keep the signer service account and `--region` explicit. Encoded 2026-09-12 after a live test initially interpreted the directory-selected project as missing mighty-colab infrastructure.
-30. **Never overwrite reconciled state with a stale object**: A helper that refreshes or removes a `SessionState` can invalidate an object captured earlier in the command. Any later `finally` block MUST track the helper's outcome: skip persistence after confirmed pruning, and after retention re-read the latest stored object before clearing transient fields. Tests MUST assert the final store contents, not only an intermediate return value or message. Encoded 2026-09-13 after the issue #3 fix initially let `run --keep` and `console` overwrite refreshed credentials or resurrect confirmed-pruned bindings from their stale local objects.
 
-31. **Update every changed command's design and test real lifecycle semantics**: Shared code can alter several command surfaces at once. Re-review and update every corresponding design document to reflect current behavior, not only the shared subsystem document (see "Documentation Discipline"). A retention test MUST invoke a retention mode such as `run --keep`; default one-shot cleanup is not evidence that a binding survives. Encoded 2026-09-13 after issue #3 initially omitted the execution and run design updates and asserted retention under default `run`, whose documented teardown removes the binding.
+1. **Direct execution**: code for `auth`, `drivemount` and similar commands is
+   injected into the VM's kernel and run there.
+2. **Contents API**: file management uses the Jupyter Contents API, as in the
+   browser traces.
+3. **Transparent storage**: every local state path can be overridden with a
+   flag.
+4. **No netrc**: do not use `netrc` to store tokens.
+5. **Fire and forget**: each command does one thing and exits. Do not run
+   long tasks on background threads inside a command. For persistent work,
+   such as keep-alive, use a detached daemon process and record its pid in
+   the session state.
+6. **Detached children re-parse argv.** A child started with
+   `subprocess.Popen` (for example by `spawn_keep_alive`) does not inherit
+   the parent's parsed Typer flags. Pass every relevant global flag, such as
+   `--auth` and `--config`, on the child's command line, before the
+   subcommand name (Typer requires global flags first). Otherwise the child
+   silently uses the defaults.
+7. **Persist before spawning.** When a detached child reads a state file the
+   parent writes (for example `state.store.get(session_name)`), write the
+   record before spawning the child, and again afterwards to record its pid.
+   Otherwise the child can read the store before the parent writes it and
+   exit with `session_not_found`.
+8. **Never overwrite reconciled state with a stale object.** A helper that
+   refreshes or removes a `SessionState` can invalidate an object read
+   earlier in the command. A later `finally` block must follow the helper's
+   outcome: skip persisting after a confirmed prune, and after retention
+   read the stored object again before clearing transient fields.
+9. **`_issue_request` with no schema returns without validating.** A caller
+   that ignores the response body passes `schema=None`; validating then
+   would raise `pydantic.ValidationError`. Keep the `if schema is None:
+   return` guard after the empty-body check.
+10. **Forwarding a script's own flags**: Typer treats any token starting with
+    `-` as a flag of the command. A command that forwards flags to a script,
+    like `run script.py --script-flag`, is registered with
+    `context_settings={"allow_extra_args": True, "ignore_unknown_options": True}`
+    and takes the arguments as
+    `Annotated[Optional[List[str]], typer.Argument(...)] = None`. Embed the
+    forwarded strings into kernel-side Python with `repr()`, which produces a
+    safe literal whatever quotes, backslashes or non-ASCII bytes they contain.
+11. **Reuse real semantics instead of building interception.** When a check
+    must reproduce how the CLI behaves elsewhere, reuse the substitution that
+    already happens there instead of monkey-patching or intercepting
+    `sys.path`. `_build_script_prelude` (`execution.py`) makes transmitted
+    code run with `python script.py` semantics by setting `sys.argv`, `__name__` and
+    `__file__`, as the interpreter does. `import_check.py` reuses the same
+    `__file__` sentinel and Python's own import machinery
+    (`spec_from_file_location`, `module_from_spec`), so it inherits the rule
+    that importing a module does not run its `__main__` block. Monkey-patch
+    only when no such hook exists; `runtime.py`'s `_apply_ws_hook`, from
+    upstream, is one case.
+12. **Isolate the regression first.** When the user reports an error in code
+    you just changed, reproduce the failure on `main` first. Debug your change
+    only after confirming that the failure is new.
+13. **Treat a research caveat as a task.** When research reports a caveat,
+    such as "the proto allows it but the policy may reject it", call the
+    service with the proposed inputs and confirm the response before writing
+    code that depends on it.
+14. **Verify tool claims against primary sources.** A research tool's claim
+    that something is not used, not parsed or does not exist is a hypothesis.
+    Check it against the code or config, including whether the chain of files
+    it describes exists.
 
-## Agent Execution Limitations (What I Can vs Cannot Run)
-As an AI agent operating via non-interactive shell tools (`run_shell_command`), there are strict limits on what I can test autonomously without human intervention:
-- **I CAN Run:**
-  - Automated tests (`pytest`), linting (`ruff`), and headless execution scripts.
-  - Subcommands that don't pause for user input (e.g., `colab new`, `colab status`, `colab stop`, `colab ls`, `colab install`, `colab exec <file.py>`).
-  - **Piped `colab repl` and `colab console`**: as of 2026-05-07 both commands support piped stdin and exit cleanly on EOF (`echo 'cmd' | mighty-colab console -s s` returns in ~1.2s). The unpiped, interactive variants still cannot be run autonomously.
-  - Specially crafted mock scripts that simulate timeouts or API calls.
-- **I CANNOT Run (Requires User Assistance):**
-  - **`colab auth`**: This command relies on the traditional Gcloud fallback `input_request` (via `USE_AUTH_EPHEM='0'`), which prompts the user via Python's `input()` to click a URL, sign in, and paste back an authorization code. My shell tool will hang indefinitely on this `input()`.
-  - **`colab drivemount`**: This command prompts the user via `sys.stdin.readline()` (specifically querying `/dev/tty` to ensure input is captured) to press `Enter` after granting OAuth consent in the browser. My shell tool will timeout/hang waiting for `Enter`.
-  - **Interactive (TTY) `colab repl` / `colab console`**: When stdin is a real terminal these commands drop into interactive raw-TTY modes that require real-time keystroke streaming. My shell tools cannot support this. (Piped stdin is fine — see above.)
+## Extending Upstream CLIs
 
-Whenever working on interactive commands, I must build the core logic, write mock tests, and explicitly ask the user to run the live test in their terminal to verify success.
+Mighty Colab may change upstream command behavior and flags when its
+correctness or usability requires it. Prefer a separately named command when
+that keeps upstream mergeable without weakening Mighty Colab's design;
+upstream behavior is context, not a prohibition.
+
+## Releases
+
+The `release` Claude Code skill (`.claude/skills/release/SKILL.md`) cuts a
+release: it drafts the CHANGELOG entries for your approval, rolls the
+`Unreleased` section into a dated section on a `release/vX.Y.Z` branch, pushes
+the tag, and opens a pull request for the release commit. Pushing the tag
+starts `.github/workflows/release.yml`, which runs the tests, builds the
+package, publishes it to PyPI through trusted publishing (the `pypi`
+environment), and creates the GitHub Release from the version's CHANGELOG
+section. Merge the release pull request with "Create a merge commit", so the
+tag stays an ancestor of `main`. Run the skill only when the user asks for a
+release, and never propose one.
+
+## Agent Execution Limits
+
+An agent that runs commands through a non-interactive shell can run:
+- `pytest`, `ruff`, and other headless scripts;
+- commands that do not wait for input, such as `new`, `status`, `stop`, `ls`,
+  `install`, `exec <file.py>`, `run` and `job`;
+- `repl` and `console` with piped stdin; both exit on EOF
+  (`echo 'cmd' | mighty-colab console -s s`).
+
+These need the user, because they wait for input that a non-interactive shell
+cannot provide:
+- `mighty-colab auth`: the gcloud path (`USE_AUTH_EPHEM='0'`) waits in
+  `input()` for an authorization code pasted from a browser.
+- `mighty-colab drivemount`: waits for Enter on `/dev/tty` after the user
+  grants consent in the browser.
+- `repl` and `console` on a real TTY: they switch to raw keystroke streaming.
+
+For an interactive command, implement the logic, write tests with mocks, and
+ask the user to run the live test in their terminal.
